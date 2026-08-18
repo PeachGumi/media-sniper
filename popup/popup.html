@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    width: 420px; font: 13px/1.45 -apple-system, "Hiragino Sans", sans-serif;
+    background: #17181c; color: #e8e8ea; padding: 10px;
+  }
+  header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+  header h1 { font-size: 14px; font-weight: 700; letter-spacing: .3px; }
+  header h1 span { color: #ff7a45; }
+  .count { font-size: 11px; color: #9a9aa2; }
+  .toolbar { display: flex; gap: 6px; margin-bottom: 8px; }
+  button {
+    background: #2a2c33; border: 1px solid #3a3d46; color: #e8e8ea; border-radius: 6px;
+    padding: 5px 10px; font-size: 12px; cursor: pointer;
+  }
+  button:hover { background: #34363f; }
+  button.primary { background: #ff7a45; border-color: #ff7a45; color: #17181c; font-weight: 600; }
+  button.primary:hover { background: #ff8d5f; }
+  #status { font-size: 11px; color: #9a9aa2; margin-bottom: 6px; min-height: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #status.err { color: #ff6b6b; white-space: normal; }
+  #list { max-height: 420px; overflow-y: auto; display: flex; flex-direction: column; gap: 5px; }
+  .item {
+    display: flex; align-items: center; gap: 8px; padding: 7px 8px;
+    background: #1f2127; border: 1px solid #2a2c33; border-radius: 8px;
+  }
+  .badge {
+    flex: 0 0 auto; font-size: 10px; font-weight: 700; text-transform: uppercase;
+    padding: 2px 6px; border-radius: 4px; background: #333; color: #ccc;
+  }
+  .badge.video { background: #1d3a5f; color: #7cc4ff; }
+  .badge.hls { background: #3a2f16; color: #ffb454; }
+  .badge.audio { background: #1f3a2a; color: #6fe3a1; }
+  .badge.dash { background: #3a1f3a; color: #e08fe0; }
+  .info { flex: 1; min-width: 0; }
+  .name { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .meta { font-size: 10px; color: #8b8b93; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .item button { flex: 0 0 auto; padding: 4px 9px; font-size: 11px; }
+  .item button.dl { background: #ff7a45; border-color: #ff7a45; color: #17181c; font-weight: 700; }
+  .item button.busy { opacity: .5; cursor: default; }
+  .empty { color: #77777f; font-size: 12px; text-align: center; padding: 24px 8px; }
+  .hint { font-size: 11px; color: #6c6c74; padding: 8px 4px 0; }
+  footer { margin-top: 8px; font-size: 10px; color: #5b5b63; display: flex; justify-content: space-between; }
+  a { color: #7cc4ff; text-decoration: none; }
+</style>
+</head>
+<body>
+  <header>
+    <h1>Media<span>Sniper</span></h1>
+    <span class="count" id="count"></span>
+  </header>
+  <div class="toolbar">
+    <button id="rescan">再スキャン</button>
+    <button id="clear">クリア</button>
+    <button id="ytdlp" title="このページのURLで yt-dlp コマンドをコピー">yt-dlp コマンド</button>
+  </div>
+  <div id="status"></div>
+  <div id="list"></div>
+  <footer>
+    <span>保存先: ~/Downloads/ 直下</span>
+    <span>v0.1</span>
+  </footer>
+  <script src="../src/logic.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>
