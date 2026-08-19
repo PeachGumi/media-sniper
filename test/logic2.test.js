@@ -184,4 +184,27 @@ eq(segSB.tracks[0].segments[0], 'http://x.example.com/dir/whole.mp4', 'SegmentBa
 const tvOnly = L.parseMpdTracks(dashTpl);
 ok(tvOnly[0].segments === undefined && tvOnly[0].initUrl === undefined, 'parseMpdTracks returns no segment data');
 
+// ---- HLS alternate renditions (EXT-X-MEDIA / two-source audio) ---------------
+const twoSrc = [
+  '#EXTM3U',
+  '#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud",NAME="English",DEFAULT=YES,LANGUAGE="en",URI="audio/en.m3u8"',
+  '#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud",NAME="Japanese",DEFAULT=NO,LANGUAGE="ja",URI="audio/ja.m3u8"',
+  '#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="English",DEFAULT=NO,URI="subs/en.m3u8"',
+  '#EXT-X-STREAM-INF:BANDWIDTH=2000000,RESOLUTION=1280x720,AUDIO="aud"',
+  'v720/index.m3u8',
+  '#EXT-X-STREAM-INF:BANDWIDTH=500000,RESOLUTION=640x360,AUDIO="aud"',
+  'v360/index.m3u8',
+].join('\n');
+const twoM = L.parseM3u8(twoSrc, 'https://cdn.example.com/hls/master.m3u8');
+eq(twoM.type, 'master', 'two-source master type');
+eq(twoM.variants.length, 2, 'two-source variants');
+eq(twoM.variants[0].audioGroup, 'aud', 'variant AUDIO group captured');
+eq(twoM.media.length, 3, 'all EXT-X-MEDIA entries parsed');
+const audEn = twoM.media.find(function (m) { return m.name === 'English' && m.type === 'AUDIO'; });
+ok(!!audEn && audEn.isDefault, 'DEFAULT=YES rendition flagged');
+eq(audEn.uri, 'https://cdn.example.com/hls/audio/en.m3u8', 'audio rendition URI resolved');
+eq(twoM.media.filter(function (m) { return m.type === 'AUDIO'; }).length, 2, 'subtitle rendition not counted as audio');
+// media playlist with no renditions stays empty
+eq(L.parseM3u8('#EXTM3U\n#EXTINF:2,\nseg0.ts\n#EXT-X-ENDLIST', 'https://a/x.m3u8').media.length, 0, 'no renditions -> empty media list');
+
 report('logic2');

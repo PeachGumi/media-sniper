@@ -121,7 +121,8 @@ function save(item, btn) {
   if (item.kind === 'hls' || item.kind === 'hls-audio' || item.kind === 'dash') {
     chrome.runtime.sendMessage(
       { type: 'ms-hls-download', url: item.url, tabId: tabId, title: item.title, pageUrl: pageUrl,
-        dashEntry: item.dashEntry != null ? item.dashEntry : null, dashType: item.dashType || null },
+        dashEntry: item.dashEntry != null ? item.dashEntry : null, dashType: item.dashType || null,
+        audioUrl: item.audioUrl || null },
       (resp) => {
         if (chrome.runtime.lastError) { setStatus('エラー: ' + chrome.runtime.lastError.message, true); btn.classList.remove('busy'); btn.textContent = '保存'; return; }
         if (resp && resp.error) { setStatus(resp.error, true); btn.classList.remove('busy'); btn.textContent = '保存'; return; }
@@ -229,6 +230,9 @@ function pollHls(item, btn) {
       }
     });
   }, 700);
+  // replace (don't stack) the poll timer when the same item is saved again
+  const prev = hlsTimers.get(item.key);
+  if (prev) clearInterval(prev);
   hlsTimers.set(item.key, t);
 }
 

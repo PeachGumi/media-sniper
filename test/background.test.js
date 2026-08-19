@@ -794,6 +794,48 @@ async function run() {
   eq(chrome.__dashBuilds.length, 2, 'no dash build attempted for unparseable manifest');
   ctxRef.fetch = origFetch;
 
+  // --- 17. two-source HLS: separate audio rendition (VDH two_sources) --------
+  ctxRef.fetch = function (url, opts) {
+    chrome.__swFetchLog.push(url);
+    chrome.__swFetchOpts.push({ url: url, opts: opts || {} });
+    if (url.indexOf('two.m3u8') >= 0) {
+      return Promise.resolve({ ok: true, text: function () {
+        return Promise.resolve([
+          '#EXTM3U',
+          '#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud",NAME="Japanese",DEFAULT=YES,URI="aud/ja.m3u8"',
+          '#EXT-X-STREAM-INF:BANDWIDTH=2000000,RESOLUTION=1280x720,AUDIO="aud"',
+          'two-video.m3u8',
+        ].join('\n'));
+      } });
+    }
+    if (url.indexOf('two-video.m3u8') >= 0 || url.indexOf('ja.m3u8') >= 0) {
+      return Promise.resolve({ ok: true, text: function () {
+        return Promise.resolve('#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.0,\nseg0.ts\n#EXT-X-ENDLIST\n');
+      } });
+    }
+    return origFetch(url, opts);
+  };
+  wr({
+    statusCode: 200, url: 'https://cdn.example.com/v4/two.m3u8', tabId: 7,
+    initiator: 'https://site.example.com/', type: 'xmlhttprequest',
+    responseHeaders: [{ name: 'content-type', value: 'application/vnd.apple.mpegurl' }],
+  });
+  await settle();
+  r = await send(chrome, { type: 'ms-get-items', tabId: 7 });
+  const two = r.items.find(function (i) { return i.url.indexOf('two-video.m3u8') >= 0; });
+  ok(!!two, 'two-source variant surfaced');
+  ok(!!two && two.audioUrl && two.audioUrl.indexOf('aud/ja.m3u8') >= 0, 'variant carries resolved audio rendition URL');
+  // save it: the ffmpeg job must receive the audio URL for the 2-input mux
+  chrome.__ffmpegRuns.length = 0;
+  const twoResp = await send(chrome, { type: 'ms-hls-download', url: two.url, title: 'Two Source', audioUrl: two.audioUrl }, { tab: { id: 7 } });
+  ok(twoResp && twoResp.queued, 'two-source download queued');
+  eq(chrome.__ffmpegRuns.length, 1, 'one ffmpeg run');
+  eq(chrome.__ffmpegRuns[0].audioUrl.indexOf('ja.m3u8') >= 0, true, 'ffmpeg job got the separate audio playlist');
+  // headers replayed for BOTH playlists (captured Authorization must reach jsfetch)
+  const twoHdrs = chrome.__ffmpegRuns[0].headers;
+  ok(twoHdrs && typeof twoHdrs === 'object', 'two-source job has headers object');
+  ctxRef.fetch = origFetch;
+
   report('background');
 }
 

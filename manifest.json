@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Media Sniper",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "Detects videos, HLS streams and audio from any page using the browser's own session (with a dedicated YouTube adapter), and saves them to ~/Downloads.",
   "minimum_chrome_version": "110",
   "permissions": ["downloads", "storage", "tabs", "webRequest", "offscreen"],

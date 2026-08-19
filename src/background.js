@@ -85,6 +85,7 @@ function normalizeItem(raw, tabId) {
     duration: Number(raw.duration) || 0,
     dashEntry: raw.dashEntry != null ? raw.dashEntry : null,
     dashType: raw.dashType || null,
+    audioUrl: raw.audioUrl || null, // separate-track audio playlist (HLS two-source)
     tabId: tabId,
   };
   return item;
@@ -369,6 +370,7 @@ async function offscreenFfmpegRun(req) {
     type: 'ms-offscreen-ffmpeg-run',
     jobId: req.jobId,
     url: req.url,
+    audioUrl: req.audioUrl || null,
     ext: req.ext || 'mp4',
     live: !!req.live,
     headers: req.headers || {},
@@ -445,13 +447,20 @@ async function runHlsJob(jobKey, playlistUrl) {
   // combiner could not: AES-128 keys, fMP4/BYTERANGE, TS->MP4 remux.
   job.mode = 'ffmpeg';
   job.ext = audioOnly ? 'aac' : 'mp4';
+  // Separate-track audio (VDH "m3u8_audio_video_two_sources"): the variant's
+  // video playlist has no in-band audio, so ffmpeg gets a second -i for the
+  // audio playlist and maps one stream from each. VOD only — live two-source
+  // muxing is not worth the complexity here.
+  const twoSource = !audioOnly && !media.live && job.audioUrl;
+  const audioHeaders = twoSource ? Object.assign({}, headersFor(mediaUrl, hdrs), headersFor(job.audioUrl, hdrs)) : null;
   const req = {
     jobId: playlistUrl,
     kind: 'hls',
     url: mediaUrl,
+    audioUrl: twoSource ? job.audioUrl : null,
     ext: job.ext,
     live: !!media.live,
-    headers: headersFor(mediaUrl, hdrs),
+    headers: twoSource ? audioHeaders : headersFor(mediaUrl, hdrs),
   };
 
   if (media.live) {
@@ -571,7 +580,7 @@ async function offscreenDashBuild(req, job) {
   return { url: resp.url, size: resp.size || 0 };
 }
 
-function startHls(tabId, jobKey, url, title, pageUrl, dashEntry, dashType) {
+function startHls(tabId, jobKey, url, title, pageUrl, dashEntry, dashType, audioUrl) {
   const existing = state.hlsJobs.get(jobKey);
   if (existing && (existing.status === 'fetching' || existing.status === 'combining' || existing.status === 'recording')) {
     return Promise.resolve({ alreadyRunning: true });
@@ -582,6 +591,7 @@ function startHls(tabId, jobKey, url, title, pageUrl, dashEntry, dashType) {
     seconds: 0, bytes: 0, startedAt: 0, mode: null, ext: null,
     dashEntry: dashEntry != null ? dashEntry : null,
     dashType: dashType || null,
+    audioUrl: audioUrl || null,
   });
   const runner = /\.mpd(\?|$)/i.test(url) ? runDashJob : runHlsJob;
   return runner(jobKey, url).catch(function (err) {
@@ -662,6 +672,22 @@ function enrichFromCapture(item) {
   return item;
 }
 
+// VDH "m3u8_audio_video_two_sources": pick the alternate audio rendition the
+// variant points at (EXT-X-MEDIA TYPE=AUDIO). Only attach audio when the
+// variant EXPLICITLY references an AUDIO group — per the HLS spec a variant
+// without an AUDIO attribute carries its audio in-band, and muxing in a
+// separate rendition there would drop the in-band track. Prefer DEFAULT=YES,
+// else the first rendition with a URI in the referenced group.
+function pickAudioUrl(parsed, variant) {
+  if (!variant || !variant.audioGroup) return null;
+  const candidates = (parsed.media || []).filter(function (m) {
+    return m.type === 'AUDIO' && m.uri && m.groupId === variant.audioGroup;
+  });
+  if (!candidates.length) return null;
+  for (const m of candidates) { if (m.isDefault) return m.uri; }
+  return candidates[0].uri;
+}
+
 function onResponseStarted(details) {
   try {
     if (details.statusCode < 200 || details.statusCode > 299) return;
@@ -714,6 +740,7 @@ function onResponseStarted(details) {
               url: vurl, kind: 'hls', contentType: ct || null, size: 0,
               via: 'webrequest', pageUrl: pageUrl,
               title: (baseTitle || 'video') + label, duration: 0,
+              audioUrl: (function () { const a = pickAudioUrl(parsed, v); return a ? withToken(a, v.token) : null; })(),
             };
           });
           addItems(details.tabId, metas);
@@ -851,7 +878,7 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
     case 'ms-download': {
       const item = normalizeItem(msg.item, tabId);
       if (!item) { sendResponse({ error: 'invalid item' }); return false; }
-      enrichFromCapture(item, tabId);
+      enrichFromCapture(item);
       const entry = enqueue(item);
       sendResponse({ queued: true, id: entry.id });
       return false;
@@ -868,7 +895,7 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
     }
     case 'ms-hls-download': {
       const jobKey = msg.url + (msg.dashEntry != null && msg.dashEntry >= 0 ? '#dash-entry=' + msg.dashEntry : '');
-      startHls(tabId, jobKey, msg.url, msg.title, msg.pageUrl, msg.dashEntry != null ? msg.dashEntry : null, msg.dashType || null).then(sendResponse);
+      startHls(tabId, jobKey, msg.url, msg.title, msg.pageUrl, msg.dashEntry != null ? msg.dashEntry : null, msg.dashType || null, msg.audioUrl || null).then(sendResponse);
       return true;
     }
     case 'ms-hls-stop': {

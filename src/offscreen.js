@@ -100,6 +100,10 @@ let lastDone = null; // result of the most recent finished job (SW-restart recov
 async function runFfmpegJob(msg, sendResponse) {
   if (current) { sendResponse({ error: '別のffmpegジョブが実行中です' }); return; }
   const jobId = msg.jobId || msg.url;
+  // Reserve synchronously BEFORE any await: the guard above is the only thing
+  // keeping two wasm instances out of this document, and the wasm boot +
+  // ffmpeg run are long awaits — a late-arriving job must see us as busy.
+  current = { libav: null, jobId: jobId, chunks: null };
   activeHeaders = msg.headers || {};
   lastDone = null;
   const chunks = [];
@@ -111,7 +115,8 @@ async function runFfmpegJob(msg, sendResponse) {
       noworker: true,
       wasmurl: chrome.runtime.getURL('src/libav/libav-6.5.7.1-h264-aac-mp3.wasm.wasm'),
     });
-    current = { libav: libav, jobId: jobId, chunks: chunks };
+    current.libav = libav;
+    current.chunks = chunks;
 
     const OUT = 'out.' + (msg.ext || 'mp4');
     await libav.mkwriterdev(OUT);
@@ -128,7 +133,17 @@ async function runFfmpegJob(msg, sendResponse) {
     // (headless returns null instantly, which is why tests never saw it).
     const args = ['-y', '-nostdin'];
     args.push('-analyzeduration', '10M', '-f', 'hls', '-i', 'jsfetch:' + msg.url);
-    args.push('-c', 'copy', '-avoid_negative_ts', 'make_zero');
+    if (msg.audioUrl) {
+      // VDH "m3u8_audio_video_two_sources": separate audio rendition
+      // playlist. -map 0:v:0 + 1:a:0? = video from the first input, audio
+      // from the second (the "?" tolerates a missing audio stream).
+      args.push('-i', 'jsfetch:' + msg.audioUrl);
+    }
+    args.push('-c', 'copy');
+    if (msg.audioUrl) {
+      args.push('-map', '0:v:0', '-map', '1:a:0?');
+    }
+    args.push('-avoid_negative_ts', 'make_zero');
     if (msg.live) {
       // fragmented MP4: the file stays playable when recording is interrupted
       args.push('-movflags', 'frag_keyframe+empty_moov+default_base_moof');
@@ -300,8 +315,10 @@ async function handleDashBuild(msg, sendResponse) {
   const video = msg.video || null;
   const audio = msg.audio || null;
   if (!video && !audio) { sendResponse({ error: 'DASHトラックがありません' }); return; }
-  let done = 0;
+  // Reserve before the long segment-fetch awaits (same reason as runFfmpegJob)
   const jobId = msg.playlistUrl || 'dash';
+  current = { libav: null, jobId: jobId, chunks: null };
+  let done = 0;
   const progress = function () {
     done++;
     try {
@@ -330,7 +347,7 @@ async function handleDashBuild(msg, sendResponse) {
       noworker: true,
       wasmurl: chrome.runtime.getURL('src/libav/libav-6.5.7.1-h264-aac-mp3.wasm.wasm'),
     });
-    current = { libav: libav, jobId: jobId, chunks: [] };
+    current.libav = libav;
 
     const chunks = [];
     await libav.mkwriterdev('out.mp4');

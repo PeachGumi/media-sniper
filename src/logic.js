@@ -168,7 +168,7 @@ const MediaSniperLogic = (function () {
   }
 
   function parseM3u8(text, baseUrl) {
-    const out = { type: null, variants: [], segments: [], encrypted: false, live: false, initUrl: null };
+    const out = { type: null, variants: [], segments: [], encrypted: false, live: false, initUrl: null, media: [] };
     const lines = String(text).split(/\r?\n/);
     const parentToken = (function () {
       try { const s = new URL(baseUrl).search; return s ? s.slice(1) : ''; } catch (e) { return ''; }
@@ -184,6 +184,17 @@ const MediaSniperLogic = (function () {
       } else if (line.indexOf('#EXT-X-KEY:') === 0) {
         const attrs = parseAttrs(line.slice('#EXT-X-KEY:'.length));
         if (attrs.METHOD && attrs.METHOD !== 'NONE') out.encrypted = true;
+      } else if (line.indexOf('#EXT-X-MEDIA:') === 0) {
+        // alternate renditions (separate audio playlists, VDH "two sources")
+        const attrs = parseAttrs(line.slice('#EXT-X-MEDIA:'.length));
+        out.media.push({
+          type: String(attrs.TYPE || '').toUpperCase(),
+          groupId: attrs['GROUP-ID'] || null,
+          name: attrs.NAME || null,
+          language: attrs.LANGUAGE || null,
+          uri: attrs.URI ? resolveUrl(baseUrl, attrs.URI) : null,
+          isDefault: /^(YES|TRUE)$/i.test(attrs.DEFAULT || ''),
+        });
       } else if (line.indexOf('#EXT-X-MAP:') === 0) {
         const attrs = parseAttrs(line.slice('#EXT-X-MAP:'.length));
         if (attrs.URI) out.initUrl = resolveUrl(baseUrl, attrs.URI);
@@ -203,6 +214,7 @@ const MediaSniperLogic = (function () {
             bandwidth: parseInt(pending.BANDWIDTH, 10) || 0,
             resolution: pending.RESOLUTION || null,
             codecs: pending.CODECS || null,
+            audioGroup: pending.AUDIO || null,
             token: parentToken,
           });
           pending = null;
