@@ -25,10 +25,21 @@ function shortUrl(u) {
 
 function formatBytes(n) { return L().formatBytes(n); }
 
+function fmtDuration(sec) {
+  const s = Math.round(sec);
+  if (s < 60) return s + 's';
+  const m = Math.floor(s / 60);
+  const r = s % 60;
+  if (m < 60) return r ? m + 'm' + r + 's' : m + 'm';
+  const h = Math.floor(m / 60);
+  return h + 'h' + (m % 60) + 'm';
+}
+
 function labelFor(item) {
   switch (item.kind) {
     case 'video': return '動画';
     case 'hls': return 'HLS';
+    case 'hls-audio': return '音声(HLS)';
     case 'audio': return '音声';
     case 'dash': return 'DASH';
     case 'ts': return 'TS';
@@ -66,7 +77,7 @@ function render() {
     meta.className = 'meta';
     const bits = [];
     if (item.size) bits.push(formatBytes(item.size));
-    if (item.duration) bits.push(Math.round(item.duration) + 's');
+    if (item.duration) bits.push(fmtDuration(item.duration));
     if (item.via) bits.push(item.via);
     meta.textContent = bits.join(' · ') || item.contentType || '';
     info.appendChild(name);
@@ -93,19 +104,36 @@ function render() {
 }
 
 function save(item, btn) {
-  if (item.kind === 'dash') {
-    setStatus('DASH(mpd)は未対応 — yt-dlp コマンドで落としてください', true);
+  // live recording in progress: this same button is the stop control
+  if (btn.dataset.recording === '1') {
+    chrome.runtime.sendMessage({ type: 'ms-hls-stop', url: item.url }, (resp) => {
+      if (chrome.runtime.lastError || (resp && resp.ok === false)) {
+        setStatus('停止失敗 — もう一度押してください', true);
+        return;
+      }
+      btn.textContent = '停止中';
+      setStatus('録画を停止しています…');
+    });
     return;
   }
   btn.classList.add('busy');
   btn.textContent = '…';
-  if (item.kind === 'hls') {
+  if (item.kind === 'hls' || item.kind === 'hls-audio' || item.kind === 'dash') {
     chrome.runtime.sendMessage(
-      { type: 'ms-hls-download', url: item.url, tabId: tabId, title: item.title, pageUrl: pageUrl },
+      { type: 'ms-hls-download', url: item.url, tabId: tabId, title: item.title, pageUrl: pageUrl,
+        dashEntry: item.dashEntry != null ? item.dashEntry : null, dashType: item.dashType || null },
       (resp) => {
         if (chrome.runtime.lastError) { setStatus('エラー: ' + chrome.runtime.lastError.message, true); btn.classList.remove('busy'); btn.textContent = '保存'; return; }
         if (resp && resp.error) { setStatus(resp.error, true); btn.classList.remove('busy'); btn.textContent = '保存'; return; }
-        setStatus('HLS セグメント取得中… (ページ内で処理)');
+        if (resp && resp.alreadyRunning) { setStatus('既に実行中です'); btn.classList.remove('busy'); btn.textContent = '保存'; return; }
+        if (resp && resp.recording) {
+          // live: recording started; poll will flip the button to 停止
+          setStatus('録画を開始しました — 停止で保存されます');
+          btn.textContent = '録画中';
+          pollHls(item, btn);
+          return;
+        }
+        setStatus(item.kind === 'dash' ? 'DASH取得中…' : 'HLS セグメント取得中…');
         btn.textContent = '取得中';
         pollHls(item, btn);
       }
@@ -117,18 +145,15 @@ function save(item, btn) {
     : { type: 'ms-download', item: item, tabId: tabId };
   chrome.runtime.sendMessage(msg, (resp) => {
     if (chrome.runtime.lastError) { setStatus('エラー: ' + chrome.runtime.lastError.message, true); btn.classList.remove('busy'); btn.textContent = '保存'; return; }
+    if (resp && resp.error) { setStatus('失敗: ' + resp.error, true); btn.classList.remove('busy'); btn.textContent = '保存'; return; }
     btn.textContent = 'キュー追加';
-    if (item.via === 'youtube') {
-      // YouTube URLs can be 403-blocked outside a logged-in context; watch
-      // the queue entry briefly so we can point the user at yt-dlp instead.
-      watchQueueEntry(resp.id, btn);
-    } else {
-      setTimeout(() => { btn.classList.remove('busy'); btn.textContent = '保存'; }, 1200);
-    }
+    // Every download gets watched: failures must always surface (a silent
+    // button is the "保存を押しても何も起きない" bug).
+    watchQueueEntry(resp.id, btn, item.via === 'youtube');
   });
 }
 
-function watchQueueEntry(entryId, btn) {
+function watchQueueEntry(entryId, btn, isYoutube) {
   const started = Date.now();
   const t = setInterval(() => {
     chrome.runtime.sendMessage({ type: 'ms-queue-status' }, (qs) => {
@@ -142,10 +167,13 @@ function watchQueueEntry(entryId, btn) {
       } else if (e.status === 'failed') {
         clearInterval(t);
         btn.classList.remove('busy'); btn.textContent = '保存';
-        const forbidden = /FORBIDDEN|403|UNAUTHORIZED/i.test(e.error || '');
-        setStatus(forbidden
+        const forbidden = /FORBIDDEN|403|UNAUTHORIZED|http 403|http 401/i.test(e.error || '');
+        setStatus(forbidden && isYoutube
           ? 'YouTubeが直接ダウンロードを拒否しました — 下の「yt-dlp」ボタンでコマンドをコピーして使ってください'
-          : '失敗: ' + e.error, true);
+          : '失敗: ' + (e.error || 'unknown'), true);
+      } else if (e.status === 'fallback') {
+        btn.textContent = '再試行中';
+        setStatus('CDNが直接アクセスを拒否したため、セッション付きで再取得しています…');
       } else if (Date.now() - started > 30000) {
         clearInterval(t);
         btn.classList.remove('busy'); btn.textContent = '保存';
@@ -156,20 +184,48 @@ function watchQueueEntry(entryId, btn) {
 }
 
 function pollHls(item, btn) {
+  // Poll until the job truly finishes: the blob download itself can still
+  // fail AFTER the "downloading" state, so keep watching for complete/failed.
+  const started = Date.now();
   const t = setInterval(() => {
-    chrome.runtime.sendMessage({ type: 'ms-hls-status', url: item.url }, (job) => {
-      if (chrome.runtime.lastError || !job) return;
+    chrome.runtime.sendMessage({ type: 'ms-hls-status', url: item.url, dashEntry: item.dashEntry != null ? item.dashEntry : null }, (job) => {
+      if (chrome.runtime.lastError || !job) {
+        // job vanished (SW restart): tell the user instead of hanging forever
+        clearInterval(t);
+        btn.classList.remove('busy'); btn.textContent = '保存';
+        setStatus('HLSジョブの状態を見失いました — もう一度「保存」を押してください', true);
+        return;
+      }
+      if (job.status === 'recording') {
+        // live: show elapsed time/size, button becomes the stop control
+        btn.dataset.recording = '1';
+        btn.textContent = '停止';
+        setStatus('録画中 ' + fmtDuration(job.seconds) + ' · ' + formatBytes(job.bytes) + ' — 停止を押すと保存されます');
+        return;
+      }
+      btn.dataset.recording = '';
       if (job.status === 'combining' && job.total) {
         btn.textContent = Math.round((job.done / job.total) * 100) + '%';
+        setStatus('セグメント取得中 ' + job.done + '/' + job.total);
+      } else if (job.status === 'combining' && job.mode === 'ffmpeg') {
+        btn.textContent = job.bytes ? formatBytes(job.bytes) : '処理中';
+        setStatus('ffmpeg処理中… ' + (job.seconds ? fmtDuration(job.seconds) : ''));
       } else if (job.status === 'downloading') {
         btn.textContent = '保存中';
+        setStatus('結合完了 — ダウンロードに保存中…');
+      } else if (job.status === 'complete') {
         clearInterval(t);
-        setTimeout(() => { btn.classList.remove('busy'); btn.textContent = '保存'; setStatus('HLS をダウンロードに渡しました'); }, 1500);
+        btn.classList.remove('busy'); btn.textContent = '保存';
+        setStatus('保存しました: ' + (job.filename || ''));
       } else if (job.status === 'failed') {
         clearInterval(t);
         btn.classList.remove('busy');
         btn.textContent = '保存';
-        setStatus('HLS失敗: ' + (job.error || 'unknown'), true);
+        setStatus('失敗: ' + (job.error || 'unknown'), true);
+      } else if (Date.now() - started > 30 * 60 * 1000) {
+        clearInterval(t);
+        btn.classList.remove('busy'); btn.textContent = '保存';
+        setStatus('タイムアウト — 長い動画は時間がかかります。進捗はステータスを確認', true);
       }
     });
   }, 700);
@@ -194,7 +250,13 @@ $('#rescan').addEventListener('click', () => {
   if (tabId == null) return;
   chrome.tabs.sendMessage(tabId, { type: 'ms-scan' }, () => { void chrome.runtime.lastError; });
   setStatus('スキャン中…');
-  setTimeout(load, 900);
+  const before = items.length;
+  let polls = 0;
+  const t = setInterval(() => {
+    polls++;
+    load();
+    if (polls >= 6 || items.length > before) { clearInterval(t); }
+  }, 500);
 });
 
 $('#clear').addEventListener('click', () => {

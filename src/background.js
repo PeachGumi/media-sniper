@@ -30,19 +30,29 @@ const state = {
 // storage helpers (chrome.storage.session survives SW restarts)
 // ---------------------------------------------------------------------------
 function persistItems() {
-  const obj = {};
-  state.itemsByTab.forEach(function (items, tabId) { obj[tabId] = items; });
-  return chrome.storage.session.set({ msItems: obj });
+  // never write a partial map over storage before restore has merged it
+  return restorePromise.then(function () {
+    const obj = {};
+    state.itemsByTab.forEach(function (items, tabId) { obj[tabId] = items; });
+    return chrome.storage.session.set({ msItems: obj });
+  });
 }
 
 function restoreItems() {
   return chrome.storage.session.get('msItems').then(function (r) {
     const obj = r.msItems || {};
     Object.keys(obj).forEach(function (tabId) {
-      state.itemsByTab.set(Number(tabId), obj[tabId]);
+      const t = Number(tabId);
+      // merge, never clobber: items detected during boot win
+      if (!state.itemsByTab.has(t)) state.itemsByTab.set(t, obj[tabId]);
     });
   });
 }
+
+// Restore runs at SW boot; message handlers that read restored state must
+// await this (otherwise a freshly-woken SW answers the popup with an empty
+// list — the "scan feels broken/slow" race).
+const restorePromise = restoreItems();
 
 // ---------------------------------------------------------------------------
 // item intake
@@ -64,7 +74,7 @@ function normalizeItem(raw, tabId) {
   if (ext === 'm3u8' || ext === 'mpd') ext = null; // combined output, not playlist text
   const item = {
     url: url,
-    key: L.itemKey(url),
+    key: L.itemKey(url) + (raw.dashEntry != null ? '#e' + raw.dashEntry : ''),
     kind: kind || 'video',
     ext: ext,
     contentType: raw.contentType || null,
@@ -73,6 +83,8 @@ function normalizeItem(raw, tabId) {
     pageUrl: raw.pageUrl || null,
     title: raw.title || null,
     duration: Number(raw.duration) || 0,
+    dashEntry: raw.dashEntry != null ? raw.dashEntry : null,
+    dashType: raw.dashType || null,
     tabId: tabId,
   };
   return item;
@@ -141,6 +153,22 @@ function pump() {
 
 function startOne(entry) {
   const url = entry.item.url;
+  if (url.indexOf('blob:') === 0) { startDirect(entry); return; }
+  // Auth-protected CDNs (X/Twitter's video CDN above all): chrome.downloads
+  // cannot send custom headers, and those CDNs answer a headerless request
+  // with 200 + a tiny error body — a "successful" download that is junk.
+  // If the player itself needed Authorization for this URL, skip the direct
+  // attempt and fetch through the offscreen document with the header.
+  const hdrs = headersFor(url, entry.item.headers);
+  if (hdrs && (hdrs.Authorization || hdrs.authorization)) {
+    fallbackDownload(entry);
+    return;
+  }
+  startDirect(entry);
+}
+
+function startDirect(entry) {
+  const url = entry.item.url;
   const opts = { url: url };
   // ユーザー指定: フォルダ管理なし、~/Downloads 直下にフラット保存。
   // conflictAction は uniquify: 同名ファイルは上書きせず番号付きで残す。
@@ -180,26 +208,86 @@ chrome.downloads.onChanged.addListener(function (delta) {
     entry.status = 'complete';
     state.downloadToItem.delete(delta.id);
     state.active.delete(entry.id);
+    if (entry.hlsUrl) {
+      const j = state.hlsJobs.get(entry.hlsUrl);
+      if (j) j.status = 'complete';
+    }
     pump();
   } else if (s === 'interrupted') {
+    const errCode = (delta.error && delta.error.current) || 'interrupted';
+    // CDN refused the bare download (403 / auth / hotlink protection):
+    // retry through a SW fetch that carries the browser's cookies plus the
+    // headers we captured from the player's own requests (VDH sent_headers).
+    const retriable = /FORBIDDEN|UNAUTHORIZED|ACCESS_DENIED|NETWORK_FAILED/i.test(errCode);
+    if (retriable && !entry.triedFallback && entry.item && entry.item.url.indexOf('blob:') !== 0) {
+      entry.triedFallback = true;
+      state.downloadToItem.delete(delta.id);
+      fallbackDownload(entry);
+      return; // keep the queue slot; fallback re-registers or frees it
+    }
     entry.status = 'failed';
-    entry.error = (delta.error && delta.error.current) || 'interrupted';
+    entry.error = errCode;
     state.downloadToItem.delete(delta.id);
     state.active.delete(entry.id);
+    if (entry.hlsUrl) {
+      const j = state.hlsJobs.get(entry.hlsUrl);
+      if (j) { j.status = 'failed'; j.error = errCode; }
+    }
     pump();
   }
 });
 
 // ---------------------------------------------------------------------------
-// HLS orchestration: entirely in the service worker.
-// SW has <all_urls> host_permissions, so it can fetch segments with cookies
-// (credentials: 'include'), concatenate them, and hand a blob to downloads.
-// This avoids the page-world blob URL cross-context problem.
+// Fallback download: fetch the media in the service worker (cookies +
+// captured player headers), then hand the bytes to chrome.downloads via an
+// offscreen blob URL. Used when chrome.downloads.download gets 403'd by a
+// hotlink-protecting CDN.
+// ---------------------------------------------------------------------------
+function fallbackDownload(entry) {
+  const item = entry.item;
+  entry.status = 'fallback';
+  // captured player headers first (webRequest path), item.headers second
+  // (popup/adapter path)
+  const headers = headersFor(item.url, item.headers);
+  // offscreen fetches the body itself (bytes never cross SW messaging)
+  const mime = item.contentType || 'video/mp4';
+  makeBlobUrlFromRemote(item.url, mime, headers).then(function (made) {
+    return chrome.downloads.download({
+      url: made.url,
+      filename: entry.filename,
+      conflictAction: 'uniquify',
+      saveAs: false,
+    });
+  }).then(function (downloadId) {
+    entry.downloadId = downloadId;
+    state.downloadToItem.set(downloadId, entry);
+  }).catch(function (err) {
+    entry.status = 'failed';
+    entry.error = String(err && err.message || err);
+    state.active.delete(entry.id);
+    if (entry.hlsUrl) {
+      const j = state.hlsJobs.get(entry.hlsUrl);
+      if (j) { j.status = 'failed'; j.error = entry.error; }
+    }
+    pump();
+  });
+}
+
+// ---------------------------------------------------------------------------
+// HLS orchestration: parsed in the service worker, bytes fetched & combined
+// in the offscreen document.
+//
+// WHY offscreen does the byte work: on Brave 151 an ArrayBuffer sent through
+// chrome.runtime.sendMessage arrives at the other side as a plain {} —
+// segments sent SW -> offscreen produced a file of "[object Object]"
+// (8 x 188-byte segments = 120-byte "video", the empty-file bug). So the SW
+// only sends URLs + headers (small, structured-clone-safe) and the offscreen
+// document fetches, combines, and mints the blob URL itself.
 // ---------------------------------------------------------------------------
 const HLS_CONCURRENCY = 6;
 
 async function ensureOffscreen() {
-  if (!chrome.offscreen) return;
+  if (!chrome.offscreen) throw new Error('offscreen API unavailable');
   try {
     if (typeof chrome.offscreen.hasDocument === 'function') {
       const has = await chrome.offscreen.hasDocument();
@@ -208,35 +296,91 @@ async function ensureOffscreen() {
     await chrome.offscreen.createDocument({
       url: 'src/offscreen.html',
       reasons: ['BLOBS'],
-      justification: 'Create blob URL for combined media segments',
+      justification: 'Fetch and combine media segments, create blob URL',
     });
   } catch (e) {
     // "Only a single offscreen" error is fine
   }
 }
 
-async function makeBlobUrl(parts, mime) {
+// Fetch a media body and return a blob URL for it (fallback download path).
+// Bytes stay inside the offscreen document.
+async function makeBlobUrlFromRemote(url, mime, headers) {
   await ensureOffscreen();
   const resp = await chrome.runtime.sendMessage({
-    type: 'ms-offscreen-blob',
-    parts: parts,
+    type: 'ms-offscreen-fetch-blob',
+    url: url,
     mime: mime || 'application/octet-stream',
+    headers: headers || {},
   });
-  if (!resp || !resp.url) throw new Error('offscreen blob creation failed' + (resp && resp.error ? ': ' + resp.error : ''));
+  if (!resp || !resp.url) throw new Error('offscreen fetch failed' + (resp && resp.error ? ': ' + resp.error : ''));
   return { url: resp.url, size: resp.size || 0 };
 }
 
-function swFetchText(url) {
-  return fetch(url, { credentials: 'include' }).then(function (res) {
-    if (!res.ok) throw new Error('http ' + res.status);
-    return res.text();
+// Delegate segment fetch + combine + blob creation to the offscreen document.
+// Progress comes back as plain counters via 'ms-hls-progress' messages.
+// Used for the audio-only ADTS path (X Spaces): raw concat is byte-perfect.
+async function offscreenHlsBuild(req, job) {
+  await ensureOffscreen();
+  const resp = await chrome.runtime.sendMessage({
+    type: 'ms-offscreen-hls-build',
+    playlistUrl: req.playlistUrl,
+    segments: req.segments,
+    initUrl: req.initUrl,
+    headers: req.headers,
+    mime: req.mime,
   });
+  if (job) job.done = job.total; // message may race; final state is authoritative
+  if (!resp || !resp.url) throw new Error('offscreen hls build failed' + (resp && resp.error ? ': ' + resp.error : ''));
+  return { url: resp.url, size: resp.size || 0 };
 }
 
-function swFetchSegment(url) {
-  return fetch(url, { credentials: 'include' }).then(function (res) {
-    if (!res.ok) throw new Error('segment http ' + res.status);
-    return res.arrayBuffer();
+// Run an HLS ffmpeg job inside the offscreen document (VDH's architecture:
+// the browser session is fed to ffmpeg through the jsfetch protocol, so
+// ffmpeg natively handles AES-128 keys, fMP4/BYTERANGE, TS->MP4 remux and
+// live recording). DASH does NOT go through here — see runDashJob.
+async function offscreenFfmpegRun(req) {
+  await ensureOffscreen();
+  // SW-restart recovery: the SW can die between "offscreen finished" and
+  // "download queued". If the offscreen document still holds the result for
+  // this jobId (or is still running the same job), reuse it instead of
+  // re-running a multi-gigabyte ffmpeg job from scratch.
+  try {
+    const st = await chrome.runtime.sendMessage({ type: 'ms-offscreen-ffmpeg-status' });
+    if (st) {
+      if (st.done && st.done.jobId === req.jobId && !st.running) {
+        return { url: st.done.url, size: st.done.size || 0, partial: !!st.done.partial };
+      }
+      if (st.running && st.jobId === req.jobId) {
+        // wait for the surviving offscreen job to finish
+        const started = Date.now();
+        while (Date.now() - started < 30 * 60 * 1000) {
+          const s2 = await chrome.runtime.sendMessage({ type: 'ms-offscreen-ffmpeg-status' });
+          if (s2 && !s2.running && s2.done && s2.done.jobId === req.jobId) {
+            return { url: s2.done.url, size: s2.done.size || 0, partial: !!s2.done.partial };
+          }
+          if (!s2 || !s2.running) break; // job vanished: re-run below
+          await new Promise(function (r) { setTimeout(r, 1500); });
+        }
+      }
+    }
+  } catch (e) { /* offscreen gone: run fresh below */ }
+  const resp = await chrome.runtime.sendMessage({
+    type: 'ms-offscreen-ffmpeg-run',
+    jobId: req.jobId,
+    url: req.url,
+    ext: req.ext || 'mp4',
+    live: !!req.live,
+    headers: req.headers || {},
+  });
+  if (!resp || !resp.url) throw new Error('ffmpeg job failed' + (resp && resp.error ? ': ' + resp.error : ''));
+  return { url: resp.url, size: resp.size || 0, partial: !!resp.partial };
+}
+
+function swFetchText(url, headers) {
+  return fetch(url, { credentials: 'include', headers: headers || {} }).then(function (res) {
+    if (!res.ok) throw new Error('http ' + res.status);
+    return res.text();
   });
 }
 
@@ -249,12 +393,16 @@ function withToken(url, token) {
   return url;
 }
 
-async function runHlsJob(playlistUrl) {
-  const job = state.hlsJobs.get(playlistUrl);
+async function runHlsJob(jobKey, playlistUrl) {
+  const job = state.hlsJobs.get(jobKey);
   if (!job) throw new Error('no job');
 
+  // Replay the headers the page's player used for this playlist (X's CDN
+  // requires Authorization: Bearer *** playlists AND segments alike).
+  const hdrs = headersFor(playlistUrl);
+
   job.status = 'fetching';
-  const masterText = await swFetchText(playlistUrl);
+  const masterText = await swFetchText(playlistUrl, hdrs);
   const masterParsed = L.parseM3u8(masterText, playlistUrl);
 
   let mediaUrl = playlistUrl;
@@ -266,85 +414,192 @@ async function runHlsJob(playlistUrl) {
     if (!variant) throw new Error('no variants in master playlist');
     mediaUrl = withToken(variant.url, variant.token);
     job.status = 'fetching';
-    mediaText = await swFetchText(mediaUrl);
+    mediaText = await swFetchText(mediaUrl, headersFor(mediaUrl, hdrs));
   }
 
   const media = L.parseM3u8(mediaText, mediaUrl);
   if (media.type !== 'media') throw new Error('not a media playlist');
-  if (media.encrypted) throw new Error('AES-128 encrypted HLS not supported - use yt-dlp');
   if (!media.segments.length) throw new Error('playlist has no segments');
 
-  job.status = 'combining';
-  job.total = media.segments.length + (media.initUrl ? 1 : 0);
+  job.mediaUrl = mediaUrl;
+  const audioOnly = L.isAudioOnlyPlaylist(media);
 
-  const queue = [];
-  if (media.initUrl) queue.push({ i: -1, url: media.initUrl });
-  media.segments.forEach(function (seg, idx) { queue.push({ i: idx, url: seg.url }); });
-
-  const results = [];
-  let totalBytes = 0;
-  let done = 0;
-  let failed = null;
-
-  async function worker() {
-    while (queue.length && !failed) {
-      const entry = queue.shift();
-      try {
-        const buf = await swFetchSegment(entry.url);
-        totalBytes += buf.byteLength;
-        results.push({ i: entry.i, buf: buf });
-        done++;
-        job.done = done;
-      } catch (err) {
-        failed = err;
-      }
-    }
+  // Path 1: audio-only ADTS (X Spaces replays). Raw concat is byte-perfect
+  // and costs no wasm boot — keep the fast path.
+  if (audioOnly && !media.encrypted && !media.live) {
+    job.status = 'combining';
+    job.mode = 'concat';
+    job.total = media.segments.length + (media.initUrl ? 1 : 0);
+    const segHeaders = headersFor(media.segments[0].url, hdrs);
+    const made = await offscreenHlsBuild({
+      playlistUrl: playlistUrl,
+      segments: media.segments.map(function (s) { return s.url; }),
+      initUrl: media.initUrl || null,
+      headers: segHeaders,
+      mime: 'audio/aac',
+    }, job);
+    return finishMediaJob(playlistUrl, made, 'aac', 'audio');
   }
 
-  const workers = [];
-  for (let w = 0; w < Math.min(HLS_CONCURRENCY, queue.length + 1); w++) workers.push(worker());
-  await Promise.all(workers);
-  if (failed) throw failed;
+  // Path 2: ffmpeg (VDH architecture). Handles everything the hand-rolled
+  // combiner could not: AES-128 keys, fMP4/BYTERANGE, TS->MP4 remux.
+  job.mode = 'ffmpeg';
+  job.ext = audioOnly ? 'aac' : 'mp4';
+  const req = {
+    jobId: playlistUrl,
+    kind: 'hls',
+    url: mediaUrl,
+    ext: job.ext,
+    live: !!media.live,
+    headers: headersFor(mediaUrl, hdrs),
+  };
 
-  results.sort(function (a, b) { return a.i - b.i; });
+  if (media.live) {
+    // Live recording: ffmpeg runs until the user presses Stop. Fragmented
+    // MP4 keeps the partial file playable. The popup gets {recording:true}
+    // immediately and polls ms-hls-status; the ffmpeg job keeps running in
+    // the offscreen document, and when it ends the blob is queued.
+    job.status = 'recording';
+    job.live = true;
+    job.startedAt = Date.now();
+    offscreenFfmpegRun(req).then(function (made) {
+      const secs = Math.max(1, Math.round((Date.now() - job.startedAt) / 1000));
+      job.title = (job.title || 'stream') + ' [' + fmtClock(secs) + ']';
+      return finishMediaJob(playlistUrl, made, job.ext, audioOnly ? 'audio' : 'video');
+    }).catch(function (err) {
+      job.status = 'failed';
+      job.error = String(err && err.message || err);
+    });
+    return { recording: true };
+  }
 
-  // URL.createObjectURL is unavailable in service workers; the offscreen
-  // document builds the blob URL (same pattern VDH uses).
-  const made = await makeBlobUrl(results.map(function (r) { return r.buf; }), 'video/mp2t');
-  const blobUrl = made.url;
+  job.status = 'combining';
+  const made = await offscreenFfmpegRun(req);
+  return finishMediaJob(playlistUrl, made, job.ext, audioOnly ? 'audio' : 'video');
+}
 
+function fmtClock(totalSec) {
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  if (m >= 60) return Math.floor(m / 60) + 'h' + (m % 60) + 'm';
+  return m + 'm' + s + 's';
+}
+
+// common tail: blob ready -> queue the actual download, link it to the job
+function finishMediaJob(playlistUrl, made, ext, kind) {
+  const job = state.hlsJobs.get(playlistUrl);
+  if (!job) throw new Error('no job');
   job.status = 'downloading';
-  job.blobUrl = blobUrl;
-  job.size = totalBytes;
+  job.blobUrl = made.url;
+  job.size = made.size;
 
-  const ext = media.initUrl ? 'mp4' : 'ts';
   const item = normalizeItem({
-    url: blobUrl,
-    kind: 'video',
+    url: made.url,
+    kind: kind,
     ext: ext,
     title: job.title || null,
     pageUrl: job.pageUrl || null,
-    size: totalBytes,
+    size: made.size,
   }, job.tabId);
-  enqueue(item);
-
+  const entry = enqueue(item);
+  // link the queue entry back to the job so completion/failure of the blob
+  // download updates the job state the popup is polling
+  entry.hlsUrl = playlistUrl;
+  job.filename = entry.filename;
   return { queued: true };
 }
 
-function startHls(tabId, playlistUrl, title, pageUrl) {
-  const existing = state.hlsJobs.get(playlistUrl);
-  if (existing && (existing.status === 'fetching' || existing.status === 'combining')) {
+// DASH (mpd) VOD — fetch-our-own architecture. ffmpeg's dash demuxer over
+// jsfetch is NOT usable with this libav build in the browser: it deadlocks
+// the event loop the moment the demuxer opens a 2nd segment (verified with
+// -loglevel trace: single-segment manifests finish, anything with 2+
+// segments freezes; -map does not help because the demuxer fetches every
+// representation anyway). So we parse the manifest ourselves (entry numbers
+// still match ffmpeg's per-Representation document order), fetch init +
+// media segments with plain fetch() carrying the captured headers, and only
+// touch ffmpeg for the video+audio mux of two already-local files.
+async function runDashJob(jobKey, url) {
+  const job = state.hlsJobs.get(jobKey);
+  if (!job) throw new Error('no job');
+  const hdrs = headersFor(url);
+  job.status = 'fetching';
+  const mpdText = await swFetchText(url, hdrs);
+  const parsed = L.parseMpdSegments(mpdText, url);
+  if (!parsed.tracks.length) throw new Error('MPDを解析できませんでした');
+
+  let track = null;
+  if (job.dashEntry != null) {
+    track = parsed.tracks.find(function (t) { return t.entry === job.dashEntry; }) || null;
+  }
+  if (!track) track = parsed.tracks.find(function (t) { return t.type === job.dashType; }) || parsed.tracks[0];
+  if (!track || !track.segments.length) throw new Error('トラックのセグメントを解決できませんでした');
+
+  job.mode = 'concat';
+  job.status = 'combining';
+  job.total = track.segments.length + (track.initUrl ? 1 : 0);
+  // Video track: mux the best audio track in as well (VDH's one-source
+  // behaviour), unless the user explicitly saved the audio entry.
+  let audioTrack = null;
+  if (track.type === 'video') {
+    audioTrack = parsed.tracks.find(function (t) { return t.type === 'audio'; }) || null;
+    if (audioTrack) job.total += audioTrack.segments.length + (audioTrack.initUrl ? 1 : 0);
+  }
+  const isAudio = track.type === 'audio';
+  job.ext = isAudio ? 'm4a' : 'mp4';
+
+  const made = await offscreenDashBuild({
+    jobKey: jobKey,
+    video: track.type === 'video' ? track : null,
+    audio: isAudio ? track : audioTrack,
+    headers: hdrs,
+  }, job);
+  return finishMediaJob(jobKey, made, job.ext, track.type);
+}
+
+// Delegate DASH track fetch + concat (+ optional v/a mux) to the offscreen
+// document. Progress comes back as plain counters via 'ms-hls-progress'.
+async function offscreenDashBuild(req, job) {
+  await ensureOffscreen();
+  const resp = await chrome.runtime.sendMessage({
+    type: 'ms-offscreen-dash-build',
+    playlistUrl: req.jobKey,
+    video: req.video ? { initUrl: req.video.initUrl || null, segments: req.video.segments } : null,
+    audio: req.audio ? { initUrl: req.audio.initUrl || null, segments: req.audio.segments } : null,
+    headers: req.headers,
+  });
+  if (!resp || !resp.url) throw new Error('DASHビルド失敗' + (resp && resp.error ? ': ' + resp.error : ''));
+  return { url: resp.url, size: resp.size || 0 };
+}
+
+function startHls(tabId, jobKey, url, title, pageUrl, dashEntry, dashType) {
+  const existing = state.hlsJobs.get(jobKey);
+  if (existing && (existing.status === 'fetching' || existing.status === 'combining' || existing.status === 'recording')) {
     return Promise.resolve({ alreadyRunning: true });
   }
-  state.hlsJobs.set(playlistUrl, {
+  state.hlsJobs.set(jobKey, {
     status: 'fetching', tabId: tabId, done: 0, total: 0, error: null, live: false,
     title: title || null, pageUrl: pageUrl || null, blobUrl: null, size: 0,
+    seconds: 0, bytes: 0, startedAt: 0, mode: null, ext: null,
+    dashEntry: dashEntry != null ? dashEntry : null,
+    dashType: dashType || null,
   });
-  return runHlsJob(playlistUrl).catch(function (err) {
-    const j = state.hlsJobs.get(playlistUrl);
+  const runner = /\.mpd(\?|$)/i.test(url) ? runDashJob : runHlsJob;
+  return runner(jobKey, url).catch(function (err) {
+    const j = state.hlsJobs.get(jobKey);
     if (j) { j.status = 'failed'; j.error = String(err && err.message || err); }
     return { error: j && j.error };
   });
+}
+
+// stop a live recording (ffmpeg abort; fragmented MP4 stays valid)
+function stopLiveRecording(url) {
+  const job = state.hlsJobs.get(url);
+  if (!job || job.status !== 'recording') return Promise.resolve({ ok: false });
+  return ensureOffscreen().then(function () {
+    return chrome.runtime.sendMessage({ type: 'ms-offscreen-ffmpeg-abort', jobId: url });
+  }).then(function (r) {
+    return { ok: !!(r && r.ok) };
+  }).catch(function () { return { ok: false }; });
 }
 
 // ---------------------------------------------------------------------------
@@ -352,6 +607,60 @@ function startHls(tabId, playlistUrl, title, pageUrl) {
 // Works even on pages where content-script injection is blocked.
 // ---------------------------------------------------------------------------
 const WATCH_TYPES = ['xmlhttprequest', 'media', 'main_frame', 'other'];
+
+// ---------------------------------------------------------------------------
+// Captured request headers (VDH's "sent_headers" idea).
+// Many CDNs (X's video CDN, hotlink-protected hosts) only serve media when the
+// request carries headers the page's player added itself — typically
+// Authorization: Bearer, Referer, Origin. chrome.downloads.download sends
+// none of those, and a bare SW fetch only carries cookies. So we watch what
+// the browser actually sent and replay the relevant headers when we fetch.
+// ---------------------------------------------------------------------------
+const CAPTURED_HEADERS_MAX = 1000;
+const capturedReqHeaders = new Map(); // itemKey(url) -> [{name, value}]
+
+function keepableHeader(name) {
+  const n = String(name || '').toLowerCase();
+  return n === 'referer' || n === 'origin' || n === 'authorization' || n.indexOf('x-') === 0;
+}
+
+function onSendHeaders(details) {
+  try {
+    if (!details.requestHeaders || !details.requestHeaders.length) return;
+    const url = details.url;
+    if (!url || url.indexOf('http') !== 0) return;
+    if (details.initiator && details.initiator.indexOf('chrome-extension:') === 0) return;
+    const keep = details.requestHeaders.filter(function (h) { return keepableHeader(h.name); });
+    if (!keep.length) return;
+    const key = L.itemKey(url);
+    if (!key) return;
+    capturedReqHeaders.set(key, keep);
+    if (capturedReqHeaders.size > CAPTURED_HEADERS_MAX) {
+      const first = capturedReqHeaders.keys().next().value;
+      capturedReqHeaders.delete(first);
+    }
+  } catch (e) { /* never break browsing */ }
+}
+
+function headersFor(url, fallback) {
+  // captured array first; fallback may be a captured array OR a plain object
+  const cap = capturedReqHeaders.get(L.itemKey(url));
+  const src = (cap && cap.length) ? cap : fallback;
+  if (!src) return {};
+  const out = {};
+  if (Array.isArray(src)) {
+    for (const h of src) { if (keepableHeader(h.name)) out[h.name] = h.value; }
+  } else {
+    for (const k of Object.keys(src)) { if (keepableHeader(k)) out[k] = src[k]; }
+  }
+  return out;
+}
+
+function enrichFromCapture(item) {
+  const cap = capturedReqHeaders.get(L.itemKey(item.url));
+  if (cap && cap.length) item.headers = cap.slice();
+  return item;
+}
 
 function onResponseStarted(details) {
   try {
@@ -383,22 +692,79 @@ function onResponseStarted(details) {
     const kind = L.kindFromContentType(ct, url);
 
     if (isHls) {
-      // validate playlist text (SW fetch carries cookies thanks to host perms)
-      fetch(url, { credentials: 'include' }).then(function (res) {
+      // validate playlist text (SW fetch carries cookies thanks to host perms,
+      // plus any headers the player itself sent for this URL)
+      fetch(url, { credentials: 'include', headers: headersFor(url) }).then(function (res) {
         if (!res.ok) return null;
         return res.text();
       }).then(function (text) {
         if (!text || text.indexOf('#EXTM3U') !== 0) return;
         if (L.isSubtitlePlaylist(text)) return;
         const parsed = L.parseM3u8(text, url);
-        const meta = {
-          url: url, kind: 'hls', contentType: ct || null, size: 0,
-          via: 'webrequest', pageUrl: details.initiator || details.url, title: pageTitle(details.tabId),
-          duration: parsed.type === 'media' ? L.playlistDuration(text) : 0,
-        };
-        if (parsed.type === 'master' && parsed.variants.length) meta.note = parsed.variants.length + ' variants';
-        addItems(details.tabId, [meta]);
+        const pageUrl = details.initiator || details.url;
+        const baseTitle = pageTitle(details.tabId);
+        if (parsed.type === 'master' && parsed.variants.length) {
+          // VDH-style: surface each variant as its own item so the user picks
+          // a resolution, instead of one opaque "HLS" entry. Each variant URL
+          // is a playable media playlist (tokens from the master are kept).
+          const metas = parsed.variants.map(function (v) {
+            const vurl = withToken(v.url, v.token);
+            const label = v.resolution ? ' [' + v.resolution + ']' : '';
+            return {
+              url: vurl, kind: 'hls', contentType: ct || null, size: 0,
+              via: 'webrequest', pageUrl: pageUrl,
+              title: (baseTitle || 'video') + label, duration: 0,
+            };
+          });
+          addItems(details.tabId, metas);
+        } else {
+          // audio-only HLS (X Spaces replays: .aac ADTS chunks) is its own
+          // kind so the popup can label it 音声 and the save path picks .aac
+          const audioOnly = L.isAudioOnlyPlaylist(parsed);
+          addItems(details.tabId, [{
+            url: url, kind: audioOnly ? 'hls-audio' : 'hls',
+            contentType: ct || null, size: 0,
+            via: 'webrequest', pageUrl: pageUrl, title: baseTitle,
+            duration: parsed.type === 'media' ? L.playlistDuration(text) : 0,
+          }]);
+        }
       }).catch(function () { /* unreachable playlist: skip silently */ });
+      return;
+    }
+
+    const isDash = (ct && /dash\+xml/i.test(ct)) || /\.mpd(\?|$)/i.test(url);
+    if (isDash) {
+      // VDH-style: enumerate the mpd's tracks (video renditions + audio) as
+      // separate items. ffmpeg downloads one track per job — concurrent
+      // adaptation-set fetches deadlock jsfetch, so no combined v+a here.
+      fetch(url, { credentials: 'include', headers: headersFor(url) }).then(function (res) {
+        if (!res.ok) return null;
+        return res.text();
+      }).then(function (mpd) {
+        const tracks = L.parseMpdTracks(mpd);
+        const pageUrl = details.initiator || details.url;
+        const baseTitle = pageTitle(details.tabId);
+        if (!tracks.length) {
+          // unparseable manifest: one plain item, ffmpeg will try its best
+          addItems(details.tabId, [{
+            url: url, kind: 'dash', contentType: ct || null, size: 0,
+            via: 'webrequest', pageUrl: pageUrl, title: baseTitle, dashEntry: -1,
+          }]);
+          return;
+        }
+        const metas = tracks.map(function (t) {
+          const label = t.type === 'video'
+            ? (t.resolution ? ' [' + t.resolution + ']' : ' [' + Math.round(t.bandwidth / 1000) + 'k]')
+            : ' [音声]';
+          return {
+            url: url, kind: 'dash', contentType: ct || null, size: 0,
+            via: 'webrequest', pageUrl: pageUrl,
+            title: (baseTitle || 'video') + label,
+            dashEntry: t.entry, dashType: t.type,
+          };
+        });
+        addItems(details.tabId, metas);
+      }).catch(function () { /* unreachable manifest: skip silently */ });
       return;
     }
 
@@ -440,6 +806,11 @@ function fillTitles(tabId) {
 if (chrome.webRequest && chrome.webRequest.onResponseStarted) {
   chrome.webRequest.onResponseStarted.addListener(onResponseStarted, { urls: ['<all_urls>'], types: WATCH_TYPES }, ['responseHeaders']);
 }
+if (chrome.webRequest && chrome.webRequest.onSendHeaders) {
+  // VDH "sent_headers": capture Authorization/Referer/Origin the player sent,
+  // replay them when we fetch the same URL ourselves.
+  chrome.webRequest.onSendHeaders.addListener(onSendHeaders, { urls: ['<all_urls>'], types: WATCH_TYPES }, ['requestHeaders']);
+}
 
 // ---------------------------------------------------------------------------
 // messages
@@ -455,14 +826,20 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
       return false;
     }
     case 'ms-report': {
-      const r = addItems(tabId, msg.items);
-      sendResponse(r);
-      return false;
+      // wait for restore so a just-woke SW never closes the race by merging
+      // into a not-yet-restored map
+      restorePromise.then(function () {
+        const r = addItems(tabId, msg.items);
+        sendResponse(r);
+      });
+      return true;
     }
     case 'ms-get-items': {
-      const items = state.itemsByTab.get(tabId) || [];
-      sendResponse({ items: L.sortItems(items) });
-      return false;
+      restorePromise.then(function () {
+        const items = state.itemsByTab.get(tabId) || [];
+        sendResponse({ items: L.sortItems(items) });
+      });
+      return true;
     }
     case 'ms-clear': {
       state.itemsByTab.delete(tabId);
@@ -474,6 +851,7 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
     case 'ms-download': {
       const item = normalizeItem(msg.item, tabId);
       if (!item) { sendResponse({ error: 'invalid item' }); return false; }
+      enrichFromCapture(item, tabId);
       const entry = enqueue(item);
       sendResponse({ queued: true, id: entry.id });
       return false;
@@ -489,12 +867,33 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
       return false;
     }
     case 'ms-hls-download': {
-      startHls(tabId, msg.url, msg.title, msg.pageUrl).then(sendResponse);
+      const jobKey = msg.url + (msg.dashEntry != null && msg.dashEntry >= 0 ? '#dash-entry=' + msg.dashEntry : '');
+      startHls(tabId, jobKey, msg.url, msg.title, msg.pageUrl, msg.dashEntry != null ? msg.dashEntry : null, msg.dashType || null).then(sendResponse);
+      return true;
+    }
+    case 'ms-hls-stop': {
+      stopLiveRecording(msg.url).then(sendResponse);
       return true;
     }
     case 'ms-hls-status': {
-      const job = state.hlsJobs.get(msg.url);
-      sendResponse(job ? { status: job.status, done: job.done, total: job.total, error: job.error, live: job.live } : null);
+      const jobKey = msg.url + (msg.dashEntry != null && msg.dashEntry >= 0 ? '#dash-entry=' + msg.dashEntry : '');
+      const job = state.hlsJobs.get(jobKey) || state.hlsJobs.get(msg.url);
+      sendResponse(job ? {
+        status: job.status, done: job.done, total: job.total, error: job.error,
+        live: job.live, filename: job.filename || null, mode: job.mode,
+        seconds: job.seconds || 0, bytes: job.bytes || 0, ext: job.ext || null,
+      } : null);
+      return false;
+    }
+    case 'ms-offscreen-progress': {
+      const job = state.hlsJobs.get(msg.jobId);
+      if (job) { job.seconds = msg.seconds || 0; job.bytes = msg.bytes || 0; }
+      return false;
+    }
+    case 'ms-hls-progress': {
+      // counters only (structured-clone safe): offscreen never sends bytes
+      const job = state.hlsJobs.get(msg.playlistUrl);
+      if (job) { job.done = msg.done || 0; if (msg.total) job.total = msg.total; }
       return false;
     }
     case 'ms-queue-status': {
@@ -517,5 +916,4 @@ chrome.tabs.onRemoved.addListener(function (tabId) {
 chrome.tabs.onActivated.addListener(function (info) {
   updateBadge(info.tabId);
 });
-
-restoreItems();
+// restoreItems() already ran at boot (restorePromise above).

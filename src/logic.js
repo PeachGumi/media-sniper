@@ -13,7 +13,7 @@ const MediaSniperLogic = (function () {
     ts: 'ts', m4s: 'ts', fmp4: 'ts',
   };
 
-  const DEFAULT_EXT = { video: 'mp4', audio: 'm4a', hls: 'ts', dash: 'mp4', ts: 'ts' };
+  const DEFAULT_EXT = { video: 'mp4', audio: 'm4a', hls: 'ts', 'hls-audio': 'aac', dash: 'mp4', ts: 'ts' };
 
   function extOf(url) {
     try {
@@ -97,6 +97,9 @@ const MediaSniperLogic = (function () {
     if (url.indexOf('blob:') === 0) return url;
     try {
       const u = new URL(url);
+      // Playlists: the query string often carries the auth token and
+      // distinguishes variants, so keep the full URL as the key.
+      if (/\.(m3u8|mpd)$/i.test(u.pathname)) return url;
       // YouTube videoplayback URLs differ only in query params; keep `itag`
       // so multiple formats of the same video stay separate items.
       const itag = u.searchParams.get('itag');
@@ -243,12 +246,26 @@ const MediaSniperLogic = (function () {
   }
 
   function isSegmentUrl(url) {
+    // .aac = ADTS HLS chunks (X Spaces replays: chunk_..._a.aac)
     try {
       const u = new URL(url);
-      return /\.ts$|\.m4s$|\.m2ts$/i.test(u.pathname);
+      return /\.(ts|m4s|m2ts|aac)$/i.test(u.pathname);
     } catch (e) {
-      return /\.ts$|\.m4s$|\.m2ts$/i.test(String(url).split(/[?#]/)[0]);
+      return /\.(ts|m4s|m2ts|aac)$/i.test(String(url).split(/[?#]/)[0]);
     }
+  }
+
+  // audio-only HLS (e.g. X Spaces): every segment is an ADTS .aac chunk and
+  // there is no fMP4 init segment. Concatenating ADTS chunks is a playable
+  // .aac file, so the output gets an .aac extension, not .ts.
+  function isAudioOnlyPlaylist(parsed) {
+    if (!parsed || parsed.type !== 'media' || parsed.initUrl) return false;
+    if (!parsed.segments.length) return false;
+    for (const s of parsed.segments) {
+      const p = String(s.url).split(/[?#]/)[0];
+      if (!/\.aac$/i.test(p)) return false;
+    }
+    return true;
   }
 
   function isSubtitlePlaylist(text) {
@@ -324,6 +341,194 @@ const MediaSniperLogic = (function () {
     return false;
   }
 
+  // DASH: full manifest resolution. ffmpeg's dash demuxer over jsfetch is
+  // NOT usable in the browser with this libav build — it deadlocks the
+  // moment the demuxer opens a 2nd segment through jsfetch (verified with
+  // trace logs: 1-segment manifests work, 2+ segments freeze the event
+  // loop; -map does not help because the demuxer fetches every
+  // representation anyway). So we resolve segment URLs ourselves and fetch
+  // them with plain fetch(), exactly like the HLS concat path.
+  //
+  // Entry numbering matches ffmpeg's dash demuxer: one entry per
+  // <Representation> in document order (verified against libav 6.5.7).
+  // Subtitle/text representations consume entry numbers but are not listed.
+  function xmlAttr(tag, name) {
+    const m = String(tag).match(new RegExp('\\b' + name + '\\s*=\\s*["\']([^"\']*)["\']'));
+    return m ? m[1] : null;
+  }
+
+  // ISO 8601 duration (PT1H2M3.5S) -> seconds; 0 when unparseable
+  function parseIsoDuration(s) {
+    const m = String(s || '').match(/PT(?:(\d+(?:\.\d+)?)H)?(?:(\d+(?:\.\d+)?)M)?(?:(\d+(?:\.\d+)?)S)?/);
+    if (!m || (!m[1] && !m[2] && !m[3])) return 0;
+    return (parseFloat(m[1] || 0) * 3600) + (parseFloat(m[2] || 0) * 60) + parseFloat(m[3] || 0);
+  }
+
+  function dashPad(n, width) {
+    let s = String(n);
+    while (s.length < width) s = '0' + s;
+    return s;
+  }
+
+  // $...$ template substitution (RepresentationID / Bandwidth / Number / Time)
+  function dashFill(tmpl, ctx) {
+    return String(tmpl)
+      .replace(/\$\$/g, '\u0000')
+      .replace(/\$RepresentationID\$/g, ctx.repId != null ? String(ctx.repId) : '')
+      .replace(/\$Bandwidth\$/g, String(ctx.bandwidth || 0))
+      .replace(/\$Number%0(\d+)d\$/g, function (_, w) { return dashPad(ctx.num, parseInt(w, 10)); })
+      .replace(/\$Number\$/g, String(ctx.num))
+      .replace(/\$Time%0(\d+)d\$/g, function (_, w) { return dashPad(ctx.time, parseInt(w, 10)); })
+      .replace(/\$Time\$/g, String(ctx.time))
+      .replace(/\u0000/g, '$');
+  }
+
+  // Resolve the BaseURL that applies to a Representation: nearest of
+  // rep-level, AdaptationSet-level, or the first one anywhere in the doc
+  // (MPD/Period level), all resolved against the manifest URL.
+  function dashBase(repBody, asBody, fullText, mpdUrl) {
+    let m = /<BaseURL[^>]*>([\s\S]*?)<\/BaseURL>/i.exec(repBody || '');
+    if (!m) m = /<BaseURL[^>]*>([\s\S]*?)<\/BaseURL>/i.exec(asBody || '');
+    if (!m) m = /<BaseURL[^>]*>([\s\S]*?)<\/BaseURL>/i.exec(fullText || '');
+    const base = m ? m[1].trim() : null;
+    try { return new URL(base || '', mpdUrl || 'http://invalid/').href; } catch (e) { return mpdUrl || ''; }
+  }
+
+  function dashResolve(u, base) {
+    try { return new URL(u, base).href; } catch (e) { return u; }
+  }
+
+  const DASH_MAX_SEGMENTS = 20000;
+
+  // Parse an MPD into downloadable tracks. Returns
+  // { tracks: [ { entry, type, bandwidth, resolution, initUrl, segments: [url,...] } ] }
+  // Supports SegmentTemplate with SegmentTimeline ($Number$/$Time$) and
+  // duration-based SegmentTemplate. SegmentBase falls back to fetching the
+  // whole source file as one segment (works when no byte ranges are used).
+  function parseMpdSegments(mpdText, mpdUrl) {
+    const out = { tracks: [] };
+    if (!mpdText || typeof mpdText !== 'string' || mpdText.indexOf('<') < 0) return out;
+    const text = mpdText.replace(/<!--[\s\S]*?-->/g, '');
+    const mpdAttrs = (/<MPD\b([^>]*)>/i.exec(text) || ['', ''])[1];
+    const totalDur = parseIsoDuration(xmlAttr(mpdAttrs, 'mediaPresentationDuration'));
+    let entry = 0;
+    const asRe = /<AdaptationSet\b([^>]*)>([\s\S]*?)<\/AdaptationSet>/gi;
+    let m;
+    while ((m = asRe.exec(text)) !== null) {
+      const asAttrs = m[1];
+      const asBody = m[2];
+      const repRe = /<Representation\b([^>]*?)(?:\/>|>([\s\S]*?)<\/Representation>)/gi;
+      let best = null;
+      let rm;
+      while ((rm = repRe.exec(asBody)) !== null) {
+        const attrs = rm[1];
+        const body = rm[2] || '';
+        const rep = {
+          entry: entry++,
+          id: xmlAttr(attrs, 'id'),
+          bandwidth: parseInt(xmlAttr(attrs, 'bandwidth'), 10) || 0,
+          mimeType: xmlAttr(attrs, 'mimeType') || '',
+          codecs: xmlAttr(attrs, 'codecs') || '',
+          width: parseInt(xmlAttr(attrs, 'width'), 10) || 0,
+          height: parseInt(xmlAttr(attrs, 'height'), 10) || 0,
+          body: body,
+        };
+        if (!best || rep.bandwidth > best.bandwidth) best = rep;
+      }
+      if (!best) continue;
+      let type = String(xmlAttr(asAttrs, 'contentType') || '').toLowerCase();
+      if (!type) {
+        if (/^video\//i.test(best.mimeType)) type = 'video';
+        else if (/^audio\//i.test(best.mimeType)) type = 'audio';
+        else if (/^(text|application)\//i.test(best.mimeType)) type = 'subtitle';
+        else if (/^(avc|hev|hvc|vp[89]|av0)/i.test(best.codecs)) type = 'video';
+        else if (/^(mp4a|ac-[34]|ec-3|opus|flac)/i.test(best.codecs)) type = 'audio';
+      }
+      if (type !== 'video' && type !== 'audio') continue;
+
+      const base = dashBase(best.body, asBody, text, mpdUrl);
+      const tpl = /<SegmentTemplate\b([^>]*?)(?:\/>|>([\s\S]*?)<\/SegmentTemplate>)/i.exec(best.body);
+      let initUrl = null;
+      const segments = [];
+
+      if (tpl) {
+        const tplAttrs = tpl[1];
+        const tplBody = tpl[2] || '';
+        const timescale = parseInt(xmlAttr(tplAttrs, 'timescale'), 10) || 1;
+        const startNumber = parseInt(xmlAttr(tplAttrs, 'startNumber'), 10) || 1;
+        const initTmpl = xmlAttr(tplAttrs, 'initialization') || xmlAttr(tplAttrs, 'initialisation');
+        const mediaTmpl = xmlAttr(tplAttrs, 'media') || '';
+        if (initTmpl) {
+          initUrl = dashResolve(dashFill(initTmpl, { repId: best.id, bandwidth: best.bandwidth, num: 0, time: 0 }), base);
+        }
+        const timeline = /<SegmentTimeline\b[^>]*>([\s\S]*?)<\/SegmentTimeline>/i.exec(tplBody);
+        if (timeline) {
+          const sRe = /<S\b([^>]*?)\/?>/gi;
+          let sm;
+          const events = []; // { t, d, r }
+          while ((sm = sRe.exec(timeline[1])) !== null) {
+            const sa = sm[1];
+            events.push({
+              t: xmlAttr(sa, 't') != null ? parseInt(xmlAttr(sa, 't'), 10) : null,
+              d: parseInt(xmlAttr(sa, 'd'), 10) || 0,
+              r: xmlAttr(sa, 'r') != null ? parseInt(xmlAttr(sa, 'r'), 10) : 0,
+            });
+          }
+          let curT = 0;
+          let num = startNumber;
+          for (let i = 0; i < events.length && segments.length < DASH_MAX_SEGMENTS; i++) {
+            const ev = events[i];
+            if (ev.t != null) curT = ev.t;
+            let reps = ev.r;
+            if (reps < 0) {
+              // repeat until the next S@t (or the end of the presentation)
+              const nextT = (i + 1 < events.length && events[i + 1].t != null) ? events[i + 1].t
+                : (totalDur > 0 ? Math.round(totalDur * timescale) : curT + ev.d);
+              reps = ev.d > 0 ? Math.max(0, Math.ceil((nextT - curT) / ev.d)) - 1 : 0;
+            }
+            for (let k = 0; k <= reps && segments.length < DASH_MAX_SEGMENTS; k++) {
+              segments.push(dashResolve(dashFill(mediaTmpl, { repId: best.id, bandwidth: best.bandwidth, num: num, time: curT }), base));
+              num++;
+              curT += ev.d;
+            }
+          }
+        } else {
+          // duration-based template
+          const segDur = parseInt(xmlAttr(tplAttrs, 'duration'), 10) || 0;
+          if (segDur > 0 && totalDur > 0) {
+            const count = Math.min(DASH_MAX_SEGMENTS, Math.ceil((totalDur * timescale) / segDur));
+            for (let i = 0; i < count; i++) {
+              segments.push(dashResolve(dashFill(mediaTmpl, { repId: best.id, bandwidth: best.bandwidth, num: startNumber + i, time: i * segDur }), base));
+            }
+          }
+        }
+      } else {
+        // SegmentBase / plain: one segment = the whole resolved source
+        const sb = /<SegmentBase\b([^>]*?)(?:\/>|>)/i.exec(best.body);
+        const src = (sb && xmlAttr(sb[1], 'sourceURL')) || null;
+        segments.push(dashResolve(src || '', base));
+      }
+
+      out.tracks.push({
+        entry: best.entry,
+        type: type,
+        bandwidth: best.bandwidth,
+        resolution: best.width && best.height ? best.width + 'x' + best.height : null,
+        initUrl: initUrl,
+        segments: segments,
+      });
+    }
+    return out;
+  }
+
+  // Detection-side view: same tracks, no segment lists. Kept separate from
+  // parseMpdSegments so detection never pays for URL resolution.
+  function parseMpdTracks(mpdText) {
+    return parseMpdSegments(mpdText, null).tracks.map(function (t) {
+      return { entry: t.entry, type: t.type, bandwidth: t.bandwidth, resolution: t.resolution };
+    });
+  }
+
   // VDH ignores direct-media responses whose known size is under 500KB
   // (ads, thumbnails, tracking pixels). Same threshold here.
   const MIN_DIRECT_MEDIA_SIZE = 500000;
@@ -345,11 +550,14 @@ const MediaSniperLogic = (function () {
     hostOf: hostOf,
     extFromContentType: extFromContentType,
     isSegmentUrl: isSegmentUrl,
+    isAudioOnlyPlaylist: isAudioOnlyPlaylist,
     isSubtitlePlaylist: isSubtitlePlaylist,
     looksLikeHlsUrl: looksLikeHlsUrl,
     smartName: smartName,
     playlistDuration: playlistDuration,
     isDedicatedSite: isDedicatedSite,
+    parseMpdTracks: parseMpdTracks,
+    parseMpdSegments: parseMpdSegments,
     MIN_DIRECT_MEDIA_SIZE: MIN_DIRECT_MEDIA_SIZE,
   };
 })();

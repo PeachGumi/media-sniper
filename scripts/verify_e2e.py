@@ -2,7 +2,7 @@
 """E2E: verify downloads actually land in ~/Downloads (headless + CDP).
 Tests: (1) direct mp4 download via queue, (2) full HLS pipeline (SW fetch +
 offscreen blob + filename routing)."""
-import json, os, sys, time, urllib.request
+import json, os, subprocess, sys, time, urllib.request
 
 CDP = 'http://127.0.0.1:9222'
 DL = os.path.expanduser('~/Downloads')
@@ -89,17 +89,21 @@ def main():
         print('TEST1 direct mp4:', 'PASS' if ok1 else 'FAIL')
 
         # ---------- TEST 2: full HLS pipeline ----------
-        hls_out = DL + '/e2e hls.ts'
+        # New architecture: HLS TS playlists go through the offscreen ffmpeg
+        # remux, so the output is a real .mp4 (not a raw .ts concat).
+        # Uses the REAL TS fixture (media.m3u8's seg*.ts are 188-byte stubs
+        # that ffmpeg rightly rejects as invalid data).
+        hls_out = DL + '/e2e hls.mp4'
         if os.path.exists(hls_out): os.remove(hls_out)
         h = await sw_eval(
-            "startHls(9002, '" + FIX + "/master.m3u8', 'e2e hls', '" + FIX + "/').then(function(r){return JSON.stringify(r)})")
+            "startHls(9002, '" + FIX + "/realindex.m3u8', '" + FIX + "/realindex.m3u8', 'e2e hls', '" + FIX + "/', null, null).then(function(r){return JSON.stringify(r)})")
         print('TEST2 startHls resp:', h)
         # wait for job to reach downloading
         t0 = time.time()
         st = None
-        while time.time() - t0 < 45:
+        while time.time() - t0 < 90:
             st = await sw_eval(
-                "(function(){var j=state.hlsJobs.get('" + FIX + "/master.m3u8');return j?JSON.stringify({status:j.status,done:j.done,total:j.total,error:j.error,blobUrl:j.blobUrl}):null})()")
+                "(function(){var j=state.hlsJobs.get('" + FIX + "/realindex.m3u8');return j?JSON.stringify({status:j.status,done:j.done,total:j.total,error:j.error,blobUrl:j.blobUrl}):null})()")
             if st:
                 obj = json.loads(st)
                 if obj['status'] in ('downloading', 'failed'):
@@ -109,16 +113,23 @@ def main():
         obj = json.loads(st) if st else {}
         if obj.get('status') == 'failed':
             print('TEST2 HLS pipeline: FAIL -', obj.get('error'))
-        else:
-            d2 = await poll_download('e2e hls', timeout=45)
-            print('TEST2 download record:', json.dumps(d2, ensure_ascii=False) if d2 else None)
-            landed = os.path.exists(hls_out)
-            size = os.path.getsize(hls_out) if landed else 0
-            ok2 = landed and size == 120  # 8 segments x ~15 bytes combined = 120 in fixture
-            print('TEST2 HLS ->', hls_out, size, 'bytes:', 'PASS' if ok2 else 'FAIL')
-            if not ok2:
-                # list what appeared
-                print('  files matching e2e:', [f for f in os.listdir(DL) if 'e2e' in f])
+            sys.exit(1)
+        d2 = await poll_download('e2e hls', timeout=60)
+        print('TEST2 download record:', json.dumps(d2, ensure_ascii=False) if d2 else None)
+        landed = os.path.exists(hls_out)
+        size = os.path.getsize(hls_out) if landed else 0
+        # ffmpeg remux of the 8 tiny TS segments -> a small but valid mp4
+        ok2 = landed and size > 200 and d2 and d2['state'] == 'complete'
+        if ok2:
+            probe = subprocess.run(['ffprobe', '-v', 'error', '-show_entries',
+                                    'format=format_name', '-of', 'default=nw=1', hls_out],
+                                   capture_output=True, text=True).stdout.strip()
+            ok2 = 'mp4' in probe or 'mov' in probe
+        print('TEST2 HLS ->', hls_out, size, 'bytes:', 'PASS' if ok2 else 'FAIL')
+        if not ok2:
+            # list what appeared
+            print('  files matching e2e:', [f for f in os.listdir(DL) if 'e2e' in f])
+            sys.exit(1)
 
         await ws_sw.close(); await ws_p.close()
 
