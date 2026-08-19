@@ -122,7 +122,11 @@ async function runFfmpegJob(msg, sendResponse) {
     // NOTE: DASH no longer goes through this function — see
     // handleDashBuild below (jsfetch + dash demuxer deadlocks on
     // multi-segment manifests in this libav build).
-    const args = ['-y'];
+    // -nostdin is critical: without it ffmpeg's interactive key check reads
+    // stdin, and libav.js serves stdin via window.prompt("Input: ") in a
+    // document context — which pops a blocking dialog on real browsers
+    // (headless returns null instantly, which is why tests never saw it).
+    const args = ['-y', '-nostdin'];
     args.push('-analyzeduration', '10M', '-f', 'hls', '-i', 'jsfetch:' + msg.url);
     args.push('-c', 'copy', '-avoid_negative_ts', 'make_zero');
     if (msg.live) {
@@ -338,9 +342,9 @@ async function handleDashBuild(msg, sendResponse) {
     let rc;
     if (aParts) {
       await libav.writeFile('/a.mp4', joinParts(aParts));
-      rc = await libav.ffmpeg(['-y', '-i', '/v.mp4', '-i', '/a.mp4', '-c', 'copy', '-avoid_negative_ts', 'make_zero', '-f', 'mp4', 'out.mp4']);
+      rc = await libav.ffmpeg(['-y', '-nostdin', '-i', '/v.mp4', '-i', '/a.mp4', '-c', 'copy', '-avoid_negative_ts', 'make_zero', '-f', 'mp4', 'out.mp4']);
     } else {
-      rc = await libav.ffmpeg(['-y', '-i', '/v.mp4', '-c', 'copy', '-avoid_negative_ts', 'make_zero', '-f', 'mp4', 'out.mp4']);
+      rc = await libav.ffmpeg(['-y', '-nostdin', '-i', '/v.mp4', '-c', 'copy', '-avoid_negative_ts', 'make_zero', '-f', 'mp4', 'out.mp4']);
     }
 
     let total = 0;
