@@ -40,6 +40,8 @@
   .info { flex: 1; min-width: 0; }
   .name { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .meta { font-size: 10px; color: #8b8b93; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #options { color: #9a9aa2; font-size: 15px; text-decoration: none; align-self: center; }
+  #options:hover { color: #e8e8ea; }
   .item button { flex: 0 0 auto; padding: 4px 9px; font-size: 11px; }
   .item button.dl { background: #ff7a45; border-color: #ff7a45; color: #17181c; font-weight: 700; }
   .item button.busy { opacity: .5; cursor: default; }
@@ -56,14 +58,16 @@
   </header>
   <div class="toolbar">
     <button id="rescan">再スキャン</button>
+    <button id="saveall" class="primary" title="検出したアイテムを一括保存 (HLS/DASHは1件ずつ順番に処理)">全部保存</button>
     <button id="clear">クリア</button>
     <button id="ytdlp" title="このページのURLで yt-dlp コマンドをコピー">yt-dlp コマンド</button>
+    <a id="options" href="#" title="設定">⚙</a>
   </div>
   <div id="status"></div>
   <div id="list"></div>
   <footer>
-    <span>保存先: ~/Downloads/ 直下</span>
-    <span>v0.9</span>
+    <span id="destHint">保存先: ~/Downloads/ 直下</span>
+    <span>v0.10</span>
   </footer>
   <script src="../src/logic.js"></script>
   <script src="popup.js"></script>

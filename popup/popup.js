@@ -141,6 +141,20 @@ function save(item, btn) {
     );
     return;
   }
+  // YouTube adaptive mux item (video-only URL + separate audioUrl): fetch
+  // both tracks and mux them in the offscreen document instead of saving a
+  // silent video-only stream.
+  if (item.via === 'youtube' && item.audioUrl) {
+    chrome.runtime.sendMessage({ type: 'ms-yt-mux-download', item: item, tabId: tabId }, (resp) => {
+      if (chrome.runtime.lastError) { setStatus('エラー: ' + chrome.runtime.lastError.message, true); btn.classList.remove('busy'); btn.textContent = '保存'; return; }
+      if (resp && resp.error) { setStatus('失敗: ' + resp.error, true); btn.classList.remove('busy'); btn.textContent = '保存'; return; }
+      if (resp && resp.alreadyRunning) { setStatus('mux実行中です'); btn.classList.remove('busy'); btn.textContent = '保存'; return; }
+      btn.textContent = 'mux中';
+      setStatus('映像+音声を取得してmuxしています…');
+      pollHls({ key: resp.jobKey, url: resp.jobKey, dashEntry: null }, btn);
+    });
+    return;
+  }
   const msg = item.url.indexOf('blob:') === 0
     ? { type: 'ms-download-blob', url: item.url, kind: item.kind, ext: item.ext, title: item.title, pageUrl: pageUrl, size: item.size, tabId: tabId }
     : { type: 'ms-download', item: item, tabId: tabId };
@@ -236,6 +250,20 @@ function pollHls(item, btn) {
   hlsTimers.set(item.key, t);
 }
 
+let settings = { rootFolder: '', minSizeKb: 500, blacklist: '' };
+
+function loadSettings(cb) {
+  chrome.runtime.sendMessage({ type: 'ms-get-settings' }, (s) => {
+    if (!chrome.runtime.lastError && s) settings = s;
+    if ($('#destHint')) {
+      $('#destHint').textContent = settings.rootFolder
+        ? '保存先: ~/Downloads/' + settings.rootFolder + '/'
+        : '保存先: ~/Downloads/ 直下';
+    }
+    if (cb) cb();
+  });
+}
+
 function load() {
   chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
     const t = tabs[0];
@@ -280,5 +308,29 @@ $('#ytdlp').addEventListener('click', async () => {
   } catch (e) { setStatus('コピー失敗', true); }
 });
 
-document.addEventListener('DOMContentLoaded', load);
-if (document.readyState !== 'loading') load();
+// 全部保存: direct items go through ms-download-all (skip-existing +
+// uniquify-safe), HLS/DASH run one-by-one in the background's media chain.
+$('#saveall').addEventListener('click', () => {
+  if (!items.length) { setStatus('保存するアイテムがありません'); return; }
+  const btn = $('#saveall');
+  btn.classList.add('busy');
+  btn.textContent = '…';
+  chrome.runtime.sendMessage({ type: 'ms-download-all', tabId: tabId }, (resp) => {
+    btn.classList.remove('busy');
+    btn.textContent = '全部保存';
+    if (chrome.runtime.lastError || !resp) { setStatus('エラー: ' + (chrome.runtime.lastError ? chrome.runtime.lastError.message : '応答なし'), true); return; }
+    const parts = [];
+    if (resp.queued) parts.push(resp.queued + '件をキューに追加');
+    if (resp.skipped) parts.push(resp.skipped + '件は保存済みでスキップ');
+    if (resp.deferred) parts.push(resp.deferred + '件のHLS/DASHを順次処理中');
+    setStatus(parts.length ? parts.join(' · ') : '保存できるアイテムがありません');
+  });
+});
+
+$('#options').addEventListener('click', (e) => {
+  e.preventDefault();
+  chrome.runtime.openOptionsPage();
+});
+
+document.addEventListener('DOMContentLoaded', () => loadSettings(load));
+if (document.readyState !== 'loading') { loadSettings(load); }

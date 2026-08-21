@@ -391,6 +391,56 @@ function joinParts(parts) {
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// Local-file mux: two blob URLs (already fetched with the page session) ->
+// memfs -> ffmpeg -c copy. Same architecture as the DASH mux (which is
+// proven: jsfetch never enters the picture, so no deadlock).
+// ---------------------------------------------------------------------------
+async function handleMuxLocal(msg, sendResponse) {
+  if (current) { sendResponse({ error: '別のffmpegジョブが実行中です' }); return; }
+  if (!msg.videoUrl || !msg.audioUrl) { sendResponse({ error: '映像と音声のURLが必要です' }); return; }
+  // Reserve before awaits (same busy-guard discipline as the other runners)
+  const jobId = msg.jobId || 'mux-local';
+  current = { libav: null, jobId: jobId, chunks: null };
+  let libav = null;
+  try {
+    const vBuf = new Uint8Array(await (await fetch(msg.videoUrl)).arrayBuffer());
+    const aBuf = new Uint8Array(await (await fetch(msg.audioUrl)).arrayBuffer());
+
+    libav = await LibAVFactory({
+      noworker: true,
+      wasmurl: chrome.runtime.getURL('src/libav/libav-6.5.7.1-h264-aac-mp3.wasm.wasm'),
+    });
+    current.libav = libav;
+
+    const chunks = [];
+    await libav.mkwriterdev('out.mp4');
+    libav.onwrite = function (name, pos, data) {
+      chunks.push({ pos: pos, data: new Uint8Array(data) });
+    };
+
+    await libav.writeFile('/v.mp4', vBuf);
+    await libav.writeFile('/a.m4a', aBuf);
+    const rc = await libav.ffmpeg(['-y', '-nostdin', '-i', '/v.mp4', '-i', '/a.m4a', '-c', 'copy', '-map', '0:v:0', '-map', '1:a:0?', '-avoid_negative_ts', 'make_zero', '-f', 'mp4', 'out.mp4']);
+
+    let total = 0;
+    for (const c of chunks) total = Math.max(total, c.pos + c.data.length);
+    if (total === 0) {
+      sendResponse({ error: 'mux出力が空です' + (rc ? ' (rc=' + rc + ')' : '') });
+      return;
+    }
+    const buf = new Uint8Array(total);
+    for (const c of chunks) buf.set(c.data, c.pos);
+    sendResponse({ url: URL.createObjectURL(new Blob([buf], { type: 'video/mp4' })), size: total });
+  } catch (e) {
+    sendResponse({ error: String(e && e.message || e) });
+  } finally {
+    if (current && current.timer) clearInterval(current.timer);
+    current = null;
+    try { if (libav && libav.exit) libav.exit(); } catch (e) { /* ignore */ }
+  }
+}
+
 chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
   if (!msg || typeof msg.type !== 'string') return false;
   switch (msg.type) {
@@ -406,6 +456,9 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
       return true;
     case 'ms-offscreen-ffmpeg-run':
       runFfmpegJob(msg, sendResponse);
+      return true;
+    case 'ms-offscreen-mux-local':
+      handleMuxLocal(msg, sendResponse);
       return true;
     case 'ms-offscreen-dash-build':
       handleDashBuild(msg, sendResponse);

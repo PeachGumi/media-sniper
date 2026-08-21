@@ -72,8 +72,35 @@ const MediaSniperLogic = (function () {
     }
   }
 
-  function filenameForItem(item) {
+  // Optional root folder inside ~/Downloads. Empty string = flat (legacy).
+  function sanitizeRootFolder(root) {
+    let s = String(root == null ? '' : root).trim();
+    if (!s || /^[.\s_]+$/.test(s)) return '';
+    if (/^(\/|\\|[a-zA-Z]:)/.test(s)) return ''; // absolute paths rejected
+    if (/(^|[\\/])\.\.($|[\\/])/.test(s)) return ''; // '..' segment rejected
+    s = s.replace(/[\\/:*?"<>|]/g, '_');
+    s = s.replace(/\s+$/, '');
+    if (s.length > 80) s = s.slice(0, 80);
+    return s;
+  }
+
+  function isBlacklisted(host, listRaw) {
+    const h = String(host || '').toLowerCase();
+    const list = String(listRaw || '').toLowerCase();
+    if (!h || !list.trim()) return false;
+    const parts = list.split(/[\n,]/);
+    for (let raw of parts) {
+      let p = raw.trim().toLowerCase().replace(/^https?:\/\//, '').replace(/^www\./, '');
+      if (!p) continue;
+      if (p.indexOf('/') >= 0) p = p.slice(0, p.indexOf('/'));
+      if (h === p || h.endsWith('.' + p)) return true;
+    }
+    return false;
+  }
+
+  function filenameForItem(item, rootFolder) {
     // flat filename, saved directly into the user's Downloads folder
+    // (or <rootFolder>/name.ext when a root folder is configured)
     const ext = item.ext || DEFAULT_EXT[item.kind] || 'bin';
     let base = '';
     if (item.title) base = sanitizeFilename(item.title, '');
@@ -89,7 +116,9 @@ const MediaSniperLogic = (function () {
       base = sanitizeFilename(seg, '');
     }
     if (!base) base = 'media-sniper_' + (item.kind || 'media');
-    return sanitizeFilename(base, 'clip') + '.' + ext;
+    const root = sanitizeRootFolder(rootFolder);
+    const name = sanitizeFilename(base, 'clip') + '.' + ext;
+    return root ? root + '/' + name : name;
   }
 
   function itemKey(url) {
@@ -552,6 +581,8 @@ const MediaSniperLogic = (function () {
     kindFromContentType: kindFromContentType,
     sanitizeFilename: sanitizeFilename,
     filenameForItem: filenameForItem,
+    sanitizeRootFolder: sanitizeRootFolder,
+    isBlacklisted: isBlacklisted,
     itemKey: itemKey,
     mergeItems: mergeItems,
     formatBytes: formatBytes,

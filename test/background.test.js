@@ -31,6 +31,10 @@ function makeChrome() {
         },
         set: function (obj) { Object.assign(storageData, obj); return Promise.resolve(); },
       },
+      local: {
+        get: function () { return Promise.resolve({}); },
+        set: function () { return Promise.resolve(); },
+      },
     },
     downloads: {
       onDeterminingFilename: (function () {
@@ -103,6 +107,9 @@ function makeChrome() {
           // emulate a VOD remux: real ffmpeg would jsfetch everything itself
           chrome.__ffmpegDone = { jobId: msg.jobId, url: 'blob:fake/ffmpeg-remux', size: 5000, ext: msg.ext, partial: false };
           return Promise.resolve({ url: chrome.__ffmpegDone.url, size: chrome.__ffmpegDone.size, partial: false });
+        }
+        if (msg && msg.type === 'ms-offscreen-mux-local') {
+          return Promise.resolve({ url: 'blob:fake/mux-local', size: 7777 });
         }
         if (msg && msg.type === 'ms-offscreen-dash-build') {
           chrome.__dashBuilds.push(msg);

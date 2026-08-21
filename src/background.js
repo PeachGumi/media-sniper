@@ -55,6 +55,22 @@ function restoreItems() {
 const restorePromise = restoreItems();
 
 // ---------------------------------------------------------------------------
+// settings (storage.local; the options page reads/writes the same keys)
+// ---------------------------------------------------------------------------
+const DEFAULT_SETTINGS = { rootFolder: '', minSizeKb: 500, blacklist: '' };
+const settings = Object.assign({}, DEFAULT_SETTINGS);
+const settingsReady = chrome.storage.local.get(['rootFolder', 'minSizeKb', 'blacklist']).then(function (r) {
+  settings.rootFolder = L.sanitizeRootFolder(r.rootFolder);
+  const n = parseInt(r.minSizeKb, 10);
+  settings.minSizeKb = (n > 0) ? n : DEFAULT_SETTINGS.minSizeKb;
+  settings.blacklist = String(r.blacklist || '');
+}).catch(function () { /* fresh profile: defaults */ });
+
+function effectiveMinSize() {
+  return (settings.minSizeKb > 0 ? settings.minSizeKb : DEFAULT_SETTINGS.minSizeKb) * 1024;
+}
+
+// ---------------------------------------------------------------------------
 // item intake
 // ---------------------------------------------------------------------------
 function normalizeItem(raw, tabId) {
@@ -93,12 +109,15 @@ function normalizeItem(raw, tabId) {
 
 function addItems(tabId, rawItems) {
   let items = state.itemsByTab.get(tabId) || [];
+  const minSize = effectiveMinSize();
   const incoming = (rawItems || []).map(function (r) { return normalizeItem(r, tabId); }).filter(Boolean).filter(function (it) {
-    // VDH rule at the detection gate: direct media with a known size under
-    // 500KB is noise (ads, thumbnails, tracking pixels). blob: items and
-    // items with unknown size pass through.
+    // VDH rule at the detection gate: direct media with a known size below
+    // the threshold is noise (ads, thumbnails, tracking pixels). blob: items
+    // and items with unknown size pass through.
     if (it.url.indexOf('blob:') === 0) return true;
-    if (it.size > 0 && it.size < L.MIN_DIRECT_MEDIA_SIZE) return false;
+    if (it.size > 0 && it.size < minSize) return false;
+    // user blacklist: never collect from these hosts
+    if (L.isBlacklisted(L.hostOf(it.url) || L.hostOf(it.pageUrl), settings.blacklist)) return false;
     return true;
   });
   if (!incoming.length) return { added: 0, total: items.length };
@@ -134,8 +153,8 @@ function updateBadge(tabId) {
 // that the option is honored for http(s) and blob: alike, and that
 // onDeterminingFilename is both unnecessary and harmful here.
 // ---------------------------------------------------------------------------
-function enqueue(item) {
-  const filename = L.filenameForItem(item);
+function enqueue(item, forcedFilename) {
+  const filename = forcedFilename || L.filenameForItem(item, settings.rootFolder);
   const entry = { id: 'q' + Date.now() + '-' + Math.floor(Math.random() * 1e6), item: item, filename: filename, status: 'queued', error: null };
   state.queue.push(entry);
   pump();
@@ -212,6 +231,7 @@ chrome.downloads.onChanged.addListener(function (delta) {
     if (entry.hlsUrl) {
       const j = state.hlsJobs.get(entry.hlsUrl);
       if (j) j.status = 'complete';
+      advanceChainByJob(entry.hlsUrl);
     }
     pump();
   } else if (s === 'interrupted') {
@@ -233,6 +253,7 @@ chrome.downloads.onChanged.addListener(function (delta) {
     if (entry.hlsUrl) {
       const j = state.hlsJobs.get(entry.hlsUrl);
       if (j) { j.status = 'failed'; j.error = errCode; }
+      advanceChainByJob(entry.hlsUrl);
     }
     pump();
   }
@@ -580,7 +601,46 @@ async function offscreenDashBuild(req, job) {
   return { url: resp.url, size: resp.size || 0 };
 }
 
-function startHls(tabId, jobKey, url, title, pageUrl, dashEntry, dashType, audioUrl) {
+// ---------------------------------------------------------------------------
+// YouTube adaptive mux: fetch the DASH video + audio tracks with the page's
+// googlevideo session ourselves, then mux two LOCAL files in ffmpeg — the
+// exact architecture that already works for DASH (jsfetch+dash demuxer is
+// unusable in this libav build; local-file mux never touches it).
+// ---------------------------------------------------------------------------
+async function runYtMuxJob(jobKey, item) {
+  const job = state.hlsJobs.get(jobKey);
+  if (!job) throw new Error('no job');
+  const hdrs = headersFor(item.url, item.headers);
+
+  // resolve real track URLs: youtube.com/oembed gives title metadata but not
+  // streams; the adapter already extracted signed googlevideo urls.
+  const videoUrl = item.url;
+  let audioUrl = item.audioUrl;
+  if (!audioUrl) throw new Error('音声トラックのURLがありません');
+
+  job.status = 'fetching';
+  job.mode = 'mux';
+  job.ext = 'mp4';
+
+  const vResp = await makeBlobUrlFromRemote(videoUrl, 'video/mp4', hdrs);
+  job.total = 2; job.done = 1;
+  const aResp = await makeBlobUrlFromRemote(audioUrl, 'audio/mp4', headersFor(audioUrl, hdrs));
+  job.done = 2;
+
+  job.status = 'combining';
+  const resp = await chrome.runtime.sendMessage({
+    type: 'ms-offscreen-mux-local',
+    jobId: jobKey,
+    videoUrl: vResp.url,
+    audioUrl: aResp.url,
+    ext: 'mp4',
+  });
+  if (!resp || !resp.url) throw new Error('YouTube mux失敗' + (resp && resp.error ? ': ' + resp.error : ''));
+  return finishMediaJob(jobKey, resp, 'mp4', 'video');
+}
+
+function startHls(tabId, jobKey, url, title, pageUrl, dashEntry, dashType, audioUrl, itemRef) {
+  msgItemRef = itemRef || null;
   const existing = state.hlsJobs.get(jobKey);
   if (existing && (existing.status === 'fetching' || existing.status === 'combining' || existing.status === 'recording')) {
     return Promise.resolve({ alreadyRunning: true });
@@ -593,7 +653,12 @@ function startHls(tabId, jobKey, url, title, pageUrl, dashEntry, dashType, audio
     dashType: dashType || null,
     audioUrl: audioUrl || null,
   });
-  const runner = /\.mpd(\?|$)/i.test(url) ? runDashJob : runHlsJob;
+  let runner = null;
+  if (url.indexOf('yt-mux:') === 0 && msgItemRef) {
+    runner = function () { return runYtMuxJob(jobKey, msgItemRef); };
+  } else {
+    runner = /\.mpd(\?|$)/i.test(url) ? runDashJob : runHlsJob;
+  }
   return runner(jobKey, url).catch(function (err) {
     const j = state.hlsJobs.get(jobKey);
     if (j) { j.status = 'failed'; j.error = String(err && err.message || err); }
@@ -610,6 +675,71 @@ function stopLiveRecording(url) {
   }).then(function (r) {
     return { ok: !!(r && r.ok) };
   }).catch(function () { return { ok: false }; });
+}
+
+// ---------------------------------------------------------------------------
+// Media chain (download-all): HLS/DASH jobs run ONE at a time — the offscreen
+// document holds a single ffmpeg instance, so parallel jobs would just queue
+// on the busy-guard anyway. Direct items are already in the download queue.
+// ---------------------------------------------------------------------------
+let msgItemRef = null;
+const mediaChains = new Map(); // tabId -> {items, idx, running, current, tabId}
+
+function startMediaChain(tabId, items) {
+  mediaChains.set(tabId, { items: items, idx: 0, running: false, current: null, tabId: tabId });
+  pumpMediaChain(tabId);
+}
+
+function pumpMediaChain(tabId) {
+  const chain = mediaChains.get(tabId);
+  if (!chain || chain.running) return;
+  while (chain.idx < chain.items.length) {
+    const item = chain.items[chain.idx];
+    const jobKey = item.url + (item.dashEntry != null && item.dashEntry >= 0 ? '#dash-entry=' + item.dashEntry : '');
+    const prev = state.hlsJobs.get(jobKey);
+    if (prev && prev.status === 'complete') { chain.idx++; continue; }
+    if (prev && (prev.status === 'fetching' || prev.status === 'combining' || prev.status === 'downloading' || prev.status === 'recording')) {
+      // already in flight (user clicked it individually, or a previous chain
+      // pass started it): park on it — advanceChainByJob fires on completion
+      chain.current = jobKey;
+      chain.running = true;
+      return;
+    }
+    chain.running = true;
+    chain.current = jobKey;
+    startHls(tabId, jobKey, item.url, item.title, item.pageUrl || null,
+      item.dashEntry != null ? item.dashEntry : null, item.dashType || null, item.audioUrl || null)
+      .then(function (resp) {
+        // {queued:true}: the blob DOWNLOAD is now in flight. The chain must
+        // NOT advance here — the runner resolving only means "queued". The
+        // download's onChanged (complete/interrupted) calls
+        // advanceChainByJob, which flips running=false, idx++ and pumps.
+        // Keep chain.running=true so nothing else re-pumps this slot.
+        if (resp && resp.queued) return;
+        // live recording / error / alreadyRunning: this item will never
+        // produce an onChanged of its own — skip it and move on.
+        chain.running = false;
+        chain.idx++;
+        pumpMediaChain(tabId);
+      })
+      .catch(function () {
+        chain.running = false;
+        chain.idx++;
+        pumpMediaChain(tabId);
+      });
+    return;
+  }
+  mediaChains.delete(tabId);
+}
+
+function advanceChainByJob(jobKey) {
+  mediaChains.forEach(function (chain) {
+    if (chain.running && chain.current === jobKey) {
+      chain.running = false;
+      chain.idx++;
+      pumpMediaChain(chain.tabId);
+    }
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -701,6 +831,8 @@ function onResponseStarted(details) {
     // dedicated-site adapters handle their own sites; the generic detector
     // only produces noise there (VDH's yS exclusion set, same idea)
     if (L.isDedicatedSite(url) || L.isDedicatedSite(details.initiator || '')) return;
+    // user blacklist: these hosts never produce items
+    if (L.isBlacklisted(L.hostOf(url), settings.blacklist)) return;
 
     let ct = null;
     let size = 0;
@@ -796,8 +928,8 @@ function onResponseStarted(details) {
     }
 
     if (kind === 'video' || kind === 'audio') {
-      // VDH rule: direct media below 500KB is noise (ads, thumbs, pixels)
-      if (size > 0 && size < L.MIN_DIRECT_MEDIA_SIZE) return;
+      // VDH rule: direct media below the configured threshold is noise
+      if (size > 0 && size < effectiveMinSize()) return;
       addItems(details.tabId, [{
         url: url, kind: kind, contentType: ct, size: size,
         via: 'webrequest', pageUrl: details.initiator || details.url, title: pageTitle(details.tabId),
@@ -868,6 +1000,96 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
       });
       return true;
     }
+    case 'ms-get-settings': {
+      settingsReady.then(function () {
+        sendResponse(Object.assign({}, settings));
+      });
+      return true;
+    }
+    case 'ms-set-settings': {
+      settingsReady.then(function () {
+        const inc = msg.settings || {};
+        if ('rootFolder' in inc) settings.rootFolder = L.sanitizeRootFolder(inc.rootFolder);
+        if ('minSizeKb' in inc) {
+          const n = parseInt(inc.minSizeKb, 10);
+          settings.minSizeKb = (n > 0) ? n : DEFAULT_SETTINGS.minSizeKb;
+        }
+        if ('blacklist' in inc) settings.blacklist = String(inc.blacklist || '');
+        chrome.storage.local.set({
+          rootFolder: settings.rootFolder,
+          minSizeKb: settings.minSizeKb,
+          blacklist: settings.blacklist,
+        }).catch(function () {});
+        sendResponse({ saved: true, settings: Object.assign({}, settings) });
+      });
+      return true;
+    }
+    case 'ms-download-all': {
+      restorePromise.then(function () {
+        const items = L.sortItems(state.itemsByTab.get(tabId) || []);
+        const existingSet = new Set();
+        try {
+          chrome.downloads.search({ limit: 1000 }, function (found) {
+            void chrome.runtime.lastError;
+            (found || []).forEach(function (d) { if (d.filename) existingSet.add(d.filename); });
+            respondAll(items, existingSet);
+          });
+        } catch (e) {
+          respondAll(items, existingSet); // search unavailable: no skip
+        }
+      });
+      const respondAll = function (items, existingSet) {
+        const root = settings.rootFolder;
+        let queued = 0;
+        let skipped = 0;
+        const deferredItems = [];
+        for (const it of items) {
+          if (it.kind === 'hls' || it.kind === 'hls-audio' || it.kind === 'dash') { deferredItems.push(it); continue; }
+          const fname = L.filenameForItem(it, root);
+          // skip-existing: compare against completed browser download history.
+          // The final on-disk name may differ from our suggestion (uniquify's
+          // " (n)" suffix), so accept any name with the same base+ext.
+          const m = /^(.*\/)?(.*)$/.exec(fname);
+          const base = m[2] || fname;
+          const esc = base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          const re = new RegExp('^(.*\\/)?' + esc.replace(/ \\(\\d+)\\./, ' ($1).') + '$');
+          let exists = false;
+          existingSet.forEach(function (f) {
+            const nm = f.split('/').pop();
+            if (re.test(nm)) exists = true;
+          });
+          if (exists) { skipped++; continue; }
+          enqueue(it, fname);
+          queued++;
+        }
+        if (deferredItems.length) startMediaChain(tabId, deferredItems);
+        sendResponse({ queued: queued, skipped: skipped, deferred: deferredItems.length });
+      };
+      return true;
+    }
+    case 'ms-yt-mux-download': {
+      const item = normalizeItem(msg.item, tabId);
+      if (!item || !msg.item.audioUrl) { sendResponse({ error: 'muxには映像と音声のURLが必要です' }); return false; }
+      enrichFromCapture(item);
+      item.audioUrl = msg.item.audioUrl;
+      const jobKey = 'yt-mux:' + (item.key || item.url);
+      const existing = state.hlsJobs.get(jobKey);
+      if (existing && (existing.status === 'fetching' || existing.status === 'combining')) {
+        sendResponse({ alreadyRunning: true, jobKey: jobKey });
+        return false;
+      }
+      state.hlsJobs.set(jobKey, {
+        status: 'fetching', tabId: tabId, done: 0, total: 2, error: null, live: false,
+        title: item.title || null, pageUrl: item.pageUrl || null, blobUrl: null, size: 0,
+        seconds: 0, bytes: 0, startedAt: Date.now(), mode: 'mux', ext: 'mp4',
+      });
+      runYtMuxJob(jobKey, item).catch(function (err) {
+        const j = state.hlsJobs.get(jobKey);
+        if (j) { j.status = 'failed'; j.error = String(err && err.message || err); }
+      });
+      sendResponse({ started: true, jobKey: jobKey });
+      return false;
+    }
     case 'ms-clear': {
       state.itemsByTab.delete(tabId);
       persistItems();
@@ -903,7 +1125,8 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
       return true;
     }
     case 'ms-hls-status': {
-      const jobKey = msg.url + (msg.dashEntry != null && msg.dashEntry >= 0 ? '#dash-entry=' + msg.dashEntry : '');
+      // jobKey form is used by yt-mux jobs (their key is not the media URL)
+      const jobKey = msg.jobKey || (msg.url + (msg.dashEntry != null && msg.dashEntry >= 0 ? '#dash-entry=' + msg.dashEntry : ''));
       const job = state.hlsJobs.get(jobKey) || state.hlsJobs.get(msg.url);
       sendResponse(job ? {
         status: job.status, done: job.done, total: job.total, error: job.error,

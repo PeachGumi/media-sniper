@@ -1,11 +1,19 @@
 {
   "manifest_version": 3,
   "name": "Media Sniper",
-  "version": "0.9.0",
-  "description": "Detects videos, HLS streams and audio from any page using the browser's own session (with a dedicated YouTube adapter), and saves them to ~/Downloads.",
+  "version": "0.10.0",
+  "description": "Detects videos, HLS/DASH streams and audio from any page using the browser's own session, with YouTube adaptive mux and batch save.",
   "minimum_chrome_version": "110",
-  "permissions": ["downloads", "storage", "tabs", "webRequest", "offscreen"],
-  "host_permissions": ["<all_urls>"],
+  "permissions": [
+    "downloads",
+    "storage",
+    "tabs",
+    "webRequest",
+    "offscreen"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
   "content_security_policy": {
     "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
   },
@@ -14,22 +22,36 @@
   },
   "content_scripts": [
     {
-      "matches": ["<all_urls>"],
-      "js": ["src/logic.js", "src/content.js"],
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "src/logic.js",
+        "src/content.js"
+      ],
       "run_at": "document_start",
       "all_frames": true
     },
     {
-      "matches": ["*://*.youtube.com/*"],
-      "js": ["src/youtube.js"],
+      "matches": [
+        "*://*.youtube.com/*"
+      ],
+      "js": [
+        "src/youtube.js"
+      ],
       "run_at": "document_start",
       "world": "MAIN"
     }
   ],
   "web_accessible_resources": [
     {
-      "resources": ["src/logic.js", "src/bridge.js"],
-      "matches": ["<all_urls>"]
+      "resources": [
+        "src/logic.js",
+        "src/bridge.js"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
     }
   ],
   "action": {
@@ -47,5 +69,9 @@
     "32": "icons/icon32.png",
     "48": "icons/icon48.png",
     "128": "icons/icon128.png"
+  },
+  "options_ui": {
+    "page": "popup/options.html",
+    "open_in_tab": true
   }
 }

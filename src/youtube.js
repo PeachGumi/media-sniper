@@ -67,6 +67,29 @@
         if (!f || !f.url || String(f.url).indexOf('http') !== 0 || !/^audio\//.test(f.mimeType || '')) return;
         if (!bestAudio || (parseInt(f.bitrate, 10) || 0) > (parseInt(bestAudio.bitrate, 10) || 0)) bestAudio = f;
       });
+
+      // best VIDEO-ONLY adaptive mp4 + mp4 audio -> mux item (1080p+).
+      // mp4-only on purpose: the offscreen muxer writes an mp4 container, and
+      // webm video / opus audio in mp4 does not play anywhere.
+      var bestVideoOnly = null;
+      (sd.adaptiveFormats || []).forEach(function (f) {
+        if (!f || !f.url || String(f.url).indexOf('http') !== 0) return;
+        if (String(f.mimeType || '').indexOf('video/mp4') !== 0) return;
+        if (!bestVideoOnly || (parseInt(f.bitrate, 10) || 0) > (parseInt(bestVideoOnly.bitrate, 10) || 0)) bestVideoOnly = f;
+      });
+      var muxAudio = bestAudio && String(bestAudio.mimeType || '').indexOf('audio/mp4') === 0 ? bestAudio : null;
+      if (bestVideoOnly && muxAudio && muxAudio.url !== bestVideoOnly.url) {
+        items.push({
+          url: bestVideoOnly.url, kind: 'video', contentType: bestVideoOnly.mimeType || null,
+          size: (parseInt(bestVideoOnly.contentLength, 10) || 0) + (parseInt(muxAudio.contentLength, 10) || 0),
+          ext: 'mp4',
+          title: title + ' [' + (bestVideoOnly.qualityLabel || bestVideoOnly.quality || '?') + ']+音声',
+          via: 'youtube', pageUrl: pageUrl, duration: duration,
+          ytVideoId: videoId,
+          audioUrl: muxAudio.url,
+        });
+      }
+
       if (bestAudio) {
         items.push({
           url: bestAudio.url, kind: 'audio', contentType: bestAudio.mimeType || null,
