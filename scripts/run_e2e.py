@@ -24,11 +24,61 @@ import time
 import urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-BRAVE = "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"
 PROFILE = os.path.expanduser("~/.cache/ms-brave-test-e2e")
 EXT_ID = "gahplhbihkiodjleemjahaiajhgaijlb"
 
 KEEP = "--keep" in sys.argv
+
+
+def find_browser():
+    """Locate a Chromium-based browser binary across platforms.
+
+    Priority: $MEDIA_SNIPER_BRAVE env var > brave > chrome, per-platform
+    well-known install paths plus PATH lookup via shutil.which.
+    """
+    import shutil
+
+    def candidates():
+        if sys.platform == "darwin":
+            yield "brave", [
+                "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+                os.path.expanduser("~/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"),
+            ]
+            yield "chrome", [
+                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+                os.path.expanduser("~/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+            ]
+        elif os.name == "nt":
+            pf = os.environ.get("PROGRAMFILES", r"C:\Program Files")
+            pf86 = os.environ.get("PROGRAMFILES(X86)", pf)
+            local = os.environ.get("LOCALAPPDATA", "")
+            yield "brave", [
+                os.path.join(pf, "BraveSoftware", "Brave-Browser", "Application", "brave.exe"),
+                os.path.join(pf86, "BraveSoftware", "Brave-Browser", "Application", "brave.exe"),
+                os.path.join(local, "BraveSoftware", "Brave-Browser", "Application", "brave.exe"),
+            ]
+            yield "chrome", [
+                os.path.join(pf, "Google", "Chrome", "Application", "chrome.exe"),
+                os.path.join(local, "Google", "Chrome", "Application", "chrome.exe"),
+            ]
+        else:  # linux & friends
+            yield "brave", ["brave-browser", "brave-browser-stable", "brave"]
+            yield "chrome", ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser"]
+
+    # explicit override wins
+    env_browser = os.environ.get("MEDIA_SNIPER_BRAVE")
+    if env_browser and os.path.exists(env_browser):
+        return env_browser
+
+    for name, paths in candidates():
+        for p in paths:
+            if os.sep not in p and "/" not in p:
+                found = shutil.which(p)
+                if found:
+                    return found
+            elif os.path.exists(p):
+                return p
+    return None
 
 
 def free_port():
@@ -90,9 +140,16 @@ def main():
     prefs = write_prefs()
     print(f"[boot] prefs written: {prefs}")
 
+    browser = find_browser()
+    if not browser:
+        print("[FAIL] no Chromium browser found (install Brave/Chrome/Chromium, "
+              "or point MEDIA_SNIPER_BRAVE at the binary)")
+        return False
+    print(f"[boot] browser: {browser}")
+
     env = dict(os.environ)
     brave_cmd = [
-        BRAVE,
+        browser,
         "--headless=new",
         f"--remote-debugging-port={cdp_port}",
         f"--user-data-dir={PROFILE}",
@@ -119,17 +176,16 @@ def main():
         for p, name in procs:
             if p.poll() is None:
                 try:
-                    if name == "brave":
-                        # graceful: ask CDP to close, then SIGTERM fallback
-                        try:
-                            json.load(urllib.request.urlopen(
-                                f"http://127.0.0.1:{cdp_port}/json/version", timeout=2))
-                            subprocess.run(["pkill", "-TERM", "-f",
-                                            f"remote-debugging-port={cdp_port}"],
-                                           capture_output=True, timeout=5)
-                        except Exception:
-                            p.terminate()
-                    else:
+                    # SIGTERM the whole command line (port pinpoints our instance);
+                    # works cross-platform via process kill, CDP close first when
+                    # reachable for a graceful shutdown
+                    try:
+                        json.load(urllib.request.urlopen(
+                            f"http://127.0.0.1:{cdp_port}/json/version", timeout=2))
+                        subprocess.run(["pkill", "-TERM", "-f",
+                                        f"remote-debugging-port={cdp_port}"],
+                                       capture_output=True, timeout=5)
+                    except Exception:
                         p.terminate()
                 except Exception:
                     pass
@@ -149,15 +205,13 @@ def main():
     try:
         if not wait_cdp(cdp_port):
             print("[FAIL] CDP never came up")
-            ok = False
-            return
+            return False
         print("[ok] CDP up")
 
         if not wait_sw(cdp_port):
             print("[FAIL] extension service worker never appeared "
                   "(extension id mismatch or load failure)")
-            ok = False
-            return
+            return False
         print("[ok] service worker awake")
 
         e2e_env = dict(env)
@@ -166,8 +220,7 @@ def main():
             [sys.executable, os.path.join(ROOT, "scripts", "e2e_download_test.py"),
              str(fixture_port)],
             env=e2e_env, timeout=180)
-        if r.returncode != 0:
-            ok = False
+        ok = r.returncode == 0
     finally:
         if KEEP:
             print(f"\n[keep] browser left running: CDP={cdp_port} fixture={fixture_port}")
@@ -177,8 +230,8 @@ def main():
             print("[teardown] done")
 
     print("RUNNER:", "PASS" if ok else "FAIL")
-    sys.exit(0 if ok else 1)
+    return ok
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(0 if main() else 1)

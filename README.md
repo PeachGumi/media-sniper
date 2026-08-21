@@ -74,7 +74,7 @@ npm run e2e     # one-command headless E2E: boots Brave + fixture server,
 npm run zip     # distributable zip
 ```
 
-The E2E uses its own throwaway Brave profile and never touches your daily browser. CI runs the unit suite on every push (see `.github/workflows/ci.yml`).
+The E2E uses its own throwaway browser profile and never touches your daily browser. It auto-detects Brave/Chrome/Chromium (macOS/Windows/Linux); set `MEDIA_SNIPER_BRAVE=/path/to/binary` to override. CI runs the unit suite on every push (see `.github/workflows/ci.yml`).
 
 Project layout:
 
