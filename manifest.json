@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Media Sniper",
-  "version": "0.10.0",
+  "version": "0.10.1",
   "description": "Detects videos, HLS/DASH streams and audio from any page using the browser's own session, with YouTube adaptive mux and batch save.",
   "minimum_chrome_version": "110",
   "permissions": [
