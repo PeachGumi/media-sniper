@@ -22,12 +22,17 @@ import sys
 import time
 import urllib.request
 
-sys.path.insert(0, "/Users/user/.local/share/uvx/browser-use/lib/python3.13/site-packages")
+for _p in (
+    "/Users/user/.local/share/uv/tools/browser-use/lib/python3.11/site-packages",
+    "/Users/user/.local/share/uvx/browser-use/lib/python3.13/site-packages",
+    "/Users/user/.local/share/uvx/browser-use/lib/python3.12/site-packages",
+):
+    if os.path.isdir(_p) and _p not in sys.path:
+        sys.path.insert(0, _p)
 try:
     import websockets
 except ImportError:
-    sys.path.insert(0, "/Users/user/.local/share/uvx/browser-use/lib/python3.12/site-packages")
-    import websockets
+    pass
 
 import asyncio
 
@@ -136,13 +141,28 @@ async def main():
     step("read msItems", True, f"{len(flat)} items")
 
     # 3. detection assertions for this fixture port
-    ours = [i.get("url", "") for i in flat if f":{FIXTURE_PORT}/" in i.get("url", "")]
-    need = {"clip.mp4": False, "audio.mp3": False, "master.m3u8": False}
-    for u in ours:
-        for k in need:
-            if u.endswith(k):
-                need[k] = True
-    step("detected video/audio/hls", all(need.values()), json.dumps(need))
+    # NOTE: a master playlist surfaces as its VARIANT item(s) (VDH-style
+    # per-resolution items), so the expected artifact is media.m3u8, not
+    # master.m3u8. Detection lands asynchronously (SW fetches + parses the
+    # playlist after onResponseStarted), so poll for up to ~12s.
+    need = {"clip.mp4": False, "audio.mp3": False, "media.m3u8": False}
+    deadline = time.time() + 12
+    while time.time() < deadline:
+        try:
+            items = parse_json_value(await ws_eval(sw_ws(),
+                "chrome.storage.session.get('msItems').then(r => JSON.stringify(r.msItems || {}))", timeout=8))
+            flat = [i for arr in (items or {}).values() for i in arr]
+            ours = [i.get("url", "") for i in flat if f":{FIXTURE_PORT}/" in i.get("url", "")]
+            for u in ours:
+                for k in need:
+                    if u.endswith(k):
+                        need[k] = True
+        except Exception:
+            pass
+        if all(need.values()):
+            break
+        await asyncio.sleep(1.5)
+    step("detected video/audio/hls-variant", all(need.values()), json.dumps(need))
 
     # 4. open the real popup in a tab (a genuine extension context)
     popup_url = f"chrome-extension://{EXT_ID}/popup/popup.html"
@@ -201,6 +221,33 @@ async def main():
             "bytesReceived": final.get("bytesReceived"), "totalBytes": final.get("totalBytes"),
         })
 
+    # --- v0.10 features: settings round-trip + download-all ------------------
+    # settings round-trip (popup context = the same message path options use)
+    try:
+        st = parse_json_value(await ws_eval(popup["webSocketDebuggerUrl"],
+            "chrome.runtime.sendMessage({type:'ms-set-settings',settings:{rootFolder:'e2e-root',minSizeKb:500,blacklist:''}})"
+            ".then(r=>JSON.stringify(r)).catch(e=>JSON.stringify({err:String(e)}))"))
+        ok_st = isinstance(st, dict) and st.get("saved") and st.get("settings", {}).get("rootFolder") == "e2e-root"
+        step("set-settings saved (root sanitized/kept)", bool(ok_st), st)
+        # download-all with the root folder: fixture clip re-queues under e2e-root/
+        try:
+            da = parse_json_value(await ws_eval(popup["webSocketDebuggerUrl"],
+                "chrome.runtime.sendMessage({type:'ms-download-all',tabId:1})"
+                ".then(r=>JSON.stringify(r)).catch(e=>JSON.stringify({err:String(e)}))"))
+            ok_da = isinstance(da, dict) and ("queued" in da) and ("skipped" in da) and ("deferred" in da)
+            step("ms-download-all responds with counters", bool(ok_da), da)
+        except Exception as e:
+            step("ms-download-all responds with counters", False, e)
+    except Exception as e:
+        step("set-settings saved (root sanitized/kept)", False, e)
+
+    # restore default settings so the test profile stays flat
+    try:
+        await ws_eval(popup["webSocketDebuggerUrl"],
+            "chrome.runtime.sendMessage({type:'ms-set-settings',settings:{rootFolder:'',minSizeKb:500,blacklist:''}})")
+    except Exception:
+        pass
+
     # queue status for completeness
     try:
         q = parse_json_value(await ws_eval(popup["webSocketDebuggerUrl"],
@@ -212,6 +259,7 @@ async def main():
     verdict["pass"] = all(s["ok"] for s in verdict["steps"])
     print(json.dumps(verdict, ensure_ascii=False, indent=1))
     print("RESULT:", "PASS" if verdict["pass"] else "FAIL")
+    sys.exit(0 if verdict["pass"] else 1)
 
 
 asyncio.run(main())

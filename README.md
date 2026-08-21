@@ -68,11 +68,13 @@ MV3 ブラウザ拡張 (Brave/Chrome): いま開いてるページから動画�
 ## 開発
 
 ```
-npm test          # VM テスト 137件 (logic/bridge/background)
+npm test          # ユニットテスト 341件 (logic/bridge/background/youtube VM)
 npm run check     # 全JS構文チェック
+npm run e2e       # ワンコマンドE2E: Brave起動 → fixture → 検出 → 実DL → 設定/一括保存検証 → 自動後始末
 npm run zip       # 配布zip
 ```
 
+- `scripts/run_e2e.py` — E2Eランナー。ヘッドレス専用プロファイル (~/.cache/ms-brave-test-e2e) を使い、日常ブラウザには触れない。exit code 0=PASS / 1=FAIL
 - `scripts/sw_eval.py` — CDP経由でSWの中の式を実行 (デバッグ用)
 - `scripts/make_fixture.py` — ローカルHLSテストページ生成
 - `test/fixture/hls/` — 検証用フィクスチャ

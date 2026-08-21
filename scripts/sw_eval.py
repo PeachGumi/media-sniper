@@ -8,12 +8,17 @@ import os
 import sys
 import urllib.request
 
-sys.path.insert(0, "/Users/user/.local/share/uvx/browser-use/lib/python3.13/site-packages")
+for _p in (
+    "/Users/user/.local/share/uv/tools/browser-use/lib/python3.11/site-packages",
+    "/Users/user/.local/share/uvx/browser-use/lib/python3.13/site-packages",
+    "/Users/user/.local/share/uvx/browser-use/lib/python3.12/site-packages",
+):
+    if os.path.isdir(_p) and _p not in sys.path:
+        sys.path.insert(0, _p)
 try:
     import websockets
 except ImportError:
-    sys.path.insert(0, "/Users/user/.local/share/uvx/browser-use/lib/python3.12/site-packages")
-    import websockets
+    pass
 
 import asyncio
 
