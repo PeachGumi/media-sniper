@@ -25,15 +25,64 @@ Works on Chrome and Brave (Manifest V3). Verified on Brave 151.
 | Settings | Root folder inside Downloads, minimum direct-media size, per-domain blacklist |
 | Naming | Title-based filenames with sanitization; optional root folder; `uniquify` conflict handling |
 
-Not supported: subtitle embedding, DRM (Widevine/EME) content, and sites where the stream never traverses the browser.
+### Limitations
+
+- DRM-protected streams (Widevine/EME — Netflix, most paid streaming) cannot be downloaded, by design
+- Some sites serve media via MSE (blob: streaming without a playlist); detection there is partial — if you can see an m3u8/mpd request in DevTools, Media Sniper will still pick it up
+- Subtitles are not downloaded
+
+Not supported means we won't help make it work; everything else is fair game for bug reports.
 
 ## Install
 
-1. `git clone` this repo
-2. Open `brave://extensions` (or `chrome://extensions`) → enable Developer mode
-3. "Load unpacked" → select this directory
+No build step and no dependencies — the repository loads as-is.
 
-No build step required — the repo is load-ready.
+### Option A: Download a zip (no git needed)
+
+1. Download and unzip: [latest release](https://github.com/PeachGumi/media-sniper/releases/latest) (`media-sniper.zip`)
+   - macOS/Linux: double-click, or `unzip media-sniper.zip -d media-sniper`
+   - Windows: right-click → Extract All
+2. Open the extensions page in your browser:
+   - Brave: `brave://extensions`
+   - Chrome / Edge / Chromium: `chrome://extensions` (Edge: `edge://extensions`)
+3. Turn on **Developer mode** (toggle in the top-right corner)
+4. Click **Load unpacked** and select the unzipped `media-sniper` folder
+   - ⚠️ Select the folder that directly contains `manifest.json`, not its parent
+
+### Option B: Clone with git
+
+```bash
+git clone https://github.com/PeachGumi/media-sniper.git
+```
+
+Then follow steps 2–4 above, selecting the cloned `media-sniper` directory.
+
+### Updating to a new version
+
+1. Grab the new zip (or `git pull` if you cloned)
+2. Replace the folder's contents — or simply remove it and load the fresh copy
+3. On the extensions page, click the ↻ **reload** icon on the Media Sniper card
+4. If anything looks odd after an update, remove the extension and load it again (downloads and settings are not affected — they live in the browser profile)
+
+### Verifying it works
+
+- The Media Sniper icon appears in the toolbar (pin it via the puzzle-piece menu)
+- Open any page with a video, play it, then click the icon — detected items are listed
+- Files are saved to `~/Downloads/` (or the root folder you set in Settings)
+
+### Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| "Load unpacked" is missing | Developer mode toggle (step 3) is off |
+| Icon does nothing | Reload the extension, then reopen the popup |
+| Items never appear | Media must actually be played/requested on the page; press 再スキャン (Rescan) |
+| Download saves but file won't play | Some sites serve DRM or MSE-only streams — see Limitations below |
+| Extension disappears after browser update | Re-do steps 2–4; unpacked extensions can need re-loading after major version bumps |
+
+> **Note**: unpacked extensions are not sandboxed like store installs — Chrome may show a
+> "disable developer mode extensions" notice occasionally. This is expected and harmless here
+> since all code is in this repository and auditable.
 
 ## Usage
 
