@@ -42,4 +42,14 @@ eq(L.isBlacklisted('good.com', null), false, 'null list never blocks');
 eq(L.isBlacklisted('', 'x.com'), false, 'no host never blocked');
 eq(L.isBlacklisted('sub.X.COM', 'x.com'), true, 'case-insensitive');
 
+// --- itemKey: chunked CDN (googlevideo-style) keys --------------------------
+const gvA = 'https://rr3---sn-abcd.googlevideo.com/videoplayback?id=VIDEO_A&itag=137&range=0-1000';
+const gvB = 'https://rr3---sn-abcd.googlevideo.com/videoplayback?id=VIDEO_B&itag=137&range=0-2000';
+const gvA2 = 'https://rr3---sn-abcd.googlevideo.com/videoplayback?id=VIDEO_A&itag=137&range=5000-9000';
+const gvA140 = 'https://rr3---sn-abcd.googlevideo.com/videoplayback?id=VIDEO_A&itag=140&range=0-100';
+eq(L.itemKey(gvA) === L.itemKey(gvB), false, 'different videos never share a key');
+eq(L.itemKey(gvA) === L.itemKey(gvA2), true, 'range chunks of one track dedupe');
+eq(L.itemKey(gvA) === L.itemKey(gvA140), false, 'different itags stay distinct');
+eq(L.isBlacklisted('sub.X.COM', 'x.com'), true, 'case-insensitive');
+
 report('logic3');

@@ -129,12 +129,24 @@ const MediaSniperLogic = (function () {
       // Playlists: the query string often carries the auth token and
       // distinguishes variants, so keep the full URL as the key.
       if (/\.(m3u8|mpd)$/i.test(u.pathname)) return url;
-      // YouTube videoplayback URLs differ only in query params; keep `itag`
-      // so multiple formats of the same video stay separate items.
+      // Chunked media CDNs (googlevideo et al.): range requests for ONE track
+      // differ only in transient params (range/ratebypass/ei...), while
+      // DIFFERENT tracks or videos share the same pathname. Key on
+      // path + itag (format) + id (video) so chunks of one track dedupe
+      // without ever colliding across videos or formats.
       const itag = u.searchParams.get('itag');
+      const gid = u.searchParams.get('id');
+      if (itag != null || gid != null) {
+        u.search = '';
+        u.hash = '';
+        let k = u.href;
+        if (itag != null) k += '#itag=' + itag;
+        if (gid != null) k += '#gid=' + gid;
+        return k;
+      }
       u.search = '';
       u.hash = '';
-      return itag ? u.href + '#itag=' + itag : u.href;
+      return u.href;
     } catch (e) {
       return url;
     }

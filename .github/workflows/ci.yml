@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Syntax check
+        run: npm run check
+
+      - name: Manifest validation
+        run: node -e "JSON.parse(require('fs').readFileSync('manifest.json','utf8')); console.log('manifest OK')"
+
+      - name: Package
+        run: npm run zip
+
+      - name: Privacy scan
+        run: |
+          # fail the build if new suspicious patterns creep in
+          ! grep -rnE "eval\(|new Function\(|XMLHttpRequest\(" src/ popup/ --include="*.js" | grep -v "prototype" | grep -v "nativeFetch"
+          ! grep -rniE "analytics|telemetry|track\.|google-analytics" src/ popup/ --include="*.js"
+          echo "privacy scan clean"
