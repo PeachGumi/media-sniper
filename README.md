@@ -1,5 +1,7 @@
 # Media Sniper
 
+**English** | [日本語](README.ja.md)
+
 A privacy-first MV3 browser extension that detects and downloads videos, HLS/DASH streams and audio from the page you're viewing — using your browser's own logged-in session. No accounts, no servers, no telemetry: media is fetched with your cookies by your browser and saved straight to `~/Downloads`.
 
 Works on Chrome and Brave (Manifest V3). Verified on Brave 151.
