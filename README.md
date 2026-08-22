@@ -88,6 +88,8 @@ Then follow steps 2–4 above, selecting the cloned `media-sniper` directory.
 
 ## Usage
 
+For detailed day-to-day behavior (detection rules, button states, naming, settings, troubleshooting), see the **[User Guide](docs/USAGE.ja.md)** (Japanese).
+
 1. Open a page with video/audio and play it (detection watches actual media requests)
 2. Click the Media Sniper icon → pick an item → 保存 (Save)
 3. Files land in `~/Downloads/` (or your configured root folder)
