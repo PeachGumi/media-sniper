@@ -57,6 +57,12 @@
     ownedUrls.delete(url);
   }
 
+  function revokeOwnedUrl(url) {
+    if (!ownedUrls.has(url)) return false;
+    try { URL.revokeObjectURL(url); } catch (_) { forgetUrl(url); }
+    return true;
+  }
+
   URL.createObjectURL = function (blob) {
     if (blob && typeof blob.size === 'number' && blob.size > MAX_OUTPUT_BYTES) {
       throw new RangeError('media output exceeds in-memory safety limit');
@@ -98,6 +104,20 @@
   if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage &&
       typeof chrome.runtime.onMessage.addListener === 'function') {
     const rawAddListener = chrome.runtime.onMessage.addListener.bind(chrome.runtime.onMessage);
+
+    // Explicit ownership release from the service worker. The TTL remains a
+    // fallback for crashes/restarts that happen before this message is sent.
+    rawAddListener(function (msg, sender, sendResponse) {
+      if (!msg || msg.type !== 'ms-offscreen-revoke-url') return false;
+      if (!isTrustedOffscreenSender(sender, chrome.runtime.id)) {
+        try { sendResponse({ error: 'rejected by offscreen security policy' }); } catch (_) { /* ignore */ }
+        return false;
+      }
+      const released = typeof msg.url === 'string' ? revokeOwnedUrl(msg.url) : false;
+      try { sendResponse({ ok: true, released: released }); } catch (_) { /* ignore */ }
+      return false;
+    });
+
     chrome.runtime.onMessage.addListener = function (listener) {
       return rawAddListener(function (msg, sender, sendResponse) {
         if (msg && typeof msg.type === 'string' && /^ms-offscreen-/.test(msg.type) &&
@@ -105,7 +125,20 @@
           try { sendResponse({ error: 'rejected by offscreen security policy' }); } catch (_) { /* ignore */ }
           return false;
         }
-        return listener(msg, sender, sendResponse);
+        let guardedResponse = sendResponse;
+        if (msg && msg.type === 'ms-offscreen-ffmpeg-status') {
+          // offscreen.js keeps lastDone for SW-restart recovery. If lifecycle
+          // cleanup already revoked that URL (or TTL did), never expose a stale
+          // recovery result to a newly started service worker.
+          guardedResponse = function (response) {
+            let safe = response;
+            if (response && response.done && response.done.url && !ownedUrls.has(response.done.url)) {
+              safe = Object.assign({}, response, { done: null });
+            }
+            return sendResponse(safe);
+          };
+        }
+        return listener(msg, sender, guardedResponse);
       });
     };
   }
@@ -123,6 +156,8 @@
     MAX_SINGLE_RESPONSE_BYTES,
     BLOB_URL_TTL_MS,
     ownedUrlCount: function () { return ownedUrls.size; },
+    ownsUrl: function (url) { return ownedUrls.has(url); },
+    revokeOwnedUrl,
     isTrustedOffscreenSender,
   };
 

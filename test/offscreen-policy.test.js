@@ -20,12 +20,12 @@ const revoked = [];
 let pagehide = null;
 let cancelled = false;
 let responseLength = '10';
-let rawRuntimeListener = null;
+const runtimeListeners = [];
 const fakeChrome = {
   runtime: {
     id: 'extid',
     onMessage: {
-      addListener: function (fn) { rawRuntimeListener = fn; },
+      addListener: function (fn) { runtimeListeners.push(fn); },
     },
   },
 };
@@ -61,6 +61,7 @@ const policy = context.MediaSniperMemoryPolicy;
 ok(!!policy, 'memory policy installed');
 eq(policy.MAX_OUTPUT_BYTES, 768 * 1024 * 1024, 'output limit fixed');
 eq(policy.MAX_SINGLE_RESPONSE_BYTES, 512 * 1024 * 1024, 'single response limit fixed');
+eq(runtimeListeners.length, 1, 'policy installs explicit revoke listener');
 
 {
   const huge = new FakeBlob([]);
@@ -75,7 +76,7 @@ eq(policy.MAX_SINGLE_RESPONSE_BYTES, 512 * 1024 * 1024, 'single response limit f
   const url = context.URL.createObjectURL(small);
   eq(policy.ownedUrlCount(), 1, 'created Blob URL is tracked');
   context.URL.revokeObjectURL(url);
-  eq(policy.ownedUrlCount(), 0, 'explicit revoke releases ownership');
+  eq(policy.ownedUrlCount(), 0, 'explicit local revoke releases ownership');
   eq(revoked.includes(url), true, 'native revoke invoked');
 }
 
@@ -87,9 +88,16 @@ eq(policy.MAX_SINGLE_RESPONSE_BYTES, 512 * 1024 * 1024, 'single response limit f
   eq(policy.isTrustedOffscreenSender({ id: 'other' }, 'extid'), false, 'other extension rejected');
 
   let handled = 0;
-  context.chrome.runtime.onMessage.addListener(function () { handled++; return false; });
+  context.chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
+    handled++;
+    if (msg && msg.type === 'ms-offscreen-ffmpeg-status') {
+      sendResponse({ running: false, done: { url: msg.testUrl } });
+    }
+    return false;
+  });
+  const guardedListener = runtimeListeners[runtimeListeners.length - 1];
   let rejection = null;
-  rawRuntimeListener(
+  guardedListener(
     { type: 'ms-offscreen-fetch-blob', url: 'https://example.test/x' },
     { id: 'extid', tab: { id: 9 } },
     function (r) { rejection = r; }
@@ -97,12 +105,39 @@ eq(policy.MAX_SINGLE_RESPONSE_BYTES, 512 * 1024 * 1024, 'single response limit f
   eq(handled, 0, 'rejected offscreen command never reaches handler');
   ok(rejection && /rejected/.test(rejection.error), 'rejected offscreen sender receives error');
 
-  rawRuntimeListener(
+  guardedListener(
     { type: 'ms-offscreen-fetch-blob', url: 'https://example.test/x' },
     { id: 'extid' },
     function () {}
   );
   eq(handled, 1, 'trusted worker command reaches offscreen handler');
+
+  const owned = context.URL.createObjectURL(new context.Blob([new Uint8Array(4)]));
+  let denied = null;
+  runtimeListeners[0](
+    { type: 'ms-offscreen-revoke-url', url: owned },
+    { id: 'extid', tab: { id: 2 } },
+    function (r) { denied = r; }
+  );
+  ok(denied && /rejected/.test(denied.error), 'content script cannot revoke offscreen ownership');
+  eq(policy.ownsUrl(owned), true, 'denied revoke leaves URL owned');
+
+  let released = null;
+  runtimeListeners[0](
+    { type: 'ms-offscreen-revoke-url', url: owned },
+    { id: 'extid' },
+    function (r) { released = r; }
+  );
+  ok(released && released.ok && released.released, 'trusted worker explicitly releases offscreen URL');
+  eq(policy.ownsUrl(owned), false, 'released URL removed from ownership map');
+
+  let status = null;
+  guardedListener(
+    { type: 'ms-offscreen-ffmpeg-status', testUrl: owned },
+    { id: 'extid' },
+    function (r) { status = r; }
+  );
+  eq(status.done, null, 'revoked lastDone result is masked from SW recovery');
 }
 
 (async function () {
