@@ -18,13 +18,23 @@
     background: #2a2c33; border: 1px solid #3a3d46; color: #e8e8ea; border-radius: 6px;
     padding: 5px 10px; font-size: 12px; cursor: pointer;
   }
-  button:hover { background: #34363f; }
+  button:hover:not(:disabled) { background: #34363f; }
+  button:disabled { opacity: .45; cursor: default; }
   button.primary { background: #ff7a45; border-color: #ff7a45; color: #17181c; font-weight: 600; }
-  button.primary:hover { background: #ff8d5f; }
+  button.primary:hover:not(:disabled) { background: #ff8d5f; }
   button:focus-visible, a:focus-visible { outline: 2px solid #7cc4ff; outline-offset: 2px; }
+  .access {
+    margin-bottom: 8px; padding: 7px 8px; background: #1d1f24;
+    border: 1px solid #2a2c33; border-radius: 7px;
+  }
+  .access-title { font-size: 11px; font-weight: 700; margin-bottom: 5px; }
+  .access-actions { display: flex; gap: 5px; flex-wrap: wrap; }
+  .access-actions button { padding: 3px 7px; font-size: 10px; }
+  #accessStatus { margin-top: 4px; min-height: 13px; font-size: 10px; color: #8b8b93; }
+  #accessStatus.err { color: #ff6b6b; }
   #status { font-size: 11px; color: #9a9aa2; margin-bottom: 6px; min-height: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   #status.err { color: #ff6b6b; white-space: normal; }
-  #list { max-height: 420px; overflow-y: auto; display: flex; flex-direction: column; gap: 5px; }
+  #list { max-height: 390px; overflow-y: auto; display: flex; flex-direction: column; gap: 5px; }
   .item { display: flex; align-items: center; gap: 8px; padding: 7px 8px; background: #1f2127; border: 1px solid #2a2c33; border-radius: 8px; }
   .badge { flex: 0 0 auto; font-size: 10px; font-weight: 700; text-transform: uppercase; padding: 2px 6px; border-radius: 4px; background: #333; color: #ccc; }
   .badge.video { background: #1d3a5f; color: #7cc4ff; }
@@ -57,6 +67,15 @@
     <button id="ytdlp" data-i18n="ytDlpCommand">yt-dlp command</button>
     <a id="options" href="#" data-i18n-title="settings" data-i18n-aria-label="settings">⚙</a>
   </div>
+  <section class="access" aria-labelledby="accessTitle">
+    <div class="access-title" id="accessTitle" data-i18n="accessTitle">Site access</div>
+    <div class="access-actions">
+      <button id="accessSite" data-i18n="accessSite">Always this site</button>
+      <button id="accessAll" data-i18n="accessAll">Always all sites</button>
+      <button id="accessClick" data-i18n="accessClick">Click only</button>
+    </div>
+    <div id="accessStatus" role="status" aria-live="polite"></div>
+  </section>
   <div id="status" role="status" aria-live="polite" aria-atomic="true"></div>
   <div id="list"></div>
   <footer>
@@ -64,6 +83,7 @@
     <span id="version" data-i18n-aria-label="version"></span>
   </footer>
   <script src="i18n.js"></script>
+  <script src="site-access-ui.js"></script>
   <script src="../src/logic.js"></script>
   <script src="popup.js"></script>
   <script src="meta.js"></script>
