@@ -11,6 +11,9 @@ try { fs.unlinkSync(out); } catch (e) { /* ignore */ }
 
 const includes = [
   'manifest.json',
+  'LICENSE',
+  'LICENSE.libav',
+  'THIRD_PARTY_NOTICES.md',
   'src/logic.js',
   'src/bridge.js',
   'src/content.js',
