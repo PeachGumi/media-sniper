@@ -39,6 +39,7 @@ jobs:
           test -f /tmp/media-sniper-package/src/background-entry.js
           test -f /tmp/media-sniper-package/src/security-bootstrap.js
           test -f /tmp/media-sniper-package/src/security-guard.js
+          test -f /tmp/media-sniper-package/src/dash-inheritance.js
           test -f /tmp/media-sniper-package/src/background.js
           test -f /tmp/media-sniper-package/src/offscreen.js
           test -f /tmp/media-sniper-package/src/libav/libav-6.5.7.1-h264-aac-mp3.wasm.wasm
