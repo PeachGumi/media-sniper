@@ -16,6 +16,9 @@ try {
   // Mutates the exported MediaSniperLogic object that background.js already
   // references, so all later DASH work uses the inherited-template resolver.
   importScripts('dash-inheritance.js');
+  // Shares the classic-script worker realm with background.js, allowing
+  // bounded cleanup without exposing privileged state on globalThis.
+  importScripts('background-lifecycle.js');
 } finally {
   MediaSniperSecurity.activate(chrome);
 }
