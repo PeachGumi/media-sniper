@@ -1,0 +1,144 @@
+name: Rebuild bundled libav
+
+on:
+  push:
+    branches: [fix/reproducible-libav]
+    paths:
+      - 'tools/libav/**'
+      - '.github/workflows/rebuild-libav.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Media Sniper
+        uses: actions/checkout@v4
+        with:
+          path: app
+          fetch-depth: 0
+
+      - name: Read pinned build configuration
+        id: cfg
+        working-directory: app
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          c=json.load(open('tools/libav/config.json'))
+          print('tag='+c['upstream_tag'])
+          print('version='+c['upstream_version'])
+          print('emscripten='+c['emscripten_version'])
+          print('variant='+c['variant'])
+          print('fragments='+json.dumps(c['fragments'], separators=(',',':')))
+          PY
+
+      - name: Checkout pinned upstream libav.js
+        uses: actions/checkout@v4
+        with:
+          repository: Yahweasel/libav.js
+          ref: ${{ steps.cfg.outputs.tag }}
+          path: upstream
+          fetch-depth: 1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - uses: mymindstorm/setup-emsdk@v16
+        with:
+          version: ${{ steps.cfg.outputs.emscripten }}
+          actions-cache-folder: cache-emsdk
+
+      - name: Generate Media Sniper variant
+        working-directory: upstream
+        env:
+          VARIANT: ${{ steps.cfg.outputs.variant }}
+          FRAGMENTS: ${{ steps.cfg.outputs.fragments }}
+        run: |
+          set -euxo pipefail
+          node configs/mkconfig.js "$VARIANT" "$FRAGMENTS"
+          cat "configs/configs/$VARIANT/config.json"
+          cat "configs/configs/$VARIANT/ffmpeg-config.txt"
+
+      - name: Extract pinned dependency sources
+        working-directory: upstream
+        run: make extract
+
+      - name: Build plain WebAssembly ES module
+        working-directory: upstream
+        env:
+          VERSION: ${{ steps.cfg.outputs.version }}
+          VARIANT: ${{ steps.cfg.outputs.variant }}
+        run: |
+          set -euxo pipefail
+          target="dist/libav-${VERSION}-${VARIANT}.wasm.mjs"
+          make "$target" -j2
+          test -s "$target"
+          test -s "dist/libav-${VERSION}-${VARIANT}.wasm.wasm"
+          ls -lh "$target" "dist/libav-${VERSION}-${VARIANT}.wasm.wasm"
+
+      - name: Install generated runtime and provenance
+        working-directory: app
+        env:
+          VERSION: ${{ steps.cfg.outputs.version }}
+          VARIANT: ${{ steps.cfg.outputs.variant }}
+          TAG: ${{ steps.cfg.outputs.tag }}
+          EMSCRIPTEN: ${{ steps.cfg.outputs.emscripten }}
+        run: |
+          set -euxo pipefail
+          mkdir -p src/libav
+          cp "../upstream/dist/libav-${VERSION}-${VARIANT}.wasm.mjs" src/libav/
+          cp "../upstream/dist/libav-${VERSION}-${VARIANT}.wasm.wasm" src/libav/
+          UPSTREAM_SHA=$(git -C ../upstream rev-parse HEAD)
+          export UPSTREAM_SHA
+          python3 <<'PY'
+          import hashlib, json, os, pathlib
+          cfg=json.load(open('tools/libav/config.json'))
+          base=pathlib.Path('src/libav')
+          names=[
+              f"libav-{cfg['upstream_version']}-{cfg['variant']}.wasm.mjs",
+              f"libav-{cfg['upstream_version']}-{cfg['variant']}.wasm.wasm",
+          ]
+          hashes={}
+          for name in names:
+              h=hashlib.sha256((base/name).read_bytes()).hexdigest()
+              hashes[name]=h
+          dependency_archives={}
+          for p in sorted(pathlib.Path('../upstream/build').glob('*.tar*')):
+              h=hashlib.sha256(p.read_bytes()).hexdigest()
+              dependency_archives[p.name]=h
+          provenance={
+              'schema': 1,
+              'generated_by': '.github/workflows/rebuild-libav.yml',
+              'upstream_repository': cfg['upstream_repository'],
+              'upstream_tag': cfg['upstream_tag'],
+              'upstream_commit': os.environ['UPSTREAM_SHA'],
+              'libav_version': cfg['upstream_version'],
+              'ffmpeg_version': cfg['ffmpeg_version'],
+              'emscripten_version': cfg['emscripten_version'],
+              'variant': cfg['variant'],
+              'fragments': cfg['fragments'],
+              'artifact_sha256': hashes,
+              'dependency_source_archive_sha256': dependency_archives,
+          }
+          (base/'PROVENANCE.json').write_text(json.dumps(provenance, indent=2, sort_keys=True)+'\n')
+          print(json.dumps(provenance, indent=2, sort_keys=True))
+          PY
+
+      - name: Commit generated runtime to build branch
+        working-directory: app
+        run: |
+          set -euxo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/libav tools/libav/config.json
+          if git diff --cached --quiet; then
+            echo 'Generated artifacts already match the pinned build.'
+            exit 0
+          fi
+          git commit -m 'build: regenerate libav from pinned upstream source'
+          git push origin HEAD:fix/reproducible-libav
