@@ -33,11 +33,17 @@ jobs:
           mkdir -p /tmp/media-sniper-package
           unzip -q media-sniper.zip -d /tmp/media-sniper-package
           test -f /tmp/media-sniper-package/manifest.json
+          test -f /tmp/media-sniper-package/LICENSE
+          test -f /tmp/media-sniper-package/LICENSE.libav
+          test -f /tmp/media-sniper-package/THIRD_PARTY_NOTICES.md
           test -f /tmp/media-sniper-package/src/background.js
           test -f /tmp/media-sniper-package/src/offscreen.js
           test -f /tmp/media-sniper-package/src/libav/libav-6.5.7.1-h264-aac-mp3.wasm.wasm
           test -f /tmp/media-sniper-package/popup/popup.html
+          echo "distribution zip:"
           sha256sum media-sniper.zip
+          echo "vendored libav wasm:"
+          sha256sum src/libav/libav-6.5.7.1-h264-aac-mp3.wasm.wasm
 
       - name: Privacy scan
         run: |
