@@ -87,11 +87,13 @@
     return response;
   };
 
-  globalThis.addEventListener('pagehide', function () {
-    for (const url of Array.from(ownedUrls.keys())) {
-      try { URL.revokeObjectURL(url); } catch (_) { /* ignore */ }
-    }
-  });
+  if (typeof globalThis.addEventListener === 'function') {
+    globalThis.addEventListener('pagehide', function () {
+      for (const url of Array.from(ownedUrls.keys())) {
+        try { URL.revokeObjectURL(url); } catch (_) { /* ignore */ }
+      }
+    });
+  }
 
   globalThis.MediaSniperMemoryPolicy = {
     MAX_OUTPUT_BYTES,
