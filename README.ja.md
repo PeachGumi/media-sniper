@@ -19,14 +19,14 @@
 | YouTube | progressive、音声のみ、adaptive映像+音声mux（Full self-distributed版） |
 | 一括保存 | 保存済みチェック、HLS/DASHジョブの直列処理 |
 | 設定 | Downloads内サブフォルダ、直接メディア最小サイズ、ドメインblacklist |
-| Privacy | 確認済みmediaのみ認証headerを昇格、sensitive headerのorigin境界、telemetryなし |
+| Privacy | 初期状態は常時site権限なし、確認済みmediaのみ認証headerを昇格、telemetryなし |
 
 ### 制限事項
 
 - Widevine/EME等のDRM保護ストリームは対象外です。
 - playlist/media URLを露出しないMSE-onlyサイトは検出できない場合があります。
 - 字幕はダウンロードしません。
-- 数GB級メディアでは一部HLS/DASH/mux経路がまだ大きなRAMを使います。現時点では無制限サイズ対応とは扱いません。
+- Media Sniperは無制限サイズtranscoderではなく、処理方式ごとに明示的な安全上限を持ちます。直接browser downloadはoffscreen assemblerの上限対象外です。OPFS-backed concat/track assemblyは768MiBまで、DASH映像+音声のlocal muxはmemory-heavyなffmpeg段階に入る前のcombined inputを384MiBまでに制限します。詳細は [docs/MEMORY.md](docs/MEMORY.md)。
 
 ## インストール
 
@@ -35,7 +35,7 @@
 3. **デベロッパーモード**をONにします。
 4. **パッケージ化されていない拡張機能を読み込む**から、`manifest.json`が直接入ったフォルダを選択します。
 
-初回install時には、Media Sniperがメディア検出のため何を観測するか、認証付きmediaのrequest metadataをどう扱うか、保存場所・削除方法・外部送信の有無を説明するローカル画面を自動表示します。
+初回install時には、Media Sniperがメディア検出のため何を扱うか、認証付きmediaのrequest metadataをどう扱うか、保存場所・削除方法・外部送信の有無を説明するローカル画面を自動表示します。
 
 ### 更新
 
@@ -44,15 +44,18 @@
 ## 使い方
 
 1. 動画/音声ページで実際に再生し、ブラウザにmediaをrequestさせます。
-2. Media Sniperのpopupを開きます。
-3. アイテムの「保存」または「全部保存」を使います。
-4. Downloadsまたは設定したサブフォルダへ保存されます。
+2. Media Sniperのpopupを開きます。これにより`activeTab`で**現在タブだけ**一時的に検出を有効化します。インストールしただけではWebサイトへの常時権限はありません。
+3. 必要なら **「このサイトで常に有効」** または **「全サイトで常に有効」** を選びます。**「クリック時のみ」** に戻すと、Media Sniperへ与えた常時host権限を解除します。
+4. アイテムの「保存」または「全部保存」を使います。
+5. Downloadsまたは設定したサブフォルダへ保存されます。
+
+サイト単位の許可を、Media Sniperが勝手に無関係なCDN originまで拡張することはありません。そのため、playlist/mediaが完全に別originのCDNから配信されるサイトでは、明示的な「全サイトで常に有効」の方がnetwork-level検出は完全になります。詳細は [docs/PERMISSIONS.md](docs/PERMISSIONS.md)。
 
 詳しい操作は [docs/USAGE.ja.md](docs/USAGE.ja.md) を参照してください。
 
 ## Security / Privacy設計
 
-自動media検出という主要機能のため広いsite accessを使いますが、次のtrust boundaryで用途を制限します。
+Media Sniperはrequired host permissionなしでinstallされます。popupを開くと現在タブへの一時アクセスが与えられ、サイト単位/全HTTP(S)の常時アクセスはユーザーが明示的に選んだ場合だけoptional permissionとして取得します。Chromiumが現在許可しているorigin範囲内で、さらに次のtrust boundaryを適用します。
 
 - request headerはまずrequest ID単位の短命・上限付きpending bufferだけに保持します。
 - capture候補は `Authorization` / `Referer` / `Origin` に限定します。
@@ -72,8 +75,13 @@ Chromium自身は、対象media originへのcredentialed fetch時に、そのori
 ## 構成
 
 ```text
-page / player
-   │
+ユーザー操作 / optional site grant
+              │
+              ▼
+       site-access manager
+              │
+page / player │
+   │          │
    ├─ webRequest response metadata ───────────────┐
    └─ page/contentのmedia report (untrusted) ──┐ │
                                               ▼ ▼
@@ -85,7 +93,7 @@ page / player
                                               │
                                               ▼
                                       offscreen document
-                              session fetch + ffmpeg WASM
+                         OPFS assembly + bounded ffmpeg WASM
                                               │
                                               ▼
                                       browser Downloads
@@ -95,17 +103,19 @@ page / player
 
 ```text
 src/background-entry.js      service worker entrypoint / security bootstrap
+src/site-access.js           optional host grant / dynamic content scripts
 src/security-guard.js        request/message trust boundary
 src/background-lifecycle.js  queue/job/header/blobのbounded lifecycle policy
 src/logic.js                 media解析・命名helper
 src/dash-inheritance.js      DASH階層継承resolver
 src/background.js            検出、queue、HLS/DASH orchestration
 src/offscreen-policy.js      offscreen sender/memory/blob ownership policy
-src/offscreen.js             byte処理 + ffmpeg/libav.js
+src/offscreen-streaming.js   OPFS-backed remote/HLS/DASH assembly
+src/offscreen.js             ffmpeg/libav.js処理とfallback
 src/content.js               isolated-world relay
 src/bridge.js                page media/blob scanner
 src/youtube.js               Full版YouTube MAIN-world adapter
-popup/                       popup / settings / 初回開示
+popup/                       popup / site access / settings / 初回開示
 ```
 
 ## 開発・release check
@@ -117,13 +127,11 @@ npm run e2e
 npm run zip
 ```
 
-Pull Requestと`main`では、unit/syntax、manifest/package/UI version整合、runtime/license/privacy必須ファイル、privacy scan、browser E2Eを自動検査します。E2Eはまず `media-sniper.zip` を実際に生成し、**そのZIPをクリーンなディレクトリへ展開した配布物そのもの**を固定versionのChrome for Testingへ読み込んで実行します。source treeにしか存在しないファイルでE2Eが偶然PASSすることはありません。
+Pull Requestと`main`では、unit/syntax、manifest/package/UI version整合、**required host権限がないこと**、optional host scopeがHTTP(S)だけであること、runtime/license/privacy必須ファイル、privacy scan、browser E2Eを自動検査します。
+
+E2Eは `media-sniper.zip` を実際に生成し、そのZIPをクリーンなディレクトリへ展開した配布物そのものを固定versionのChrome for Testingへ読み込みます。クリーンprofileでは常時host権限が0件であることを確認した後、Permissions APIでoptional accessを許可し、dynamic detector登録、media検出、download、permission revoke、detector解除まで検証します。
 
 unit系jobと配布artifactのbrowser E2Eが両方成功した場合だけ、後段artifact jobが `media-sniper.zip` と `media-sniper.zip.sha256` をverified workflow artifactとして作成します。
-
-`v*` tagも同じgateを通ります。tag versionがmanifest/package versionと一致し、全checkが成功し、repositoryの明示的なrelease approval gateが有効な場合だけGitHub Releaseを作成し、ZIPとSHA-256ファイルを添付します。v1/commercial blockerが残っている間はapproval fileを意図的に置かないため、誤ってtagを作っても公開releaseにはなりません。
-
-E2Eはthrowaway browser profileを使用し、extension IDを実行時に検出します。`MEDIA_SNIPER_EXTENSION_ROOT` を指定するとrepo本体とは別の展開済みartifactをテストできます。
 
 正確なrelease手順とmanual acceptance checklistは [docs/RELEASE.md](docs/RELEASE.md) を参照してください。
 
@@ -139,7 +147,7 @@ Media Sniper自身のsourceはMITです。[LICENSE](LICENSE) を参照してく�
 
 `src/libav/` にはlibav.js / FFmpeg WebAssembly artifactをvendorしています。適用されるLGPL noticeは [LICENSE.libav](LICENSE.libav)、詳細なprovenanceは [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) を参照してください。
 
-同梱generated JavaScript moduleにはdownstream modificationの記録があり、build identifierは `libav.js v6.5.7.1-61-g823eb97` です。現repository historyだけでは、**同梱binaryと正確に対応するsource/build recipeをまだ特定できていません**。したがって「公式v6.5.7.1の無改変binary」「generic upstream checkoutが対応ソース」とは表現しません。このprovenanceを解決するか再現buildへ置換することは、commercial v1.0 releaseのgateです。
+同梱generated JavaScript moduleにはdownstream modificationの記録があり、build identifierは `libav.js v6.5.7.1-61-g823eb97` です。現repository historyだけでは、**同梱binaryと正確に対応するsource/build recipeをまだ特定できていません**。したがって「公式v6.5.7.1の無改変binary」「generic upstream checkoutが対応ソース」とは表現しません。このprovenanceを解決するか再現buildへ置換することは、再現性・supply-chain品質の残課題です。
 
 ## 免責事項
 
