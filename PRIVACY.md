@@ -12,13 +12,13 @@ To provide media detection and download functionality, the extension may process
 - the page title, used to suggest downloaded filenames;
 - media, playlist, manifest, and segment URLs requested by the page;
 - response metadata such as content type and content length;
-- request metadata needed to retry media downloads that depend on the browser session, including Referer, Origin, Authorization, and selected request headers when they are present;
-- the browser cookies that Chromium automatically includes when the extension fetches a permitted media URL with credentials enabled;
-- extension settings such as the download subfolder, minimum media size, and excluded domains;
+- request metadata needed to retry authenticated media downloads: `Authorization`, `Referer`, and `Origin` when those headers are present;
+- browser cookies that Chromium itself may include when the extension fetches media for the corresponding target site;
+- extension settings such as the download subfolder, minimum media size, excluded domains, and whether the first-install disclosure has been acknowledged;
 - detected media items for open tabs;
 - browser download-history metadata used by the “Save all” feature to avoid re-downloading an item that already completed.
 
-Media Sniper does not ask for or store your account password.
+Media Sniper does not ask for or store your account password. It does not intentionally capture arbitrary `X-*` request headers or copy browser Cookie request headers into its own media-header cache.
 
 ## Why this data is used
 
@@ -33,7 +33,7 @@ The data above is used only to provide Media Sniper’s user-facing features:
 - remember your extension settings;
 - skip items that already appear in your completed browser download history.
 
-Media Sniper does not use browsing or authentication data for advertising, profiling, credit decisions, or unrelated product purposes.
+Media Sniper does not use browsing or authentication data for advertising, profiling, credit decisions, model training, or unrelated product purposes.
 
 ## Where processing happens
 
@@ -47,25 +47,33 @@ Media requests still go to the websites/CDNs that host the media, because downlo
 
 Media Sniper uses Chromium extension storage as follows:
 
-- `chrome.storage.local`: extension settings. These remain in the browser profile until you change/remove them or uninstall/clear the extension’s data.
-- `chrome.storage.session`: detected media items. These are intended to be session-scoped and are cleared by Chromium when the browser session ends.
+- `chrome.storage.local`: extension settings and the version of the first-install disclosure you acknowledged. These remain in the browser profile until you change/remove them or uninstall/clear the extension’s data.
+- `chrome.storage.session`: detected media items. These are session-scoped and are cleared by Chromium when the browser session ends.
 - in-memory extension state: request metadata, download queue state, media-processing job state, and other temporary runtime information. This is not intentionally persisted to disk by Media Sniper.
+
+Request headers are handled under an additional short-lived security boundary. Candidate `Authorization`, `Referer`, and `Origin` headers are held by request ID in memory for at most approximately 15 seconds, with a bounded pending set. They are promoted to the media-header cache only after the corresponding response is confirmed to look like media/HLS/DASH. Blacklisted domains are not promoted.
 
 The extension may also read Chromium download-history metadata when “Save all” is used. Media Sniper does not copy the browser’s full download history into its own persistent storage.
 
 ## Authentication-related request data
 
-Some media servers require request context that the page’s own player used. Media Sniper may temporarily process authentication-related request metadata for this purpose.
+Some media servers require request context that the page’s own player used. Media Sniper temporarily processes the smallest header set currently required for this purpose: `Authorization`, `Referer`, and `Origin`.
 
-The project is actively tightening this logic so that only the minimum data necessary for a confirmed media request is retained and replayed, and sensitive request headers remain bound to appropriate origins. General release is gated on those security changes.
+Sensitive replay is origin-bound. An `Authorization` or other sensitive header set that was captured for one origin is stripped before an extension-managed fetch to a different origin. The internal source-origin marker used to make this decision is never sent to the network.
 
-Media Sniper does not intentionally persist captured Authorization headers in extension storage and does not transmit them to a Media Sniper-controlled server.
+This rule is intentionally conservative: a cross-origin CDN layout may lose an authenticated fallback instead of forwarding a credential to an unrelated origin. Browser-managed cookies remain controlled by Chromium for the target origin rather than being copied from one host to another by Media Sniper.
+
+Media Sniper does not persist captured Authorization headers in `chrome.storage.local` or `chrome.storage.session`, and it does not transmit them to a Media Sniper-controlled server.
+
+## Page-to-extension trust boundary
+
+Information originating from a web page is treated as untrusted input. Media reports are schema-checked and associated with the sender tab/frame rather than trusting a page-provided tab ID or page URL. Page/content-script senders cannot directly invoke privileged download, settings, clear, or queue operations; those operations are limited to Media Sniper’s own extension pages.
 
 ## Third parties
 
 Media Sniper does not sell, rent, or share user data with advertisers or data brokers.
 
-The extension contacts third-party websites only as required to fetch media that the user is accessing or saving. Those sites remain governed by their own privacy policies and terms.
+The extension contacts third-party websites only as required to detect or fetch media that the user is accessing or saving. Those sites remain governed by their own privacy policies and terms.
 
 ## Remote code and analytics
 
@@ -79,18 +87,27 @@ You can:
 
 - clear detected items for the current tab from the popup;
 - change or clear extension settings from the options page;
+- exclude domains from media collection using the blacklist setting;
 - remove Media Sniper from the browser to delete extension-local data managed by Chromium;
 - clear browser download history separately using Chromium’s own download-history controls.
 
-Media Sniper’s domain exclusion setting prevents excluded domains from contributing detected media items. Security work tracked for the v1.0 release also requires excluded domains to be respected consistently by request-metadata handling.
+The domain exclusion setting is applied to both detected media collection and promotion of captured request metadata.
+
+## First-install disclosure
+
+On a fresh installation, Media Sniper opens a local onboarding page that explains the browser activity it observes for media detection, the temporary use of authentication-related request metadata for confirmed media, browser-managed cookie behavior, local processing, storage, deletion controls, and the absence of a Media Sniper backend/telemetry service.
 
 ## Permissions
 
 Media Sniper requests browser permissions only to implement its stated media-detection and download purpose. A detailed explanation is maintained in [`docs/PERMISSIONS.md`](docs/PERMISSIONS.md).
 
-## Chrome Web Store Limited Use
+The current full build intentionally supports automatic detection across sites and therefore uses broad host access. Users who require a narrower site-access model should use Chromium’s extension site-access controls where supported. A future product flavor may adopt optional per-site permissions; it must update this policy and its onboarding disclosure before release.
 
-If Media Sniper is distributed through the Chrome Web Store, use of information received from Chrome APIs will comply with the Chrome Web Store User Data Policy, including the Limited Use requirements. Data obtained through Chrome APIs is used only to provide or improve the extension’s prominent user-facing media-detection and download functionality.
+## Distribution
+
+The full Media Sniper build in this repository is self-distributed through source/GitHub Releases and loaded unpacked in Chromium-based browsers. It is not presented as a Chrome Web Store artifact. See [`DISTRIBUTION.md`](DISTRIBUTION.md).
+
+If a separate Chrome Web Store edition is created in the future, it must undergo a separate feature, permission, privacy, and policy review. Its disclosures must match that edition’s actual artifact and Chrome Web Store User Data / Limited Use requirements at the time of submission.
 
 ## Security reports
 
@@ -98,7 +115,7 @@ Please do not disclose security vulnerabilities in a public issue. Follow [`SECU
 
 ## Changes to this policy
 
-Material changes to data handling will be reflected in this document and in the extension’s user-facing disclosures before a general release containing those changes.
+Material changes to data handling will be reflected in this document and in the extension’s user-facing disclosures before a release containing those changes.
 
 ## Contact
 
