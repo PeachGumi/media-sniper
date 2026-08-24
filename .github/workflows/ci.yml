@@ -22,7 +22,7 @@ jobs:
         run: npm run check
 
       - name: Manifest validation
-        run: node -e "const fs=require('fs'); const m=JSON.parse(fs.readFileSync('manifest.json','utf8')); const p=JSON.parse(fs.readFileSync('package.json','utf8')); if(m.version!==p.version) throw new Error('manifest/package version mismatch: '+m.version+' vs '+p.version); console.log('manifest OK', m.version)"
+        run: node -e "const fs=require('fs'); const m=JSON.parse(fs.readFileSync('manifest.json','utf8')); const p=JSON.parse(fs.readFileSync('package.json','utf8')); if(m.version!==p.version) throw new Error('manifest/package version mismatch: '+m.version+' vs '+p.version); if(m.background.service_worker!=='src/background-entry.js') throw new Error('security entrypoint missing'); console.log('manifest OK', m.version)"
 
       - name: Package
         run: npm run zip
@@ -36,10 +36,13 @@ jobs:
           test -f /tmp/media-sniper-package/LICENSE
           test -f /tmp/media-sniper-package/LICENSE.libav
           test -f /tmp/media-sniper-package/THIRD_PARTY_NOTICES.md
+          test -f /tmp/media-sniper-package/src/background-entry.js
+          test -f /tmp/media-sniper-package/src/security-guard.js
           test -f /tmp/media-sniper-package/src/background.js
           test -f /tmp/media-sniper-package/src/offscreen.js
           test -f /tmp/media-sniper-package/src/libav/libav-6.5.7.1-h264-aac-mp3.wasm.wasm
           test -f /tmp/media-sniper-package/popup/popup.html
+          test -f /tmp/media-sniper-package/popup/meta.js
           echo "distribution zip:"
           sha256sum media-sniper.zip
           echo "vendored libav wasm:"
@@ -56,6 +59,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
 
       - uses: actions/setup-python@v5
         with:
