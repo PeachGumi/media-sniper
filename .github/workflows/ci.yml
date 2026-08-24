@@ -51,6 +51,7 @@ jobs:
           test -f /tmp/media-sniper-package/_locales/en/messages.json
           test -f /tmp/media-sniper-package/_locales/ja/messages.json
           test -f /tmp/media-sniper-package/src/background-entry.js
+          test -f /tmp/media-sniper-package/src/background-lifecycle.js
           test -f /tmp/media-sniper-package/src/install.js
           test -f /tmp/media-sniper-package/src/security-bootstrap.js
           test -f /tmp/media-sniper-package/src/security-guard.js
