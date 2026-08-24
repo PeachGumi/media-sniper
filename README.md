@@ -26,7 +26,7 @@ Media processing happens locally in Chromium. Media Sniper has no backend servic
 - DRM-protected streams (Widevine/EME) are not supported.
 - MSE-only sites with no discoverable media/playlist URL may only be partially detectable.
 - Subtitles are not downloaded.
-- Very large multi-gigabyte media can still be memory-intensive because some HLS/DASH/mux paths use in-memory buffers; see the open reliability work before treating this as an unlimited-size downloader.
+- Media Sniper is intentionally **bounded**, not an unlimited-size transcoder. Direct browser downloads are not constrained by the offscreen media assembler. OPFS-backed concat/track assembly supports up to 768 MiB, while DASH video+audio local mux is limited to 384 MiB combined input before the memory-heavy ffmpeg stage. Oversize work is rejected explicitly instead of relying on browser OOM. See [docs/MEMORY.md](docs/MEMORY.md).
 
 ## Install
 
@@ -87,7 +87,7 @@ page / player
                                                │
                                                ▼
                                       offscreen document
-                              session fetch + ffmpeg WASM
+                        OPFS assembly + bounded ffmpeg WASM
                                                │
                                                ▼
                                       browser Downloads
@@ -103,7 +103,8 @@ src/logic.js                 shared media parsing/naming helpers
 src/dash-inheritance.js      DASH hierarchy resolver
 src/background.js            detection, queue, HLS/DASH orchestration
 src/offscreen-policy.js      offscreen sender/memory/blob ownership policy
-src/offscreen.js             media byte processing + bundled ffmpeg/libav.js
+src/offscreen-streaming.js   OPFS-backed remote/HLS/DASH assembly
+src/offscreen.js             ffmpeg/libav.js operations and legacy fallback
 src/content.js               isolated-world relay and page metadata
 src/bridge.js                page media/blob scanner
 src/youtube.js               full-build YouTube MAIN-world adapter
@@ -141,7 +142,7 @@ Media Sniper's own source is MIT licensed; see [LICENSE](LICENSE).
 
 `src/libav/` contains a vendored libav.js / FFmpeg WebAssembly artifact under its applicable LGPL terms; see [LICENSE.libav](LICENSE.libav) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
-The vendored generated JavaScript module has a recorded downstream modification and identifies itself as `libav.js v6.5.7.1-61-g823eb97`. Repository history does **not currently establish the exact corresponding source/build recipe** for that shipped artifact. Do not describe it as an unmodified official v6.5.7.1 binary or claim that a generic upstream checkout is necessarily its corresponding source. Resolving/replacing that artifact is a release/legal provenance gate for commercial v1.0 distribution.
+The vendored generated JavaScript module has a recorded downstream modification and identifies itself as `libav.js v6.5.7.1-61-g823eb97`. Repository history does **not currently establish the exact corresponding source/build recipe** for that shipped artifact. Do not describe it as an unmodified official v6.5.7.1 binary or claim that a generic upstream checkout is necessarily its corresponding source. Resolving/replacing that artifact remains a reproducibility/supply-chain quality task.
 
 ## Disclaimer
 
