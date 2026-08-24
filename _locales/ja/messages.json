@@ -90,5 +90,18 @@
   "privacyPolicy": {"message": "Privacy Policy"},
   "permissions": {"message": "権限の説明"},
   "selfDistributionNote": {"message": "Full版はGitHub Releases/ソースからself-distributionされる拡張で、Chrome Web Store版ではありません。"},
-  "version": {"message": "バージョン"}
+  "version": {"message": "バージョン"},
+  "accessTitle": {"message": "サイトアクセス"},
+  "accessSite": {"message": "このサイトで常に有効"},
+  "accessAll": {"message": "全サイトで常に有効"},
+  "accessClick": {"message": "クリック時のみ"},
+  "accessModeClick": {"message": "クリック時のみ: このタブだけ一時的に有効。常時サイト権限はありません。"},
+  "accessModeSite": {"message": "このサイトへの常時アクセスが有効です。"},
+  "accessModeAll": {"message": "すべてのHTTP(S)サイトへの常時アクセスが有効です。"},
+  "accessGrantedSite": {"message": "このサイトへの常時アクセスを有効にしました。"},
+  "accessGrantedAll": {"message": "全サイトへの常時アクセスを有効にしました。"},
+  "accessCleared": {"message": "常時サイトアクセスを解除しました。popupを開けば現在タブだけ一時的に有効になります。"},
+  "accessDenied": {"message": "権限は許可されませんでした。"},
+  "accessFailed": {"message": "サイトアクセスを変更できませんでした。"},
+  "accessUnsupported": {"message": "このブラウザページではサイトアクセスを利用できません。"}
 }
