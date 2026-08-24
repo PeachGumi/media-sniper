@@ -20,6 +20,7 @@ const includes = [
   'src/background-entry.js',
   'src/security-bootstrap.js',
   'src/security-guard.js',
+  'src/dash-inheritance.js',
   'src/background.js',
   'src/offscreen.html',
   'src/offscreen.js',
