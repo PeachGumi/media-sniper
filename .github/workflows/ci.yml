@@ -22,7 +22,7 @@ jobs:
       - name: Syntax check
         run: npm run check
 
-      - name: Manifest / version validation
+      - name: Manifest / version / permission validation
         run: |
           node <<'NODE'
           const fs = require('fs');
@@ -31,6 +31,16 @@ jobs:
           if (m.version !== p.version) throw new Error('manifest/package version mismatch: ' + m.version + ' vs ' + p.version);
           if (m.background.service_worker !== 'src/background-entry.js') throw new Error('security entrypoint missing');
           if (m.default_locale !== 'en') throw new Error('default locale missing');
+          const perms = new Set(m.permissions || []);
+          for (const required of ['activeTab','downloads','offscreen','scripting','storage','webRequest']) {
+            if (!perms.has(required)) throw new Error('required permission missing: ' + required);
+          }
+          if (perms.has('tabs')) throw new Error('broad tabs permission must not be required');
+          if ((m.host_permissions || []).length) throw new Error('persistent host access must not be required at install time');
+          if ((m.content_scripts || []).length) throw new Error('static all-site content scripts are forbidden; use site-access.js');
+          const optional = [...(m.optional_host_permissions || [])].sort();
+          const expected = ['http://*/*','https://*/*'].sort();
+          if (JSON.stringify(optional) !== JSON.stringify(expected)) throw new Error('optional host scope must be HTTP(S)-only');
           const meta = fs.readFileSync('popup/meta.js', 'utf8');
           if (!/getManifest\(\)\.version/.test(meta)) throw new Error('UI version must come from manifest');
           const ref = process.env.GITHUB_REF || '';
@@ -38,7 +48,7 @@ jobs:
             const tagVersion = ref.slice('refs/tags/v'.length);
             if (tagVersion !== m.version) throw new Error('tag/version mismatch: v' + tagVersion + ' vs ' + m.version);
           }
-          console.log('manifest OK', m.version);
+          console.log('manifest OK', m.version, 'least-privilege host model OK');
           NODE
 
       - name: Package
@@ -61,6 +71,7 @@ jobs:
           test -f /tmp/media-sniper-package/_locales/ja/messages.json
           test -f /tmp/media-sniper-package/src/background-entry.js
           test -f /tmp/media-sniper-package/src/background-lifecycle.js
+          test -f /tmp/media-sniper-package/src/site-access.js
           test -f /tmp/media-sniper-package/src/install.js
           test -f /tmp/media-sniper-package/src/security-bootstrap.js
           test -f /tmp/media-sniper-package/src/security-guard.js
@@ -72,6 +83,8 @@ jobs:
           test -f /tmp/media-sniper-package/src/offscreen.js
           test -f /tmp/media-sniper-package/src/libav/libav-6.5.7.1-h264-aac-mp3.wasm.wasm
           test -f /tmp/media-sniper-package/popup/i18n.js
+          test -f /tmp/media-sniper-package/popup/site-access-ui.js
+          test -f /tmp/media-sniper-package/popup/access-refresh.js
           test -f /tmp/media-sniper-package/popup/popup.html
           test -f /tmp/media-sniper-package/popup/meta.js
           test -f /tmp/media-sniper-package/popup/onboarding.html
@@ -106,12 +119,10 @@ jobs:
           mkdir -p /tmp/media-sniper-e2e
           unzip -q media-sniper.zip -d /tmp/media-sniper-e2e
           test -f /tmp/media-sniper-e2e/manifest.json
+          test -f /tmp/media-sniper-e2e/src/site-access.js
           test -f /tmp/media-sniper-e2e/src/offscreen-streaming.js
           echo "MEDIA_SNIPER_EXTENSION_ROOT=/tmp/media-sniper-e2e" >> "$GITHUB_ENV"
 
-      # Official branded Chrome removed --load-extension in Chrome 137.
-      # Chrome for Testing intentionally retains automation/testing support.
-      # Pin the browser so E2E behavior is reproducible instead of floating.
       - name: Install Chrome for Testing
         env:
           CFT_VERSION: '151.0.7922.77'
@@ -126,10 +137,6 @@ jobs:
           browser="$root/chrome-linux64/chrome"
           test -x "$browser"
           "$browser" --version
-
-          # Ubuntu hosted runners restrict the user namespace Chrome normally
-          # uses for its sandbox. Keep the application runner secure by default
-          # and inject --no-sandbox only through this CI-only executable wrapper.
           wrapper="$root/chrome-ci"
           printf '#!/bin/sh\nexec "%s" --no-sandbox "$@"\n' "$browser" > "$wrapper"
           chmod +x "$wrapper"
@@ -148,17 +155,14 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-
       - name: Rebuild verified artifact and checksum
         run: |
           npm run zip
           sha256sum media-sniper.zip > media-sniper.zip.sha256
           cat media-sniper.zip.sha256
-
       - name: Upload verified CI artifact
         uses: actions/upload-artifact@v4
         with:
@@ -168,19 +172,15 @@ jobs:
             media-sniper.zip.sha256
           if-no-files-found: error
           retention-days: 30
-
       - name: Enforce release-approval gate
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
           test -f docs/RELEASE_APPROVED
           grep -qx 'approved' docs/RELEASE_APPROVED
-
       - name: Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
-            media-sniper.zip media-sniper.zip.sha256 \
-            --verify-tag --generate-notes \
-            --title "Media Sniper $GITHUB_REF_NAME"
+          gh release create "$GITHUB_REF_NAME" media-sniper.zip media-sniper.zip.sha256 \
+            --verify-tag --generate-notes --title "Media Sniper $GITHUB_REF_NAME"
