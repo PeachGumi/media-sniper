@@ -1,6 +1,7 @@
 'use strict';
 
 const $ = (s) => document.querySelector(s);
+const t = (key, subs) => MediaSniperI18n.t(key, subs);
 
 let tabId = null;
 let pageUrl = null;
@@ -37,24 +38,29 @@ function fmtDuration(sec) {
 
 function labelFor(item) {
   switch (item.kind) {
-    case 'video': return '動画';
+    case 'video': return t('video');
     case 'hls': return 'HLS';
-    case 'hls-audio': return '音声(HLS)';
-    case 'audio': return '音声';
+    case 'hls-audio': return t('audioHls');
+    case 'audio': return t('audio');
     case 'dash': return 'DASH';
     case 'ts': return 'TS';
     default: return item.kind || '?';
   }
 }
 
+function resetSaveButton(btn) {
+  btn.classList.remove('busy');
+  btn.textContent = t('save');
+}
+
 function render() {
   const list = $('#list');
   list.textContent = '';
-  $('#count').textContent = items.length ? items.length + ' 件検出' : '';
+  $('#count').textContent = items.length ? t('detectedCount', [String(items.length)]) : '';
   if (!items.length) {
     const d = document.createElement('div');
     d.className = 'empty';
-    d.textContent = 'このページでメディアを検出していません。動画を再生してから再スキャンしてください。';
+    d.textContent = t('emptyMedia');
     list.appendChild(d);
     return;
   }
@@ -85,14 +91,20 @@ function render() {
 
     const dl = document.createElement('button');
     dl.className = 'dl';
-    dl.textContent = '保存';
+    dl.textContent = t('save');
     dl.addEventListener('click', () => save(item, dl));
 
     const copy = document.createElement('button');
     copy.textContent = 'URL';
-    copy.title = 'URLをコピー';
+    copy.title = t('copyUrl');
     copy.addEventListener('click', async () => {
-      try { await navigator.clipboard.writeText(item.url); copy.textContent = '✓'; setTimeout(() => { copy.textContent = 'URL'; }, 900); } catch (e) { setStatus('コピー失敗', true); }
+      try {
+        await navigator.clipboard.writeText(item.url);
+        copy.textContent = '✓';
+        setTimeout(() => { copy.textContent = 'URL'; }, 900);
+      } catch (e) {
+        setStatus(t('copyFailed'), true);
+      }
     });
 
     row.appendChild(badge);
@@ -104,150 +116,185 @@ function render() {
 }
 
 function save(item, btn) {
-  // live recording in progress: this same button is the stop control
   if (btn.dataset.recording === '1') {
     chrome.runtime.sendMessage({ type: 'ms-hls-stop', url: item.url }, (resp) => {
       if (chrome.runtime.lastError || (resp && resp.ok === false)) {
-        setStatus('停止失敗 — もう一度押してください', true);
+        setStatus(t('stopFailed'), true);
         return;
       }
-      btn.textContent = '停止中';
-      setStatus('録画を停止しています…');
+      btn.textContent = t('stopping');
+      setStatus(t('stoppingRecording'));
     });
     return;
   }
+
   btn.classList.add('busy');
   btn.textContent = '…';
+
   if (item.kind === 'hls' || item.kind === 'hls-audio' || item.kind === 'dash') {
     chrome.runtime.sendMessage(
-      { type: 'ms-hls-download', url: item.url, tabId: tabId, title: item.title, pageUrl: pageUrl,
+      {
+        type: 'ms-hls-download', url: item.url, tabId: tabId, title: item.title, pageUrl: pageUrl,
         dashEntry: item.dashEntry != null ? item.dashEntry : null, dashType: item.dashType || null,
-        audioUrl: item.audioUrl || null },
+        audioUrl: item.audioUrl || null,
+      },
       (resp) => {
-        if (chrome.runtime.lastError) { setStatus('エラー: ' + chrome.runtime.lastError.message, true); btn.classList.remove('busy'); btn.textContent = '保存'; return; }
-        if (resp && resp.error) { setStatus(resp.error, true); btn.classList.remove('busy'); btn.textContent = '保存'; return; }
-        if (resp && resp.alreadyRunning) { setStatus('既に実行中です'); btn.classList.remove('busy'); btn.textContent = '保存'; return; }
+        if (chrome.runtime.lastError) {
+          setStatus(t('errorPrefix', [chrome.runtime.lastError.message]), true);
+          resetSaveButton(btn);
+          return;
+        }
+        if (resp && resp.error) {
+          setStatus(t('failedPrefix', [String(resp.error)]), true);
+          resetSaveButton(btn);
+          return;
+        }
+        if (resp && resp.alreadyRunning) {
+          setStatus(t('alreadyRunning'));
+          resetSaveButton(btn);
+          return;
+        }
         if (resp && resp.recording) {
-          // live: recording started; poll will flip the button to 停止
-          setStatus('録画を開始しました — 停止で保存されます');
-          btn.textContent = '録画中';
+          setStatus(t('recordingStarted'));
+          btn.textContent = t('recording');
           pollHls(item, btn);
           return;
         }
-        setStatus(item.kind === 'dash' ? 'DASH取得中…' : 'HLS セグメント取得中…');
-        btn.textContent = '取得中';
+        setStatus(item.kind === 'dash' ? t('dashFetching') : t('hlsFetching'));
+        btn.textContent = t('fetching');
         pollHls(item, btn);
       }
     );
     return;
   }
-  // YouTube adaptive mux item (video-only URL + separate audioUrl): fetch
-  // both tracks and mux them in the offscreen document instead of saving a
-  // silent video-only stream.
+
   if (item.via === 'youtube' && item.audioUrl) {
     chrome.runtime.sendMessage({ type: 'ms-yt-mux-download', item: item, tabId: tabId }, (resp) => {
-      if (chrome.runtime.lastError) { setStatus('エラー: ' + chrome.runtime.lastError.message, true); btn.classList.remove('busy'); btn.textContent = '保存'; return; }
-      if (resp && resp.error) { setStatus('失敗: ' + resp.error, true); btn.classList.remove('busy'); btn.textContent = '保存'; return; }
-      if (resp && resp.alreadyRunning) { setStatus('mux実行中です'); btn.classList.remove('busy'); btn.textContent = '保存'; return; }
-      btn.textContent = 'mux中';
-      setStatus('映像+音声を取得してmuxしています…');
+      if (chrome.runtime.lastError) {
+        setStatus(t('errorPrefix', [chrome.runtime.lastError.message]), true);
+        resetSaveButton(btn);
+        return;
+      }
+      if (resp && resp.error) {
+        setStatus(t('failedPrefix', [String(resp.error)]), true);
+        resetSaveButton(btn);
+        return;
+      }
+      if (resp && resp.alreadyRunning) {
+        setStatus(t('muxRunning'));
+        resetSaveButton(btn);
+        return;
+      }
+      btn.textContent = t('muxing');
+      setStatus(t('muxStatus'));
       pollHls({ key: resp.jobKey, url: resp.jobKey, dashEntry: null }, btn);
     });
     return;
   }
+
   const msg = item.url.indexOf('blob:') === 0
     ? { type: 'ms-download-blob', url: item.url, kind: item.kind, ext: item.ext, title: item.title, pageUrl: pageUrl, size: item.size, tabId: tabId }
     : { type: 'ms-download', item: item, tabId: tabId };
+
   chrome.runtime.sendMessage(msg, (resp) => {
-    if (chrome.runtime.lastError) { setStatus('エラー: ' + chrome.runtime.lastError.message, true); btn.classList.remove('busy'); btn.textContent = '保存'; return; }
-    if (resp && resp.error) { setStatus('失敗: ' + resp.error, true); btn.classList.remove('busy'); btn.textContent = '保存'; return; }
-    btn.textContent = 'キュー追加';
-    // Every download gets watched: failures must always surface (a silent
-    // button is the "保存を押しても何も起きない" bug).
+    if (chrome.runtime.lastError) {
+      setStatus(t('errorPrefix', [chrome.runtime.lastError.message]), true);
+      resetSaveButton(btn);
+      return;
+    }
+    if (resp && resp.error) {
+      setStatus(t('failedPrefix', [String(resp.error)]), true);
+      resetSaveButton(btn);
+      return;
+    }
+    btn.textContent = t('queued');
     watchQueueEntry(resp.id, btn, item.via === 'youtube');
   });
 }
 
 function watchQueueEntry(entryId, btn, isYoutube) {
   const started = Date.now();
-  const t = setInterval(() => {
+  const timer = setInterval(() => {
     chrome.runtime.sendMessage({ type: 'ms-queue-status' }, (qs) => {
       if (chrome.runtime.lastError || !qs) return;
       const e = (qs.queue || []).find((q) => q.id === entryId);
       if (!e) return;
+
       if (e.status === 'complete') {
-        clearInterval(t);
-        btn.classList.remove('busy'); btn.textContent = '保存';
-        setStatus('保存しました: ' + (e.filename || ''));
+        clearInterval(timer);
+        resetSaveButton(btn);
+        setStatus(t('savedFile', [e.filename || '']));
       } else if (e.status === 'failed') {
-        clearInterval(t);
-        btn.classList.remove('busy'); btn.textContent = '保存';
+        clearInterval(timer);
+        resetSaveButton(btn);
         const forbidden = /FORBIDDEN|403|UNAUTHORIZED|http 403|http 401/i.test(e.error || '');
-        setStatus(forbidden && isYoutube
-          ? 'YouTubeが直接ダウンロードを拒否しました — 下の「yt-dlp」ボタンでコマンドをコピーして使ってください'
-          : '失敗: ' + (e.error || 'unknown'), true);
+        setStatus(
+          forbidden && isYoutube ? t('youtubeDenied') : t('failedPrefix', [e.error || 'unknown']),
+          true
+        );
       } else if (e.status === 'fallback') {
-        btn.textContent = '再試行中';
-        setStatus('CDNが直接アクセスを拒否したため、セッション付きで再取得しています…');
+        btn.textContent = t('retrying');
+        setStatus(t('cdnRetry'));
       } else if (Date.now() - started > 30000) {
-        clearInterval(t);
-        btn.classList.remove('busy'); btn.textContent = '保存';
-        setStatus('ダウンロード中… (進捗はブラウザのダウンロードバーで)');
+        clearInterval(timer);
+        resetSaveButton(btn);
+        setStatus(t('downloadInProgress'));
       }
     });
   }, 1000);
 }
 
 function pollHls(item, btn) {
-  // Poll until the job truly finishes: the blob download itself can still
-  // fail AFTER the "downloading" state, so keep watching for complete/failed.
   const started = Date.now();
-  const t = setInterval(() => {
-    chrome.runtime.sendMessage({ type: 'ms-hls-status', url: item.url, dashEntry: item.dashEntry != null ? item.dashEntry : null }, (job) => {
+  const timer = setInterval(() => {
+    chrome.runtime.sendMessage({
+      type: 'ms-hls-status',
+      url: item.url,
+      dashEntry: item.dashEntry != null ? item.dashEntry : null,
+    }, (job) => {
       if (chrome.runtime.lastError || !job) {
-        // job vanished (SW restart): tell the user instead of hanging forever
-        clearInterval(t);
-        btn.classList.remove('busy'); btn.textContent = '保存';
-        setStatus('HLSジョブの状態を見失いました — もう一度「保存」を押してください', true);
+        clearInterval(timer);
+        resetSaveButton(btn);
+        setStatus(t('jobLost'), true);
         return;
       }
+
       if (job.status === 'recording') {
-        // live: show elapsed time/size, button becomes the stop control
         btn.dataset.recording = '1';
-        btn.textContent = '停止';
-        setStatus('録画中 ' + fmtDuration(job.seconds) + ' · ' + formatBytes(job.bytes) + ' — 停止を押すと保存されます');
+        btn.textContent = t('stop');
+        setStatus(t('recordingStatus', [fmtDuration(job.seconds), formatBytes(job.bytes)]));
         return;
       }
+
       btn.dataset.recording = '';
       if (job.status === 'combining' && job.total) {
         btn.textContent = Math.round((job.done / job.total) * 100) + '%';
-        setStatus('セグメント取得中 ' + job.done + '/' + job.total);
+        setStatus(t('segmentProgress', [String(job.done), String(job.total)]));
       } else if (job.status === 'combining' && job.mode === 'ffmpeg') {
-        btn.textContent = job.bytes ? formatBytes(job.bytes) : '処理中';
-        setStatus('ffmpeg処理中… ' + (job.seconds ? fmtDuration(job.seconds) : ''));
+        btn.textContent = job.bytes ? formatBytes(job.bytes) : t('processing');
+        setStatus(t('ffmpegStatus', [job.seconds ? fmtDuration(job.seconds) : '']));
       } else if (job.status === 'downloading') {
-        btn.textContent = '保存中';
-        setStatus('結合完了 — ダウンロードに保存中…');
+        btn.textContent = t('saving');
+        setStatus(t('combinedSaving'));
       } else if (job.status === 'complete') {
-        clearInterval(t);
-        btn.classList.remove('busy'); btn.textContent = '保存';
-        setStatus('保存しました: ' + (job.filename || ''));
+        clearInterval(timer);
+        resetSaveButton(btn);
+        setStatus(t('savedFile', [job.filename || '']));
       } else if (job.status === 'failed') {
-        clearInterval(t);
-        btn.classList.remove('busy');
-        btn.textContent = '保存';
-        setStatus('失敗: ' + (job.error || 'unknown'), true);
+        clearInterval(timer);
+        resetSaveButton(btn);
+        setStatus(t('failedPrefix', [job.error || 'unknown']), true);
       } else if (Date.now() - started > 30 * 60 * 1000) {
-        clearInterval(t);
-        btn.classList.remove('busy'); btn.textContent = '保存';
-        setStatus('タイムアウト — 長い動画は時間がかかります。進捗はステータスを確認', true);
+        clearInterval(timer);
+        resetSaveButton(btn);
+        setStatus(t('timeout'), true);
       }
     });
   }, 700);
-  // replace (don't stack) the poll timer when the same item is saved again
+
   const prev = hlsTimers.get(item.key);
   if (prev) clearInterval(prev);
-  hlsTimers.set(item.key, t);
+  hlsTimers.set(item.key, timer);
 }
 
 let settings = { rootFolder: '', minSizeKb: 500, blacklist: '' };
@@ -257,8 +304,8 @@ function loadSettings(cb) {
     if (!chrome.runtime.lastError && s) settings = s;
     if ($('#destHint')) {
       $('#destHint').textContent = settings.rootFolder
-        ? '保存先: ~/Downloads/' + settings.rootFolder + '/'
-        : '保存先: ~/Downloads/ 直下';
+        ? t('destFolder', [settings.rootFolder])
+        : t('destRoot');
     }
     if (cb) cb();
   });
@@ -266,12 +313,15 @@ function loadSettings(cb) {
 
 function load() {
   chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-    const t = tabs[0];
-    if (!t) return;
-    tabId = t.id;
-    pageUrl = t.url;
+    const currentTab = tabs[0];
+    if (!currentTab) return;
+    tabId = currentTab.id;
+    pageUrl = currentTab.url;
     chrome.runtime.sendMessage({ type: 'ms-get-items', tabId: tabId }, (resp) => {
-      if (chrome.runtime.lastError || !resp) { setStatus('background と通信できません (拡張を再読み込み)', true); return; }
+      if (chrome.runtime.lastError || !resp) {
+        setStatus(t('backgroundUnavailable'), true);
+        return;
+      }
       items = resp.items || [];
       render();
     });
@@ -281,13 +331,13 @@ function load() {
 $('#rescan').addEventListener('click', () => {
   if (tabId == null) return;
   chrome.tabs.sendMessage(tabId, { type: 'ms-scan' }, () => { void chrome.runtime.lastError; });
-  setStatus('スキャン中…');
+  setStatus(t('scanning'));
   const before = items.length;
   let polls = 0;
-  const t = setInterval(() => {
+  const timer = setInterval(() => {
     polls++;
     load();
-    if (polls >= 6 || items.length > before) { clearInterval(t); }
+    if (polls >= 6 || items.length > before) clearInterval(timer);
   }, 500);
 });
 
@@ -295,35 +345,45 @@ $('#clear').addEventListener('click', () => {
   chrome.runtime.sendMessage({ type: 'ms-clear', tabId: tabId }, () => {
     items = [];
     render();
-    setStatus('クリアしました');
+    setStatus(t('cleared'));
   });
 });
 
 $('#ytdlp').addEventListener('click', async () => {
-  if (!pageUrl || pageUrl.indexOf('http') !== 0) { setStatus('このタブは対象外', true); return; }
+  if (!pageUrl || pageUrl.indexOf('http') !== 0) {
+    setStatus(t('tabUnsupported'), true);
+    return;
+  }
   const cmd = L().ytDlpCommand(pageUrl);
   try {
     await navigator.clipboard.writeText(cmd);
-    setStatus('コピー: ' + cmd);
-  } catch (e) { setStatus('コピー失敗', true); }
+    setStatus(t('copied', [cmd]));
+  } catch (e) {
+    setStatus(t('copyFailed'), true);
+  }
 });
 
-// 全部保存: direct items go through ms-download-all (skip-existing +
-// uniquify-safe), HLS/DASH run one-by-one in the background's media chain.
 $('#saveall').addEventListener('click', () => {
-  if (!items.length) { setStatus('保存するアイテムがありません'); return; }
+  if (!items.length) {
+    setStatus(t('noItems'));
+    return;
+  }
   const btn = $('#saveall');
   btn.classList.add('busy');
   btn.textContent = '…';
   chrome.runtime.sendMessage({ type: 'ms-download-all', tabId: tabId }, (resp) => {
     btn.classList.remove('busy');
-    btn.textContent = '全部保存';
-    if (chrome.runtime.lastError || !resp) { setStatus('エラー: ' + (chrome.runtime.lastError ? chrome.runtime.lastError.message : '応答なし'), true); return; }
+    btn.textContent = t('saveAll');
+    if (chrome.runtime.lastError || !resp) {
+      const err = chrome.runtime.lastError ? chrome.runtime.lastError.message : t('noResponse');
+      setStatus(t('errorPrefix', [err]), true);
+      return;
+    }
     const parts = [];
-    if (resp.queued) parts.push(resp.queued + '件をキューに追加');
-    if (resp.skipped) parts.push(resp.skipped + '件は保存済みでスキップ');
-    if (resp.deferred) parts.push(resp.deferred + '件のHLS/DASHを順次処理中');
-    setStatus(parts.length ? parts.join(' · ') : '保存できるアイテムがありません');
+    if (resp.queued) parts.push(t('queuedCount', [String(resp.queued)]));
+    if (resp.skipped) parts.push(t('skippedCount', [String(resp.skipped)]));
+    if (resp.deferred) parts.push(t('deferredCount', [String(resp.deferred)]));
+    setStatus(parts.length ? parts.join(' · ') : t('noSavable'));
   });
 });
 
@@ -333,4 +393,4 @@ $('#options').addEventListener('click', (e) => {
 });
 
 document.addEventListener('DOMContentLoaded', () => loadSettings(load));
-if (document.readyState !== 'loading') { loadSettings(load); }
+if (document.readyState !== 'loading') loadSettings(load);
