@@ -20,8 +20,18 @@ const revoked = [];
 let pagehide = null;
 let cancelled = false;
 let responseLength = '10';
+let rawRuntimeListener = null;
+const fakeChrome = {
+  runtime: {
+    id: 'extid',
+    onMessage: {
+      addListener: function (fn) { rawRuntimeListener = fn; },
+    },
+  },
+};
 const context = vm.createContext({
   console,
+  chrome: fakeChrome,
   Blob: FakeBlob,
   ArrayBuffer,
   Uint8Array,
@@ -67,6 +77,32 @@ eq(policy.MAX_SINGLE_RESPONSE_BYTES, 512 * 1024 * 1024, 'single response limit f
   context.URL.revokeObjectURL(url);
   eq(policy.ownedUrlCount(), 0, 'explicit revoke releases ownership');
   eq(revoked.includes(url), true, 'native revoke invoked');
+}
+
+// Offscreen commands must come from this extension without a tab (service
+// worker/extension document), never directly from a content-script tab.
+{
+  eq(policy.isTrustedOffscreenSender({ id: 'extid' }, 'extid'), true, 'own worker sender trusted');
+  eq(policy.isTrustedOffscreenSender({ id: 'extid', tab: { id: 3 } }, 'extid'), false, 'content-script sender rejected');
+  eq(policy.isTrustedOffscreenSender({ id: 'other' }, 'extid'), false, 'other extension rejected');
+
+  let handled = 0;
+  context.chrome.runtime.onMessage.addListener(function () { handled++; return false; });
+  let rejection = null;
+  rawRuntimeListener(
+    { type: 'ms-offscreen-fetch-blob', url: 'https://example.test/x' },
+    { id: 'extid', tab: { id: 9 } },
+    function (r) { rejection = r; }
+  );
+  eq(handled, 0, 'rejected offscreen command never reaches handler');
+  ok(rejection && /rejected/.test(rejection.error), 'rejected offscreen sender receives error');
+
+  rawRuntimeListener(
+    { type: 'ms-offscreen-fetch-blob', url: 'https://example.test/x' },
+    { id: 'extid' },
+    function () {}
+  );
+  eq(handled, 1, 'trusted worker command reaches offscreen handler');
 }
 
 (async function () {
