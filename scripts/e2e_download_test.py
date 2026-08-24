@@ -2,8 +2,9 @@
 """media-sniper headless E2E download test (one command, LLM-friendly).
 
 Prereqs (already running):
-  - headless Brave on 9222 with --load-extension=<project dir>
+  - headless Brave/Chrome/Chromium with --load-extension=<project dir>
   - fixture http server on FIXTURE_PORT (default 8899), root = test/fixture
+  - MEDIA_SNIPER_EXTENSION_ID set by run_e2e.py
 
 Steps:
   1. Open a fresh tab on the fixture page (Target.createTarget)
@@ -31,13 +32,15 @@ for _p in (
         sys.path.insert(0, _p)
 try:
     import websockets
-except ImportError:
-    pass
+except ImportError as exc:
+    raise SystemExit("websockets is required for E2E: pip install websockets") from exc
 
 import asyncio
 
 CDP = "http://localhost:" + os.environ.get("CDP_PORT", "9222")
-EXT_ID = "gahplhbihkiodjleemjahaiajhgaijlb"
+EXT_ID = os.environ.get("MEDIA_SNIPER_EXTENSION_ID", "").strip()
+if not EXT_ID:
+    raise SystemExit("MEDIA_SNIPER_EXTENSION_ID is required; run via scripts/run_e2e.py")
 FIXTURE_PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8899
 FIXTURE_URL = f"http://127.0.0.1:{FIXTURE_PORT}/hls/index.html"
 verdict = {"steps": [], "pass": False}
@@ -114,7 +117,6 @@ def parse_json_value(raw):
 
 
 async def main():
-    # 1. fresh fixture tab
     try:
         open_tab(FIXTURE_URL)
         await asyncio.sleep(3)
@@ -126,7 +128,6 @@ async def main():
     if not page:
         return
 
-    # 2. wait for SW + read msItems
     if not await wait_for_sw(20):
         step("service worker awake", False, "SW never appeared in /json/list")
         return
@@ -140,11 +141,6 @@ async def main():
     flat = [i for arr in items.values() for i in arr]
     step("read msItems", True, f"{len(flat)} items")
 
-    # 3. detection assertions for this fixture port
-    # NOTE: a master playlist surfaces as its VARIANT item(s) (VDH-style
-    # per-resolution items), so the expected artifact is media.m3u8, not
-    # master.m3u8. Detection lands asynchronously (SW fetches + parses the
-    # playlist after onResponseStarted), so poll for up to ~12s.
     need = {"clip.mp4": False, "audio.mp3": False, "media.m3u8": False}
     deadline = time.time() + 12
     while time.time() < deadline:
@@ -164,7 +160,6 @@ async def main():
         await asyncio.sleep(1.5)
     step("detected video/audio/hls-variant", all(need.values()), json.dumps(need))
 
-    # 4. open the real popup in a tab (a genuine extension context)
     popup_url = f"chrome-extension://{EXT_ID}/popup/popup.html"
     try:
         open_tab(popup_url)
@@ -177,7 +172,6 @@ async def main():
     if not popup:
         return
 
-    # 5. ms-download FROM the popup context (production message path)
     trigger = (
         "chrome.runtime.sendMessage({type:'ms-download', item:{url:'"
         f"http://127.0.0.1:{FIXTURE_PORT}/hls/clip.mp4"
@@ -191,7 +185,6 @@ async def main():
         step("ms-download accepted (popup->SW)", False, e)
         return
 
-    # 6. poll downloads.search for the fixture clip
     final = None
     for _ in range(30):
         await asyncio.sleep(1)
@@ -221,15 +214,12 @@ async def main():
             "bytesReceived": final.get("bytesReceived"), "totalBytes": final.get("totalBytes"),
         })
 
-    # --- v0.10 features: settings round-trip + download-all ------------------
-    # settings round-trip (popup context = the same message path options use)
     try:
         st = parse_json_value(await ws_eval(popup["webSocketDebuggerUrl"],
             "chrome.runtime.sendMessage({type:'ms-set-settings',settings:{rootFolder:'e2e-root',minSizeKb:500,blacklist:''}})"
             ".then(r=>JSON.stringify(r)).catch(e=>JSON.stringify({err:String(e)}))"))
         ok_st = isinstance(st, dict) and st.get("saved") and st.get("settings", {}).get("rootFolder") == "e2e-root"
         step("set-settings saved (root sanitized/kept)", bool(ok_st), st)
-        # download-all with the root folder: fixture clip re-queues under e2e-root/
         try:
             da = parse_json_value(await ws_eval(popup["webSocketDebuggerUrl"],
                 "chrome.runtime.sendMessage({type:'ms-download-all',tabId:1})"
@@ -241,14 +231,12 @@ async def main():
     except Exception as e:
         step("set-settings saved (root sanitized/kept)", False, e)
 
-    # restore default settings so the test profile stays flat
     try:
         await ws_eval(popup["webSocketDebuggerUrl"],
             "chrome.runtime.sendMessage({type:'ms-set-settings',settings:{rootFolder:'',minSizeKb:500,blacklist:''}})")
     except Exception:
         pass
 
-    # queue status for completeness
     try:
         q = parse_json_value(await ws_eval(popup["webSocketDebuggerUrl"],
             "chrome.runtime.sendMessage({type:'ms-queue-status'}).then(r=>JSON.stringify(r))"))

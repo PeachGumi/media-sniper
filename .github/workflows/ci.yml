@@ -22,10 +22,22 @@ jobs:
         run: npm run check
 
       - name: Manifest validation
-        run: node -e "JSON.parse(require('fs').readFileSync('manifest.json','utf8')); console.log('manifest OK')"
+        run: node -e "const fs=require('fs'); const m=JSON.parse(fs.readFileSync('manifest.json','utf8')); const p=JSON.parse(fs.readFileSync('package.json','utf8')); if(m.version!==p.version) throw new Error('manifest/package version mismatch: '+m.version+' vs '+p.version); console.log('manifest OK', m.version)"
 
       - name: Package
         run: npm run zip
+
+      - name: Verify packaged artifact
+        run: |
+          rm -rf /tmp/media-sniper-package
+          mkdir -p /tmp/media-sniper-package
+          unzip -q media-sniper.zip -d /tmp/media-sniper-package
+          test -f /tmp/media-sniper-package/manifest.json
+          test -f /tmp/media-sniper-package/src/background.js
+          test -f /tmp/media-sniper-package/src/offscreen.js
+          test -f /tmp/media-sniper-package/src/libav/libav-6.5.7.1-h264-aac-mp3.wasm.wasm
+          test -f /tmp/media-sniper-package/popup/popup.html
+          sha256sum media-sniper.zip
 
       - name: Privacy scan
         run: |
@@ -33,3 +45,18 @@ jobs:
           ! grep -rnE "eval\(|new Function\(|XMLHttpRequest\(" src/ popup/ --include="*.js" | grep -v "prototype" | grep -v "nativeFetch"
           ! grep -rniE "analytics|telemetry|track\.|google-analytics" src/ popup/ --include="*.js"
           echo "privacy scan clean"
+
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install E2E dependency
+        run: python -m pip install --disable-pip-version-check websockets
+
+      - name: Browser E2E
+        run: npm run e2e

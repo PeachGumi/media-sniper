@@ -3,9 +3,9 @@
 
 Boots everything the headless E2E needs, runs the test suites, tears down:
   1. (re)writes download prefs into the dedicated test profile
-  2. launches headless Brave with --load-extension on a free port
+  2. launches headless Brave/Chrome/Chromium with --load-extension on a free port
   3. starts the fixture http server (test/fixture)
-  4. waits for the extension service worker to appear
+  4. waits for the Media Sniper extension service worker and discovers its ID
   5. runs scripts/e2e_download_test.py (detection + real popup-path download)
   6. tears the browser and server down
 
@@ -25,8 +25,6 @@ import urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PROFILE = os.path.expanduser("~/.cache/ms-brave-test-e2e")
-EXT_ID = "gahplhbihkiodjleemjahaiajhgaijlb"
-
 KEEP = "--keep" in sys.argv
 
 
@@ -61,16 +59,15 @@ def find_browser():
                 os.path.join(pf, "Google", "Chrome", "Application", "chrome.exe"),
                 os.path.join(local, "Google", "Chrome", "Application", "chrome.exe"),
             ]
-        else:  # linux & friends
+        else:
             yield "brave", ["brave-browser", "brave-browser-stable", "brave"]
             yield "chrome", ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser"]
 
-    # explicit override wins
     env_browser = os.environ.get("MEDIA_SNIPER_BRAVE")
     if env_browser and os.path.exists(env_browser):
         return env_browser
 
-    for name, paths in candidates():
+    for _, paths in candidates():
         for p in paths:
             if os.sep not in p and "/" not in p:
                 found = shutil.which(p)
@@ -98,14 +95,20 @@ def write_prefs():
     prefs = {}
     if os.path.exists(prefs_path):
         try:
-            prefs = json.load(open(prefs_path))
+            with open(prefs_path, encoding="utf-8") as f:
+                prefs = json.load(f)
         except Exception:
             prefs = {}
     prefs.setdefault("download", {})["prompt_for_download"] = False
     prefs["download"]["default_directory"] = os.path.expanduser("~/Downloads")
     prefs["download"]["directory_upgrade"] = True
-    json.dump(prefs, open(prefs_path, "w"))
+    with open(prefs_path, "w", encoding="utf-8") as f:
+        json.dump(prefs, f)
     return prefs_path
+
+
+def cdp_targets(port):
+    return json.load(urllib.request.urlopen(f"http://127.0.0.1:{port}/json/list", timeout=2))
 
 
 def wait_cdp(port, seconds=30):
@@ -119,18 +122,32 @@ def wait_cdp(port, seconds=30):
     return False
 
 
+def extension_id_from_target(target):
+    url = target.get("url", "")
+    m = re.match(r"^chrome-extension://([a-p]{32})/", url)
+    if not m:
+        return None
+    return m.group(1)
+
+
 def wait_sw(port, seconds=25):
+    """Return Media Sniper's dynamically assigned unpacked extension ID."""
     deadline = time.time() + seconds
     while time.time() < deadline:
         try:
-            targets = json.load(urllib.request.urlopen(f"http://127.0.0.1:{port}/json/list", timeout=2))
-            for t in targets:
-                if t.get("type") == "service_worker" and EXT_ID in t.get("url", ""):
-                    return True
+            for t in cdp_targets(port):
+                if t.get("type") != "service_worker":
+                    continue
+                url = t.get("url", "")
+                if not url.endswith("/src/background.js"):
+                    continue
+                ext_id = extension_id_from_target(t)
+                if ext_id:
+                    return ext_id
         except Exception:
             pass
         time.sleep(1)
-    return False
+    return None
 
 
 def main():
@@ -162,7 +179,7 @@ def main():
     ]
     brave_proc = subprocess.Popen(brave_cmd, env=env,
                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    print(f"[boot] brave pid={brave_proc.pid} cdp={cdp_port}")
+    print(f"[boot] browser pid={brave_proc.pid} cdp={cdp_port}")
 
     fix_proc = subprocess.Popen(
         [sys.executable, "-m", "http.server", str(fixture_port)],
@@ -170,21 +187,21 @@ def main():
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     print(f"[boot] fixture server port={fixture_port}")
 
-    procs = [(brave_proc, "brave"), (fix_proc, "fixture")]
+    procs = [(brave_proc, "browser"), (fix_proc, "fixture")]
 
     def teardown(*_):
-        for p, name in procs:
+        for p, _ in procs:
             if p.poll() is None:
                 try:
-                    # SIGTERM the whole command line (port pinpoints our instance);
-                    # works cross-platform via process kill, CDP close first when
-                    # reachable for a graceful shutdown
                     try:
                         json.load(urllib.request.urlopen(
                             f"http://127.0.0.1:{cdp_port}/json/version", timeout=2))
-                        subprocess.run(["pkill", "-TERM", "-f",
-                                        f"remote-debugging-port={cdp_port}"],
-                                       capture_output=True, timeout=5)
+                        if os.name != "nt":
+                            subprocess.run(["pkill", "-TERM", "-f",
+                                            f"remote-debugging-port={cdp_port}"],
+                                           capture_output=True, timeout=5)
+                        else:
+                            p.terminate()
                     except Exception:
                         p.terminate()
                 except Exception:
@@ -208,14 +225,16 @@ def main():
             return False
         print("[ok] CDP up")
 
-        if not wait_sw(cdp_port):
-            print("[FAIL] extension service worker never appeared "
-                  "(extension id mismatch or load failure)")
+        ext_id = wait_sw(cdp_port)
+        if not ext_id:
+            print("[FAIL] Media Sniper service worker never appeared "
+                  "(extension load failure or unexpected background path)")
             return False
-        print("[ok] service worker awake")
+        print(f"[ok] service worker awake extension_id={ext_id}")
 
         e2e_env = dict(env)
         e2e_env["CDP_PORT"] = str(cdp_port)
+        e2e_env["MEDIA_SNIPER_EXTENSION_ID"] = ext_id
         r = subprocess.run(
             [sys.executable, os.path.join(ROOT, "scripts", "e2e_download_test.py"),
              str(fixture_port)],
@@ -224,7 +243,7 @@ def main():
     finally:
         if KEEP:
             print(f"\n[keep] browser left running: CDP={cdp_port} fixture={fixture_port}")
-            print(f"[keep] stop with: pkill -f 'remote-debugging-port={cdp_port}'")
+            print(f"[keep] stop with the process using remote-debugging-port={cdp_port}")
         else:
             teardown()
             print("[teardown] done")
