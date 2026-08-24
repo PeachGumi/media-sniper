@@ -10,6 +10,9 @@ importScripts('security-guard.js');
 MediaSniperSecurity.prepare(chrome);
 try {
   importScripts('background.js');
+  // Mutates the exported MediaSniperLogic object that background.js already
+  // references, so all later DASH work uses the inherited-template resolver.
+  importScripts('dash-inheritance.js');
 } finally {
   MediaSniperSecurity.activate(chrome);
 }
