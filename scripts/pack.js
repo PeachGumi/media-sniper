@@ -18,6 +18,7 @@ const includes = [
   'src/bridge.js',
   'src/content.js',
   'src/background-entry.js',
+  'src/security-bootstrap.js',
   'src/security-guard.js',
   'src/background.js',
   'src/offscreen.html',
