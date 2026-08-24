@@ -63,7 +63,8 @@ The extension needs broad browser access because its prominent function is autom
 - sensitive headers are associated with their source origin and stripped from extension-managed cross-origin replay;
 - page/content-script data is treated as untrusted and schema-checked;
 - privileged download/settings/clear/queue operations must originate from Media Sniper's own extension pages;
-- captured authentication headers are not written to extension storage;
+- captured authentication headers are not written to extension storage and confirmed-media header cache entries have a bounded lifetime;
+- completed queue/job history is bounded and extension-owned Blob URLs have explicit release ownership plus a TTL fallback;
 - excluded domains do not contribute promoted request metadata.
 
 Chromium may still attach cookies belonging to the target media origin when the extension performs a credentialed fetch. Media Sniper does not copy a Cookie header from one origin to another.
@@ -95,16 +96,18 @@ page / player
 Key files:
 
 ```text
-src/background-entry.js  service-worker entrypoint / security bootstrap
-src/security-guard.js    request/message trust boundary
-src/logic.js             shared media parsing/naming helpers
-src/dash-inheritance.js  DASH hierarchy resolver
-src/background.js        detection, queue, HLS/DASH orchestration
-src/offscreen.js         media byte processing + bundled ffmpeg/libav.js
-src/content.js           isolated-world relay and page metadata
-src/bridge.js            page media/blob scanner
-src/youtube.js           full-build YouTube MAIN-world adapter
-popup/                   popup, settings, first-install disclosure
+src/background-entry.js      service-worker entrypoint / security bootstrap
+src/security-guard.js        request/message trust boundary
+src/background-lifecycle.js  bounded queue/job/header/blob lifecycle policy
+src/logic.js                 shared media parsing/naming helpers
+src/dash-inheritance.js      DASH hierarchy resolver
+src/background.js            detection, queue, HLS/DASH orchestration
+src/offscreen-policy.js      offscreen sender/memory/blob ownership policy
+src/offscreen.js             media byte processing + bundled ffmpeg/libav.js
+src/content.js               isolated-world relay and page metadata
+src/bridge.js                page media/blob scanner
+src/youtube.js               full-build YouTube MAIN-world adapter
+popup/                       popup, settings, first-install disclosure
 ```
 
 ## Development and release checks
@@ -116,9 +119,15 @@ npm run e2e
 npm run zip
 ```
 
-The repository workflow is configured to run unit/syntax checks, validate the manifest/version/security entrypoint, build the distribution ZIP, verify required runtime/license/privacy files, hash the ZIP and vendored WASM, and run browser E2E fixtures. A release should not be called validated unless those checks have actually completed successfully in the release environment.
+Pull requests and `main` run unit/syntax checks, manifest/package/UI version validation, runtime/license/privacy artifact checks, privacy scans, and browser E2E. CI builds `media-sniper.zip`, extracts **that exact distribution artifact** into a clean directory, and loads the extracted ZIP contents in pinned Chrome for Testing; source-only files therefore cannot make packaged-artifact E2E pass accidentally.
 
-The E2E runner uses a throwaway browser profile and dynamically discovers the unpacked extension ID so it can run from different checkout paths/machines.
+Only after both the test job and packaged browser E2E succeed does CI create the verified workflow artifact. It contains `media-sniper.zip` and `media-sniper.zip.sha256`.
+
+`v*` tags go through the same jobs. A public GitHub Release is created only after all checks pass, the tag version matches the manifest/package version, and the explicit repository release-approval gate is enabled. The release attaches both the ZIP and its SHA-256 file. While a v1/commercial blocker remains, that approval file is deliberately absent, so an accidental tag cannot publish a release.
+
+The E2E runner uses a throwaway browser profile, dynamically discovers the extension ID, and can load a separate unpacked artifact directory via `MEDIA_SNIPER_EXTENSION_ROOT`.
+
+See [docs/RELEASE.md](docs/RELEASE.md) for the exact release gate and manual acceptance checklist.
 
 ## Distribution
 

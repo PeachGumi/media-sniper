@@ -61,7 +61,8 @@
 - sensitive headerは取得元originへbindし、extension管理のcross-origin fetchでは除去します。
 - page/content scriptから来るdataはuntrustedとしてschema検証し、payloadのtab ID/page URLを信用しません。
 - download/settings/clear/queue等の特権操作はMedia Sniper自身のextension pageからだけ受理します。
-- Authorization等はextension storageへ永続化しません。
+- Authorization等はextension storageへ永続化せず、確認済みmedia用header cacheにも保持期限があります。
+- 完了済みqueue/job履歴は上限付きで、extension自身が作ったBlob URLは明示release＋TTL fallbackで管理します。
 - blacklist対象はmedia itemにもrequest metadata昇格にも使いません。
 
 Chromium自身は、対象media originへのcredentialed fetch時に、そのorigin向けCookieを付ける場合があります。Media Sniperが別originのCookie headerをコピーして送るわけではありません。
@@ -93,16 +94,18 @@ page / player
 主要ファイル:
 
 ```text
-src/background-entry.js  service worker entrypoint / security bootstrap
-src/security-guard.js    request/message trust boundary
-src/logic.js             media解析・命名helper
-src/dash-inheritance.js  DASH階層継承resolver
-src/background.js        検出、queue、HLS/DASH orchestration
-src/offscreen.js         byte処理 + ffmpeg/libav.js
-src/content.js           isolated-world relay
-src/bridge.js            page media/blob scanner
-src/youtube.js           Full版YouTube MAIN-world adapter
-popup/                   popup / settings / 初回開示
+src/background-entry.js      service worker entrypoint / security bootstrap
+src/security-guard.js        request/message trust boundary
+src/background-lifecycle.js  queue/job/header/blobのbounded lifecycle policy
+src/logic.js                 media解析・命名helper
+src/dash-inheritance.js      DASH階層継承resolver
+src/background.js            検出、queue、HLS/DASH orchestration
+src/offscreen-policy.js      offscreen sender/memory/blob ownership policy
+src/offscreen.js             byte処理 + ffmpeg/libav.js
+src/content.js               isolated-world relay
+src/bridge.js                page media/blob scanner
+src/youtube.js               Full版YouTube MAIN-world adapter
+popup/                       popup / settings / 初回開示
 ```
 
 ## 開発・release check
@@ -114,9 +117,15 @@ npm run e2e
 npm run zip
 ```
 
-repository workflowはunit/syntax check、manifest/version/security entrypoint検査、配布ZIP作成、runtime/license/privacy必須ファイル検査、ZIP/WASM hash、browser E2Eを実行するよう構成しています。**実際のrelease環境でそれらが成功したことを確認できない限り、validated releaseとは扱いません。**
+Pull Requestと`main`では、unit/syntax、manifest/package/UI version整合、runtime/license/privacy必須ファイル、privacy scan、browser E2Eを自動検査します。E2Eはまず `media-sniper.zip` を実際に生成し、**そのZIPをクリーンなディレクトリへ展開した配布物そのもの**を固定versionのChrome for Testingへ読み込んで実行します。source treeにしか存在しないファイルでE2Eが偶然PASSすることはありません。
 
-E2Eはthrowaway browser profileを使用し、unpacked extension IDを実行時に検出するためcheckout path/別マシンへ依存しません。
+unit系jobと配布artifactのbrowser E2Eが両方成功した場合だけ、後段artifact jobが `media-sniper.zip` と `media-sniper.zip.sha256` をverified workflow artifactとして作成します。
+
+`v*` tagも同じgateを通ります。tag versionがmanifest/package versionと一致し、全checkが成功し、repositoryの明示的なrelease approval gateが有効な場合だけGitHub Releaseを作成し、ZIPとSHA-256ファイルを添付します。v1/commercial blockerが残っている間はapproval fileを意図的に置かないため、誤ってtagを作っても公開releaseにはなりません。
+
+E2Eはthrowaway browser profileを使用し、extension IDを実行時に検出します。`MEDIA_SNIPER_EXTENSION_ROOT` を指定するとrepo本体とは別の展開済みartifactをテストできます。
+
+正確なrelease手順とmanual acceptance checklistは [docs/RELEASE.md](docs/RELEASE.md) を参照してください。
 
 ## 配布
 
