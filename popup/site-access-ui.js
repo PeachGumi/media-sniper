@@ -3,6 +3,7 @@
 (function () {
   const ALL = ['http://*/*', 'https://*/*'];
   let activeTab = null;
+  let started = false;
 
   function t(key, subs) {
     return globalThis.MediaSniperI18n ? MediaSniperI18n.t(key, subs) : (chrome.i18n.getMessage(key, subs) || key);
@@ -34,30 +35,33 @@
 
   async function injectTab(tab) {
     if (!tab || tab.id == null || !httpUrl(tab.url)) return false;
+    let injected = false;
     try {
       await chrome.scripting.executeScript({
         target: { tabId: tab.id, allFrames: true },
         files: ['src/logic.js', 'src/content.js'],
       });
-      if (isYoutube(tab.url)) {
-        await chrome.scripting.executeScript({
-          target: { tabId: tab.id, frameIds: [0] },
-          files: ['src/youtube.js'],
-          world: 'MAIN',
-        });
-      }
-      return true;
+      injected = true;
     } catch (_) {
-      // Chrome internal pages and frames outside the temporary activeTab grant
-      // are intentionally inaccessible. The main frame can still be useful.
       try {
         await chrome.scripting.executeScript({
           target: { tabId: tab.id, frameIds: [0] },
           files: ['src/logic.js', 'src/content.js'],
         });
-        return true;
-      } catch (_) { return false; }
+        injected = true;
+      } catch (_) {}
     }
+
+    if (injected && isYoutube(tab.url)) {
+      try {
+        await chrome.scripting.executeScript({
+          target: { tabId: tab.id, frameIds: [0] },
+          files: ['src/youtube.js'],
+          world: 'MAIN',
+        });
+      } catch (_) {}
+    }
+    return injected;
   }
 
   async function containsAll() {
@@ -78,15 +82,17 @@
     if (!pattern) {
       siteBtn.disabled = true;
       allBtn.disabled = true;
+      clickBtn.disabled = true;
       status(t('accessUnsupported'), true);
       return;
     }
 
     const all = await containsAll();
     const site = all || await containsSite(pattern);
+    const permissions = await chrome.permissions.getAll();
     siteBtn.disabled = site;
     allBtn.disabled = all;
-    clickBtn.disabled = !(await chrome.permissions.getAll()).origins.length;
+    clickBtn.disabled = !(permissions.origins || []).length;
     status(all ? t('accessModeAll') : (site ? t('accessModeSite') : t('accessModeClick')));
   }
 
@@ -95,14 +101,24 @@
     return tabs[0] || null;
   }
 
+  function notifyReady(injected) {
+    try {
+      document.dispatchEvent(new CustomEvent('media-sniper-access-ready', {
+        detail: { injected: !!injected, tabId: activeTab && activeTab.id },
+      }));
+    } catch (_) {}
+  }
+
   async function start() {
+    if (started) return;
+    started = true;
     activeTab = await currentTab();
+    let injected = false;
     if (activeTab && httpUrl(activeTab.url)) {
-      // Opening the extension action is the user gesture that grants activeTab.
-      // Detection therefore works for this tab without persistent site access.
-      await injectTab(activeTab);
+      injected = await injectTab(activeTab);
     }
     await refresh();
+    notifyReady(injected);
   }
 
   document.getElementById('accessSite').addEventListener('click', async function () {
@@ -114,6 +130,7 @@
       await injectTab(activeTab);
       status(t('accessGrantedSite'));
       await refresh();
+      notifyReady(true);
     } catch (e) { status(t('accessFailed'), true); }
   });
 
@@ -124,6 +141,7 @@
       await injectTab(activeTab);
       status(t('accessGrantedAll'));
       await refresh();
+      notifyReady(true);
     } catch (e) { status(t('accessFailed'), true); }
   });
 
@@ -140,5 +158,5 @@
   document.addEventListener('DOMContentLoaded', function () { start().catch(function () {}); });
   if (document.readyState !== 'loading') start().catch(function () {});
 
-  globalThis.MediaSniperAccessUI = { originPattern, isYoutube };
+  globalThis.MediaSniperAccessUI = { originPattern, isYoutube, injectTab };
 })();
