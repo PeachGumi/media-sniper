@@ -17,6 +17,7 @@ const includes = [
   'PRIVACY.md',
   'DISTRIBUTION.md',
   'docs/PERMISSIONS.md',
+  'docs/MEMORY.md',
   '_locales/en/messages.json',
   '_locales/ja/messages.json',
   'src/logic.js',
