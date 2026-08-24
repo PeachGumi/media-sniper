@@ -8,8 +8,14 @@
     } catch (_) { return key; }
   }
 
+  function uiLanguage() {
+    try { return chrome.i18n.getUILanguage() || 'en'; }
+    catch (_) { return 'en'; }
+  }
+
   function apply(root) {
     const scope = root || document;
+    document.documentElement.lang = /^ja(?:-|$)/i.test(uiLanguage()) ? 'ja' : 'en';
     scope.querySelectorAll('[data-i18n]').forEach(function (el) {
       el.textContent = t(el.dataset.i18n);
     });
@@ -24,7 +30,7 @@
     });
   }
 
-  globalThis.MediaSniperI18n = { t: t, apply: apply };
+  globalThis.MediaSniperI18n = { t: t, apply: apply, uiLanguage: uiLanguage };
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', function () { apply(document); });
   else apply(document);
 
