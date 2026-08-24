@@ -56,6 +56,7 @@ jobs:
           test -f /tmp/media-sniper-package/PRIVACY.md
           test -f /tmp/media-sniper-package/DISTRIBUTION.md
           test -f /tmp/media-sniper-package/docs/PERMISSIONS.md
+          test -f /tmp/media-sniper-package/docs/MEMORY.md
           test -f /tmp/media-sniper-package/_locales/en/messages.json
           test -f /tmp/media-sniper-package/_locales/ja/messages.json
           test -f /tmp/media-sniper-package/src/background-entry.js
