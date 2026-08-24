@@ -56,6 +56,7 @@ jobs:
           test -f /tmp/media-sniper-package/PRIVACY.md
           test -f /tmp/media-sniper-package/DISTRIBUTION.md
           test -f /tmp/media-sniper-package/docs/PERMISSIONS.md
+          test -f /tmp/media-sniper-package/docs/MEMORY.md
           test -f /tmp/media-sniper-package/_locales/en/messages.json
           test -f /tmp/media-sniper-package/_locales/ja/messages.json
           test -f /tmp/media-sniper-package/src/background-entry.js
@@ -67,6 +68,7 @@ jobs:
           test -f /tmp/media-sniper-package/src/background.js
           test -f /tmp/media-sniper-package/src/offscreen.html
           test -f /tmp/media-sniper-package/src/offscreen-policy.js
+          test -f /tmp/media-sniper-package/src/offscreen-streaming.js
           test -f /tmp/media-sniper-package/src/offscreen.js
           test -f /tmp/media-sniper-package/src/libav/libav-6.5.7.1-h264-aac-mp3.wasm.wasm
           test -f /tmp/media-sniper-package/popup/i18n.js
@@ -104,6 +106,7 @@ jobs:
           mkdir -p /tmp/media-sniper-e2e
           unzip -q media-sniper.zip -d /tmp/media-sniper-e2e
           test -f /tmp/media-sniper-e2e/manifest.json
+          test -f /tmp/media-sniper-e2e/src/offscreen-streaming.js
           echo "MEDIA_SNIPER_EXTENSION_ROOT=/tmp/media-sniper-e2e" >> "$GITHUB_ENV"
 
       # Official branded Chrome removed --load-extension in Chrome 137.
