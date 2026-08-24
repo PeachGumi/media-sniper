@@ -6,14 +6,16 @@
   "default_locale": "en",
   "minimum_chrome_version": "110",
   "permissions": [
+    "activeTab",
     "downloads",
+    "offscreen",
+    "scripting",
     "storage",
-    "tabs",
-    "webRequest",
-    "offscreen"
+    "webRequest"
   ],
-  "host_permissions": [
-    "<all_urls>"
+  "optional_host_permissions": [
+    "http://*/*",
+    "https://*/*"
   ],
   "content_security_policy": {
     "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
@@ -21,29 +23,6 @@
   "background": {
     "service_worker": "src/background-entry.js"
   },
-  "content_scripts": [
-    {
-      "matches": [
-        "<all_urls>"
-      ],
-      "js": [
-        "src/logic.js",
-        "src/content.js"
-      ],
-      "run_at": "document_start",
-      "all_frames": true
-    },
-    {
-      "matches": [
-        "*://*.youtube.com/*"
-      ],
-      "js": [
-        "src/youtube.js"
-      ],
-      "run_at": "document_start",
-      "world": "MAIN"
-    }
-  ],
   "web_accessible_resources": [
     {
       "resources": [
@@ -51,7 +30,8 @@
         "src/bridge.js"
       ],
       "matches": [
-        "<all_urls>"
+        "http://*/*",
+        "https://*/*"
       ]
     }
   ],
