@@ -37,6 +37,7 @@ jobs:
           test -f /tmp/media-sniper-package/LICENSE.libav
           test -f /tmp/media-sniper-package/THIRD_PARTY_NOTICES.md
           test -f /tmp/media-sniper-package/src/background-entry.js
+          test -f /tmp/media-sniper-package/src/security-bootstrap.js
           test -f /tmp/media-sniper-package/src/security-guard.js
           test -f /tmp/media-sniper-package/src/background.js
           test -f /tmp/media-sniper-package/src/offscreen.js
