@@ -145,7 +145,7 @@ def print_browser_log(path):
             text = f.read()
         if text:
             print("[browser stderr tail]")
-            print(text[-6000:])
+            print(text[-10000:])
     except Exception:
         pass
 
@@ -178,7 +178,13 @@ def main():
         "--headless=new",
         f"--remote-debugging-port={cdp_port}",
         f"--user-data-dir={PROFILE}",
+        # Deterministic automation: runner/browser images can ship built-in or
+        # policy-installed extensions. Explicitly allow only this unpacked
+        # extension so --load-extension cannot be shadowed by profile state.
+        f"--disable-extensions-except={ROOT}",
         f"--load-extension={ROOT}",
+        "--enable-logging=stderr",
+        "--v=1",
         "--no-first-run",
         "--no-default-browser-check",
         "--disable-gpu",
@@ -235,7 +241,7 @@ def main():
         if not ext_id:
             print(f"[FAIL] Media Sniper service worker never appeared at {expected_sw}")
             try:
-                print("[debug] CDP targets:", json.dumps(cdp_targets(cdp_port), ensure_ascii=False)[:4000])
+                print("[debug] CDP targets:", json.dumps(cdp_targets(cdp_port), ensure_ascii=False)[:6000])
             except Exception:
                 pass
             browser_log.flush()
