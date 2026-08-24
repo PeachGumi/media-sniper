@@ -22,7 +22,7 @@ jobs:
         run: npm run check
 
       - name: Manifest validation
-        run: node -e "const fs=require('fs'); const m=JSON.parse(fs.readFileSync('manifest.json','utf8')); const p=JSON.parse(fs.readFileSync('package.json','utf8')); if(m.version!==p.version) throw new Error('manifest/package version mismatch: '+m.version+' vs '+p.version); if(m.background.service_worker!=='src/background-entry.js') throw new Error('security entrypoint missing'); console.log('manifest OK', m.version)"
+        run: node -e "const fs=require('fs'); const m=JSON.parse(fs.readFileSync('manifest.json','utf8')); const p=JSON.parse(fs.readFileSync('package.json','utf8')); if(m.version!==p.version) throw new Error('manifest/package version mismatch: '+m.version+' vs '+p.version); if(m.background.service_worker!=='src/background-entry.js') throw new Error('security entrypoint missing'); if(m.default_locale!=='en') throw new Error('default locale missing'); console.log('manifest OK', m.version)"
 
       - name: Package
         run: npm run zip
@@ -39,6 +39,8 @@ jobs:
           test -f /tmp/media-sniper-package/PRIVACY.md
           test -f /tmp/media-sniper-package/DISTRIBUTION.md
           test -f /tmp/media-sniper-package/docs/PERMISSIONS.md
+          test -f /tmp/media-sniper-package/_locales/en/messages.json
+          test -f /tmp/media-sniper-package/_locales/ja/messages.json
           test -f /tmp/media-sniper-package/src/background-entry.js
           test -f /tmp/media-sniper-package/src/install.js
           test -f /tmp/media-sniper-package/src/security-bootstrap.js
@@ -49,6 +51,7 @@ jobs:
           test -f /tmp/media-sniper-package/src/offscreen-policy.js
           test -f /tmp/media-sniper-package/src/offscreen.js
           test -f /tmp/media-sniper-package/src/libav/libav-6.5.7.1-h264-aac-mp3.wasm.wasm
+          test -f /tmp/media-sniper-package/popup/i18n.js
           test -f /tmp/media-sniper-package/popup/popup.html
           test -f /tmp/media-sniper-package/popup/meta.js
           test -f /tmp/media-sniper-package/popup/onboarding.html
@@ -60,7 +63,6 @@ jobs:
 
       - name: Privacy scan
         run: |
-          # fail the build if new suspicious patterns creep in
           ! grep -rnE "eval\(|new Function\(|XMLHttpRequest\(" src/ popup/ --include="*.js" | grep -v "prototype" | grep -v "nativeFetch"
           ! grep -rniE "analytics|telemetry|track\.|google-analytics" src/ popup/ --include="*.js"
           echo "privacy scan clean"
