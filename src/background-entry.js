@@ -7,6 +7,7 @@
 // Event listeners that must survive MV3 worker restarts are registered during
 // top-level worker evaluation.
 importScripts('install.js');
+importScripts('site-access.js');
 importScripts('security-bootstrap.js');
 MediaSniperSecurityBootstrap.install(chrome);
 importScripts('security-guard.js');
