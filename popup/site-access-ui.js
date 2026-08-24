@@ -25,7 +25,11 @@
 
   function originPattern(url) {
     const u = httpUrl(url);
-    return u ? u.origin + '/*' : null;
+    if (!u) return null;
+    // Chrome match patterns are host based, not port based. `hostname` also
+    // avoids accidentally generating an invalid optional-permission pattern
+    // for localhost/dev servers using explicit ports.
+    return u.protocol + '//' + u.hostname + '/*';
   }
 
   function isYoutube(url) {
@@ -114,9 +118,7 @@
     started = true;
     activeTab = await currentTab();
     let injected = false;
-    if (activeTab && httpUrl(activeTab.url)) {
-      injected = await injectTab(activeTab);
-    }
+    if (activeTab && httpUrl(activeTab.url)) injected = await injectTab(activeTab);
     await refresh();
     notifyReady(injected);
   }
