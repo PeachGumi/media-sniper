@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="ja">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <style>
@@ -21,20 +21,12 @@
   button:hover { background: #34363f; }
   button.primary { background: #ff7a45; border-color: #ff7a45; color: #17181c; font-weight: 600; }
   button.primary:hover { background: #ff8d5f; }
-  button:focus-visible, a:focus-visible {
-    outline: 2px solid #7cc4ff; outline-offset: 2px;
-  }
+  button:focus-visible, a:focus-visible { outline: 2px solid #7cc4ff; outline-offset: 2px; }
   #status { font-size: 11px; color: #9a9aa2; margin-bottom: 6px; min-height: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   #status.err { color: #ff6b6b; white-space: normal; }
   #list { max-height: 420px; overflow-y: auto; display: flex; flex-direction: column; gap: 5px; }
-  .item {
-    display: flex; align-items: center; gap: 8px; padding: 7px 8px;
-    background: #1f2127; border: 1px solid #2a2c33; border-radius: 8px;
-  }
-  .badge {
-    flex: 0 0 auto; font-size: 10px; font-weight: 700; text-transform: uppercase;
-    padding: 2px 6px; border-radius: 4px; background: #333; color: #ccc;
-  }
+  .item { display: flex; align-items: center; gap: 8px; padding: 7px 8px; background: #1f2127; border: 1px solid #2a2c33; border-radius: 8px; }
+  .badge { flex: 0 0 auto; font-size: 10px; font-weight: 700; text-transform: uppercase; padding: 2px 6px; border-radius: 4px; background: #333; color: #ccc; }
   .badge.video { background: #1d3a5f; color: #7cc4ff; }
   .badge.hls { background: #3a2f16; color: #ffb454; }
   .badge.hls-audio { background: #16333a; color: #7cd8e8; }
@@ -49,7 +41,6 @@
   .item button.dl { background: #ff7a45; border-color: #ff7a45; color: #17181c; font-weight: 700; }
   .item button.busy { opacity: .5; cursor: default; }
   .empty { color: #77777f; font-size: 12px; text-align: center; padding: 24px 8px; }
-  .hint { font-size: 11px; color: #6c6c74; padding: 8px 4px 0; }
   footer { margin-top: 8px; font-size: 10px; color: #5b5b63; display: flex; justify-content: space-between; }
   a { color: #7cc4ff; text-decoration: none; }
 </style>
@@ -59,19 +50,20 @@
     <h1>Media<span>Sniper</span></h1>
     <span class="count" id="count" aria-live="polite"></span>
   </header>
-  <div class="toolbar" role="toolbar" aria-label="メディア操作">
-    <button id="rescan">再スキャン</button>
-    <button id="saveall" class="primary" title="検出したアイテムを一括保存 (HLS/DASHは1件ずつ順番に処理)">全部保存</button>
-    <button id="clear">クリア</button>
-    <button id="ytdlp" title="このページのURLで yt-dlp コマンドをコピー">yt-dlp コマンド</button>
-    <a id="options" href="#" title="設定" aria-label="設定を開く">⚙</a>
+  <div class="toolbar" role="toolbar">
+    <button id="rescan" data-i18n="rescan">Rescan</button>
+    <button id="saveall" class="primary" data-i18n="saveAll">Save all</button>
+    <button id="clear" data-i18n="clear">Clear</button>
+    <button id="ytdlp" data-i18n="ytDlpCommand">yt-dlp command</button>
+    <a id="options" href="#" data-i18n-title="settings" data-i18n-aria-label="settings">⚙</a>
   </div>
   <div id="status" role="status" aria-live="polite" aria-atomic="true"></div>
   <div id="list"></div>
   <footer>
-    <span id="destHint">保存先: ~/Downloads/ 直下</span>
-    <span id="version" aria-label="バージョン"></span>
+    <span id="destHint" data-i18n="destRoot">Destination: ~/Downloads/</span>
+    <span id="version" data-i18n-aria-label="version"></span>
   </footer>
+  <script src="i18n.js"></script>
   <script src="../src/logic.js"></script>
   <script src="popup.js"></script>
   <script src="meta.js"></script>

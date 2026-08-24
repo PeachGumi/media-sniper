@@ -1,63 +1,49 @@
 <!DOCTYPE html>
-<html lang="ja">
+<html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Media Sniper 設定</title>
+<title>Media Sniper Settings</title>
 <style>
   :root { color-scheme: dark; }
   * { box-sizing: border-box; margin: 0; }
-  body {
-    font: 14px/1.6 -apple-system, "Hiragino Sans", sans-serif;
-    background: #17181c; color: #e8e8ea; padding: 24px;
-    max-width: 560px; margin: 0 auto;
-  }
+  body { font: 14px/1.6 -apple-system, "Hiragino Sans", sans-serif; background: #17181c; color: #e8e8ea; padding: 24px; max-width: 560px; margin: 0 auto; }
   h1 { font-size: 18px; margin-bottom: 4px; }
   h1 span { color: #ff7a45; }
   .sub { font-size: 12px; color: #9a9aa2; margin-bottom: 20px; }
   label { display: block; font-weight: 600; font-size: 13px; margin: 16px 0 4px; }
   .desc { font-size: 11px; color: #8b8b93; margin-bottom: 6px; }
-  input[type="text"], input[type="number"], textarea {
-    width: 100%; background: #1f2127; color: #e8e8ea;
-    border: 1px solid #3a3d46; border-radius: 6px; padding: 8px 10px;
-    font: inherit; font-size: 13px;
-  }
-  input:focus-visible, textarea:focus-visible, button:focus-visible {
-    outline: 2px solid #7cc4ff; outline-offset: 2px; border-color: #ff7a45;
-  }
+  input[type="text"], input[type="number"], textarea { width: 100%; background: #1f2127; color: #e8e8ea; border: 1px solid #3a3d46; border-radius: 6px; padding: 8px 10px; font: inherit; font-size: 13px; }
+  input:focus-visible, textarea:focus-visible, button:focus-visible { outline: 2px solid #7cc4ff; outline-offset: 2px; border-color: #ff7a45; }
   textarea { height: 90px; resize: vertical; }
   .row { display: flex; gap: 10px; align-items: center; }
-  button {
-    background: #ff7a45; border: 1px solid #ff7a45; color: #17181c;
-    border-radius: 6px; padding: 8px 22px; font-size: 13px; font-weight: 700;
-    cursor: pointer; margin-top: 18px;
-  }
+  button { background: #ff7a45; border: 1px solid #ff7a45; color: #17181c; border-radius: 6px; padding: 8px 22px; font-size: 13px; font-weight: 700; cursor: pointer; margin-top: 18px; }
   button:hover { background: #ff8d5f; }
   #status { font-size: 12px; color: #6fe3a1; margin-left: 12px; }
   #status.err { color: #ff6b6b; }
-  code { background: #2a2c33; border-radius: 4px; padding: 1px 5px; font-size: 11px; }
 </style>
 </head>
 <body>
-  <h1>Media<span>Sniper</span> 設定</h1>
-  <div class="sub">設定はこのブラウザのプロファイルごとに保存されます</div>
+  <h1 data-i18n="optionsTitle">Media Sniper Settings</h1>
+  <div class="sub" data-i18n="optionsSubtitle">Settings are stored per browser profile</div>
 
-  <label for="rootFolder">保存先フォルダ名</label>
-  <div class="desc" id="rootFolderHelp">Downloads の中に作るフォルダ。空欄なら Downloads 直下に保存。</div>
-  <input type="text" id="rootFolder" aria-describedby="rootFolderHelp" placeholder="例: media-sniper">
+  <label for="rootFolder" data-i18n="rootFolderLabel">Download subfolder</label>
+  <div class="desc" id="rootFolderHelp" data-i18n="rootFolderHelp">Folder inside Downloads. Leave empty for Downloads root.</div>
+  <input type="text" id="rootFolder" aria-describedby="rootFolderHelp" data-i18n-placeholder="rootFolderPlaceholder">
 
-  <label for="minSizeKb">最小サイズ (KB)</label>
-  <div class="desc" id="minSizeHelp">これより小さい直接リンク media は広告・アイコン扱いで無視。1KB以上を指定。空欄・0・不正値は既定の500KBに戻ります。</div>
+  <label for="minSizeKb" data-i18n="minSizeLabel">Minimum size (KB)</label>
+  <div class="desc" id="minSizeHelp" data-i18n="minSizeHelp">Smaller direct-media files are ignored.</div>
   <input type="number" id="minSizeKb" min="1" step="50" aria-describedby="minSizeHelp">
 
-  <label for="blacklist">除外ドメイン</label>
-  <div class="desc" id="blacklistHelp">ここに入れたドメインからの media は検出しない。<code>example.com</code> ならサブドメインも含む。改行かカンマで区切る。</div>
-  <textarea id="blacklist" aria-describedby="blacklistHelp" placeholder="ads.example.com&#10;tracker.io"></textarea>
+  <label for="blacklist" data-i18n="blacklistLabel">Excluded domains</label>
+  <div class="desc" id="blacklistHelp" data-i18n="blacklistHelp">Media from these domains is ignored.</div>
+  <textarea id="blacklist" aria-describedby="blacklistHelp" data-i18n-placeholder="blacklistPlaceholder"></textarea>
 
   <div class="row">
-    <button id="save">保存</button>
+    <button id="save" data-i18n="saveSettings">Save</button>
     <span id="status" role="status" aria-live="polite" aria-atomic="true"></span>
   </div>
 
+  <script src="i18n.js"></script>
   <script src="options.js"></script>
 </body>
 </html>

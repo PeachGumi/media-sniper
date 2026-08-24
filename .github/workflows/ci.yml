@@ -28,6 +28,8 @@ jobs:
           const m = JSON.parse(fs.readFileSync('manifest.json', 'utf8'));
           const p = JSON.parse(fs.readFileSync('package.json', 'utf8'));
           if (m.version !== p.version) throw new Error('manifest/package version mismatch: ' + m.version + ' vs ' + p.version);
+          if (m.background.service_worker !== 'src/background-entry.js') throw new Error('security entrypoint missing');
+          if (m.default_locale !== 'en') throw new Error('default locale missing');
           console.log('manifest OK', m.version);
           NODE
 
@@ -43,10 +45,26 @@ jobs:
           test -f /tmp/media-sniper-package/LICENSE
           test -f /tmp/media-sniper-package/LICENSE.libav
           test -f /tmp/media-sniper-package/THIRD_PARTY_NOTICES.md
+          test -f /tmp/media-sniper-package/PRIVACY.md
+          test -f /tmp/media-sniper-package/DISTRIBUTION.md
+          test -f /tmp/media-sniper-package/docs/PERMISSIONS.md
+          test -f /tmp/media-sniper-package/_locales/en/messages.json
+          test -f /tmp/media-sniper-package/_locales/ja/messages.json
+          test -f /tmp/media-sniper-package/src/background-entry.js
+          test -f /tmp/media-sniper-package/src/install.js
+          test -f /tmp/media-sniper-package/src/security-bootstrap.js
+          test -f /tmp/media-sniper-package/src/security-guard.js
+          test -f /tmp/media-sniper-package/src/dash-inheritance.js
           test -f /tmp/media-sniper-package/src/background.js
+          test -f /tmp/media-sniper-package/src/offscreen.html
+          test -f /tmp/media-sniper-package/src/offscreen-policy.js
           test -f /tmp/media-sniper-package/src/offscreen.js
           test -f /tmp/media-sniper-package/src/libav/libav-6.5.7.1-h264-aac-mp3.wasm.wasm
+          test -f /tmp/media-sniper-package/popup/i18n.js
           test -f /tmp/media-sniper-package/popup/popup.html
+          test -f /tmp/media-sniper-package/popup/meta.js
+          test -f /tmp/media-sniper-package/popup/onboarding.html
+          test -f /tmp/media-sniper-package/popup/onboarding.js
           echo "distribution zip:"
           sha256sum media-sniper.zip
           echo "vendored libav wasm:"
@@ -54,7 +72,6 @@ jobs:
 
       - name: Privacy scan
         run: |
-          # fail the build if new suspicious patterns creep in
           ! grep -rnE "eval\(|new Function\(|XMLHttpRequest\(" src/ popup/ --include="*.js" | grep -v "prototype" | grep -v "nativeFetch"
           ! grep -rniE "analytics|telemetry|track\.|google-analytics" src/ popup/ --include="*.js"
           echo "privacy scan clean"
@@ -64,9 +81,39 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+
+      # Official branded Chrome removed --load-extension in Chrome 137.
+      # Chrome for Testing intentionally retains automation/testing support.
+      # Pin the browser so E2E behavior is reproducible instead of floating.
+      - name: Install Chrome for Testing
+        env:
+          CFT_VERSION: '151.0.7922.77'
+        run: |
+          set -euxo pipefail
+          root=/tmp/chrome-for-testing
+          rm -rf "$root"
+          mkdir -p "$root"
+          url="https://storage.googleapis.com/chrome-for-testing-public/${CFT_VERSION}/linux64/chrome-linux64.zip"
+          curl --fail --location --retry 3 --output /tmp/chrome-for-testing.zip "$url"
+          unzip -q /tmp/chrome-for-testing.zip -d "$root"
+          browser="$root/chrome-linux64/chrome"
+          test -x "$browser"
+          "$browser" --version
+
+          # Ubuntu hosted runners restrict the user namespace Chrome normally
+          # uses for its sandbox. Keep the application runner secure by default
+          # and inject --no-sandbox only through this CI-only executable wrapper.
+          wrapper="$root/chrome-ci"
+          printf '#!/bin/sh\nexec "%s" --no-sandbox "$@"\n' "$browser" > "$wrapper"
+          chmod +x "$wrapper"
+          echo "MEDIA_SNIPER_BRAVE=$wrapper" >> "$GITHUB_ENV"
 
       - name: Install E2E dependency
         run: python -m pip install --disable-pip-version-check websockets

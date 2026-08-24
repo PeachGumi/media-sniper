@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Media Sniper</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #17181c; color: #e8e8ea; font: 15px/1.7 -apple-system, BlinkMacSystemFont, "Segoe UI", "Hiragino Sans", sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 48px 24px 64px; }
+  h1 { font-size: 28px; margin: 0 0 8px; }
+  h2 { margin-top: 30px; font-size: 18px; }
+  .lead { color: #b5b5bd; margin: 0 0 28px; }
+  .card { background: #1f2127; border: 1px solid #30333c; border-radius: 10px; padding: 20px; margin: 16px 0; }
+  ul { padding-left: 22px; }
+  li { margin: 8px 0; }
+  .actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 30px; }
+  button, a.button { display: inline-block; border-radius: 7px; padding: 9px 16px; border: 1px solid #3a3d46; background: #2a2c33; color: #e8e8ea; font: inherit; text-decoration: none; cursor: pointer; }
+  button.primary { background: #ff7a45; border-color: #ff7a45; color: #17181c; font-weight: 700; }
+  button:focus-visible, a:focus-visible { outline: 2px solid #7cc4ff; outline-offset: 2px; }
+  .small { color: #999aa4; font-size: 12px; margin-top: 24px; }
+</style>
+</head>
+<body>
+<main>
+  <h1 data-i18n="onboardingTitle">Before using Media Sniper</h1>
+  <p class="lead" data-i18n="onboardingLead">What Media Sniper processes locally for media detection and saving.</p>
+
+  <section class="card" aria-labelledby="monitoring-title">
+    <h2 id="monitoring-title" data-i18n="monitoringTitle">Media-related browser activity is observed</h2>
+    <ul>
+      <li data-i18n="monitoring1">Page and media metadata are processed locally.</li>
+      <li data-i18n="monitoring2">Authentication-related headers may be used briefly for confirmed media.</li>
+      <li data-i18n="monitoring3">Sensitive headers are not persisted or replayed unchanged across origins.</li>
+      <li data-i18n="monitoring4">Chromium may attach cookies for the target media site.</li>
+    </ul>
+  </section>
+
+  <section class="card" aria-labelledby="local-title">
+    <h2 id="local-title" data-i18n="localTitle">Nothing is sent to a Media Sniper server</h2>
+    <ul>
+      <li data-i18n="local1">Media processing runs in the browser.</li>
+      <li data-i18n="local2">There is no Media Sniper backend or telemetry.</li>
+      <li data-i18n="local3">Saving media contacts the site/CDN that serves it.</li>
+    </ul>
+  </section>
+
+  <section class="card" aria-labelledby="storage-title">
+    <h2 id="storage-title" data-i18n="storageTitle">Storage and deletion</h2>
+    <ul>
+      <li data-i18n="storage1">Settings and detected items use Chromium extension storage.</li>
+      <li data-i18n="storage2">Clear removes detected items for the current tab.</li>
+      <li data-i18n="storage3">Removing the extension removes extension-local data managed by Chromium.</li>
+    </ul>
+  </section>
+
+  <div class="actions">
+    <button id="continue" class="primary" data-i18n="continue">I understand — continue</button>
+    <button id="settings" data-i18n="openSettings">Open settings</button>
+    <a class="button" href="https://github.com/PeachGumi/media-sniper/blob/main/PRIVACY.md" target="_blank" rel="noreferrer" data-i18n="privacyPolicy">Privacy Policy</a>
+    <a class="button" href="https://github.com/PeachGumi/media-sniper/blob/main/docs/PERMISSIONS.md" target="_blank" rel="noreferrer" data-i18n="permissions">Permission details</a>
+  </div>
+
+  <p class="small" data-i18n="selfDistributionNote">The full build is self-distributed and is not a Chrome Web Store edition.</p>
+</main>
+<script src="i18n.js"></script>
+<script src="onboarding.js"></script>
+</body>
+</html>

@@ -2,6 +2,7 @@
 
 const $ = (s) => document.querySelector(s);
 const DEFAULT_MIN_SIZE_KB = 500;
+const t = (key, subs) => MediaSniperI18n.t(key, subs);
 
 function showStatus(text, isErr) {
   const el = $('#status');
@@ -16,7 +17,7 @@ function normalizeMinSize(value) {
 
 function load() {
   chrome.runtime.sendMessage({ type: 'ms-get-settings' }, (s) => {
-    if (chrome.runtime.lastError || !s) { showStatus('設定を読めません', true); return; }
+    if (chrome.runtime.lastError || !s) { showStatus(t('settingsReadFailed'), true); return; }
     $('#rootFolder').value = s.rootFolder || '';
     $('#minSizeKb').value = normalizeMinSize(s.minSizeKb);
     $('#blacklist').value = s.blacklist || '';
@@ -30,11 +31,10 @@ $('#save').addEventListener('click', () => {
     blacklist: $('#blacklist').value,
   };
   chrome.runtime.sendMessage({ type: 'ms-set-settings', settings: settings }, (resp) => {
-    if (chrome.runtime.lastError || !resp || !resp.saved) { showStatus('保存に失敗しました', true); return; }
-    // reflect what was actually stored (root folder gets sanitized)
+    if (chrome.runtime.lastError || !resp || !resp.saved) { showStatus(t('settingsSaveFailed'), true); return; }
     $('#rootFolder').value = resp.settings.rootFolder;
     $('#minSizeKb').value = normalizeMinSize(resp.settings.minSizeKb);
-    showStatus('保存しました');
+    showStatus(t('settingsSaved'));
     setTimeout(() => { showStatus(''); }, 2500);
   });
 });

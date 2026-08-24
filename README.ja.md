@@ -2,150 +2,136 @@
 
 [English](README.md) | **日本語**
 
-プライバシー最優先のMV3ブラウザ拡張。今見ているページから動画・HLS/DASHストリーム・音声を検出してダウンロードします。ブラウザ自身のログインセッションを使うので、ログイン必須のサイトでも動作。アカウント登録もサーバーもテレメトリもなし。メディアはあなたのCookieでブラウザが取得し、そのまま `~/Downloads` に保存されます。
+プライバシーを重視したManifest V3ブラウザ拡張です。今見ているページから直接メディア、HLS/DASH、音声、Blobメディア、対応するYouTube形式を検出し、現在のブラウザセッションを使って保存します。
 
-Chrome / Brave 対応（Manifest V3）。Brave 151で動作確認済み。
+解析・mux/remuxはChromium内で行います。Media Sniperのバックエンド、analytics、telemetry、広告SDK、リモート実行コードはありません。
 
-## なぜこれを使うのか
-
-- **セッションをそのまま使う**: ダウンロードは普段のログイン状態のまま行われるので、ホットリンク保護されたCDNや認証付きHLSもそのまま動く。Video DownloadHelperと同じ発想で、アップセルなし
-- **ちゃんとした1ファイル**: HLS VODはブラウザ内でffmpeg (WASM) を回して1本の `.mp4` に。AES-128暗号化も対応。DASHは映像+音声をmux。YouTubeの1080p以上（映像のみ+音声のみに分かれる形式）も別取得してローカルで結合
-- **通信は最小限**: 解析なし、リモートコードなし、アップロード先なし。拡張が話す相手は、あなたが保存しようとしたメディアのCDNだけ
+> **配布方針:** このリポジトリのFull版はGitHub Releases/ソースからself-distributionし、デベロッパーモードでunpacked拡張として読み込みます。**Chrome Web Store版ではありません。** 詳細は [DISTRIBUTION.md](DISTRIBUTION.md) を参照してください。
 
 ## 機能
 
 | 分野 | 内容 |
 |---|---|
-| 検出 | 直接リンクのmp4/webm/音声、HLS（マスターを解像度ごとに展開）、DASH（トラック別）、`<video>`/`<audio>` のblobソース、YouTube adaptive形式 |
-| ダウンロード | 同時3件のキュー。CDNに403で弾かれた場合、ページが使っていた認証ヘッダ（webRequestで取得したAuthorization/Referer等）を付けて自動リトライ |
-| HLS | VODを `.mp4` にremux、AES-128復号、fMP4 + BYTERANGE、別トラック音声のmux（`EXT-X-MEDIA`）、音声のみ（`.aac`）、ライブ録画（停止ボタンで保存） |
-| DASH | セグメント取得は自前管理+ローカルmux（libav.jsのdash demuxerデッドロックを回避）。映像+音声 or トラック単位 |
-| YouTube | Progressive形式、最高音質の音声のみ、**adaptive mux**（映像のみmp4 + 音声mp4 → 1ファイル） |
-| 一括保存 | 「全部保存」ボタン。保存済みファイルはスキップ（ダウンロード履歴と照合）。HLS/DASHジョブは1件ずつ順番に処理 |
-| 設定 | Downloads内のルートフォルダ、小さいファイルの無視閾値、ドメイン単位のブラックリスト |
-| ファイル名 | タイトルベース+サニタイズ、任意のルートフォルダ、同名は `uniquify` で退避 |
+| 検出 | 直接mp4/webm/音声、HLS、DASH、`<video>`/`<audio>` のBlobソース、対応するYouTube形式 |
+| ダウンロード | 上限付きキュー、認証/ホットリンク保護メディアのbrowser-session-aware fallback |
+| HLS | VOD remux、AES-128、fMP4/BYTERANGE、別音声rendition、音声のみADTS、ライブ録画 |
+| DASH | 自前のsegment解決/取得、継承された`SegmentTemplate`対応、映像+音声のローカルmux |
+| YouTube | progressive、音声のみ、adaptive映像+音声mux（Full self-distributed版） |
+| 一括保存 | 保存済みチェック、HLS/DASHジョブの直列処理 |
+| 設定 | Downloads内サブフォルダ、直接メディア最小サイズ、ドメインblacklist |
+| Privacy | 確認済みmediaのみ認証headerを昇格、sensitive headerのorigin境界、telemetryなし |
 
 ### 制限事項
 
-- DRM保護されたストリーム（Widevine/EME。Netflix等の有料配信）は設計上ダウンロード不可
-- MSE（blob:ストリーミングでplaylistを吐かないサイト）の検出は部分的。DevToolsでm3u8/mpdのリクエストが見えるなら Media Sniper も拾える
-- 字幕はダウンロードしない
+- Widevine/EME等のDRM保護ストリームは対象外です。
+- playlist/media URLを露出しないMSE-onlyサイトは検出できない場合があります。
+- 字幕はダウンロードしません。
+- 数GB級メディアでは一部HLS/DASH/mux経路がまだ大きなRAMを使います。現時点では無制限サイズ対応とは扱いません。
 
 ## インストール
 
-ビルド不要・依存なし。リポジトリのまま読み込めます。
+1. [最新リリース](https://github.com/PeachGumi/media-sniper/releases/latest) を展開するか、このリポジトリをcloneします。
+2. `brave://extensions` / `chrome://extensions` 等を開きます。
+3. **デベロッパーモード**をONにします。
+4. **パッケージ化されていない拡張機能を読み込む**から、`manifest.json`が直接入ったフォルダを選択します。
 
-### 方法A: zipをダウンロード（git不要）
+初回install時には、Media Sniperがメディア検出のため何を観測するか、認証付きmediaのrequest metadataをどう扱うか、保存場所・削除方法・外部送信の有無を説明するローカル画面を自動表示します。
 
-1. [最新リリース](https://github.com/PeachGumi/media-sniper/releases/latest) から `media-sniper.zip` をダウンロードして展開
-   - macOS/Linux: ダブルクリック、または `unzip media-sniper.zip -d media-sniper`
-   - Windows: 右クリック → すべて展開
-2. ブラウザの拡張機能ページを開く
-   - Brave: `brave://extensions`
-   - Chrome / Edge / Chromium: `chrome://extensions`（Edgeは `edge://extensions`）
-3. 右上の **デベロッパーモード** をON
-4. **パッケージ化されていない拡張機能を読み込む** をクリックし、展開した `media-sniper` フォルダを選択
-   - ⚠️ `manifest.json` が直接入っているフォルダを選んでください（その親ではない）
+### 更新
 
-### 方法B: gitでクローン
-
-```bash
-git clone https://github.com/PeachGumi/media-sniper.git
-```
-
-その後は方法Aの手順2〜4と同じ。クローンした `media-sniper` ディレクトリを選択。
-
-### 新バージョンへの更新
-
-1. 新しいzipを入手（クローンした場合は `git pull`）
-2. フォルダの中身を差し替え（または消して読み込み直し）
-3. 拡張機能ページの Media Sniper カードの ↻ **再読み込み** ボタンを押す
-4. 更新後に挙動がおかしければ、拡張を一度削除して読み込み直す（設定・ダウンロード履歴はブラウザ側にあるので消えません）
-
-### 動作確認
-
-- ツールバーに Media Sniper のアイコンが出る（パズルピースメニューからピン留め推奨）
-- 動画のあるページを開いて再生し、アイコンをクリック → 検出したアイテムが一覧に出る
-- 保存先は `~/Downloads/`（設定でルートフォルダを変えられます）
-
-### トラブルシューティング
-
-| 症状 | 対処 |
-|---|---|
-| 「パッケージ化されていない拡張機能を読み込む」が出ない | デベロッパーモード（手順3）がOFF |
-| アイコンを押しても何も起きない | 拡張を再読み込みしてからポップアップを開き直す |
-| アイテムが検出されない | ページ上でメディアを実際に再生/リクエストする必要があります。再スキャンも押してみてください |
-| 保存はされるがファイルが再生できない | DRMまたはMSEのみのサイトの可能性。上の制限事項を参照 |
-| ブラウザ更新後に拡張が消えた | 手順2〜4をやり直す（メジャーアップデート後は再読み込みが必要なことがある） |
-
-> **注**: ストア経由でない拡張は、Chromeが時々「デベロッパーモードの拡張機能を無効にする」通知を出すことがあります。コードはすべてこのリポジトリ内で監査可能なので、無視して問題ありません。
+新しいreleaseでフォルダを置き換える（または`git pull`する）→ 拡張機能ページで再読み込みしてください。permission/privacy/security/third-party dependency変更はrelease notesで確認してください。
 
 ## 使い方
 
-日々の操作仕様（検出ルール、ボタンの挙動、ファイル命名、設定項目の詳細）は **[ユーザーガイド](docs/USAGE.ja.md)** にまとめています。
+1. 動画/音声ページで実際に再生し、ブラウザにmediaをrequestさせます。
+2. Media Sniperのpopupを開きます。
+3. アイテムの「保存」または「全部保存」を使います。
+4. Downloadsまたは設定したサブフォルダへ保存されます。
 
-1. 動画/音声のあるページを開いて再生する（検出は実際のメディアリクエストを見ています）
-2. Media Sniperアイコンをクリック → アイテムを選んで「保存」
-3. `~/Downloads/`（または設定したルートフォルダ）に保存される
+詳しい操作は [docs/USAGE.ja.md](docs/USAGE.ja.md) を参照してください。
 
-ライブHLSの場合、「保存」ボタンが「停止」に変わります。録画は随時fragmented MP4として書き込まれ、停止した時点でファイルが確定します。
+## Security / Privacy設計
 
-## 仕組み
+自動media検出という主要機能のため広いsite accessを使いますが、次のtrust boundaryで用途を制限します。
 
+- request headerはまずrequest ID単位の短命・上限付きpending bufferだけに保持します。
+- capture候補は `Authorization` / `Referer` / `Origin` に限定します。
+- 対応responseがmedia/HLS/DASHと確認された場合だけmedia用header cacheへ昇格します。
+- 任意の`X-*` request headerをmedia用に収集しません。
+- sensitive headerは取得元originへbindし、extension管理のcross-origin fetchでは除去します。
+- page/content scriptから来るdataはuntrustedとしてschema検証し、payloadのtab ID/page URLを信用しません。
+- download/settings/clear/queue等の特権操作はMedia Sniper自身のextension pageからだけ受理します。
+- Authorization等はextension storageへ永続化しません。
+- blacklist対象はmedia itemにもrequest metadata昇格にも使いません。
+
+Chromium自身は、対象media originへのcredentialed fetch時に、そのorigin向けCookieを付ける場合があります。Media Sniperが別originのCookie headerをコピーして送るわけではありません。
+
+詳細は [PRIVACY.md](PRIVACY.md)、[docs/PERMISSIONS.md](docs/PERMISSIONS.md)、[SECURITY.md](SECURITY.md) を参照してください。
+
+## 構成
+
+```text
+page / player
+   │
+   ├─ webRequest response metadata ───────────────┐
+   └─ page/contentのmedia report (untrusted) ──┐ │
+                                              ▼ ▼
+                                      security boundary
+                                              │
+                                              ▼
+                                      service worker
+                              detection / queue / HLS-DASH
+                                              │
+                                              ▼
+                                      offscreen document
+                              session fetch + ffmpeg WASM
+                                              │
+                                              ▼
+                                      browser Downloads
 ```
-ページ ──webRequest(onResponseStarted/onSendHeaders)──▶ service worker
-                                                        │ playlist解析、
-                                                        │ 認証ヘッダ取得
-                                                        ▼
-                                              offscreen document
-                                              (セッション付きfetch、
-                                               ffmpeg WASM mux、
-                                               createObjectURL)
-                                                        │ blob URL
-                                                        ▼
-                                     chrome.downloads.download({filename})
+
+主要ファイル:
+
+```text
+src/background-entry.js  service worker entrypoint / security bootstrap
+src/security-guard.js    request/message trust boundary
+src/logic.js             media解析・命名helper
+src/dash-inheritance.js  DASH階層継承resolver
+src/background.js        検出、queue、HLS/DASH orchestration
+src/offscreen.js         byte処理 + ffmpeg/libav.js
+src/content.js           isolated-world relay
+src/bridge.js            page media/blob scanner
+src/youtube.js           Full版YouTube MAIN-world adapter
+popup/                   popup / settings / 初回開示
 ```
 
-- 純粋ロジックは `src/logic.js` に集約（worker/ページ/popup/テストで共有）
-- ページワールドのbridge（`src/bridge.js`）はあえてfetch/XHRをラップしない（検出はwebRequestで完全カバー。ラップするとページ自身の失敗fetchの犯人に見えるため）
-- ファイル名は `downloads.download` のオプションのみで指定。`onDeterminingFilename` リスナーは使わないので、他拡張のファイル名指定を壊さない
-
-## 開発
+## 開発・release check
 
 ```bash
-npm test        # ユニットテスト（logic / bridge / background / youtube のVMスイート）
-npm run check   # 全JSエントリポイントの構文チェック
-npm run e2e     # ワンコマンドヘッドレスE2E: Brave起動+fixtureサーバー、
-                #   検出+実ダウンロード+設定の往復を検証して後始末（exit 0 = PASS）
-npm run zip     # 配布zipの作成
+npm test
+npm run check
+npm run e2e
+npm run zip
 ```
 
-E2Eは専用の使い捨てブラウザプロファイルを使い、普段のブラウザには触れません。Brave/Chrome/Chromiumを自動検出（macOS/Windows/Linux対応）。`MEDIA_SNIPER_BRAVE=/path/to/binary` で明示指定も可能。CIはpushごとにユニットスイートを実行（`.github/workflows/ci.yml`）。
+repository workflowはunit/syntax check、manifest/version/security entrypoint検査、配布ZIP作成、runtime/license/privacy必須ファイル検査、ZIP/WASM hash、browser E2Eを実行するよう構成しています。**実際のrelease環境でそれらが成功したことを確認できない限り、validated releaseとは扱いません。**
 
-ディレクトリ構成:
+E2Eはthrowaway browser profileを使用し、unpacked extension IDを実行時に検出するためcheckout path/別マシンへ依存しません。
 
-```
-src/logic.js      純粋ヘルパー（URL分類、命名、m3u8/mpdパース）
-src/background.js service worker: 検出、キュー、HLS/DASHオーケストレーション
-src/offscreen.js  バイトフェッチャー + ffmpeg WASMランナー (libav.js)
-src/bridge.js     ページワールドの <video>/blob スキャナー
-src/content.js    分離ワールドのリレー + メタデータ
-src/youtube.js    MAINワールドのYouTubeアダプタ（streamingData読み取り）
-popup/            popup UI + 設定ページ
-test/             厳格なfake-chromeハーネスによるnode VMスイート
-scripts/          E2Eランナー、CDPツール、フィクスチャ生成
-```
+## 配布
 
-## プライバシー
+Full版にはYouTube adapter、adaptive mux、yt-dlp helperが含まれます。このfeature setをChrome Web Store互換artifactとは扱わないため、`media-sniper.zip` Full版をChrome Web Storeへ提出しないでください。
 
-解析なし。テレメトリなし。メディア本体を配信したCDN以外への外部リクエストなし。設定は `chrome.storage.local`、検出アイテム一覧は `chrome.storage.session`（ブラウザを閉じると消去）に保存。
+将来Web Store版を作る場合は別flavor/productとして、YouTube専用取得/mux/helper surfaceを除去し、そのartifactに一致するpermission/privacy/documentationを別途審査します。詳細は [DISTRIBUTION.md](DISTRIBUTION.md)。
 
-## ライセンス
+## Third-party / ライセンス
 
-Media Sniper本体のコードはMIT — [LICENSE](LICENSE) を参照。
+Media Sniper自身のsourceはMITです。[LICENSE](LICENSE) を参照してください。
 
-`src/libav/` は [libav.js](https://libav.js.org) の **ffmpeg** ビルド（改変なし）を同梱しており、**LGPL-2.1** でライセンスされています（[LICENSE.libav](LICENSE.libav) 参照）。このプロジェクトのコードにはリンクしておらず、そのまま動的読み込みしているだけです。ソースコードは上流で入手できます。
+`src/libav/` にはlibav.js / FFmpeg WebAssembly artifactをvendorしています。適用されるLGPL noticeは [LICENSE.libav](LICENSE.libav)、詳細なprovenanceは [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) を参照してください。
+
+同梱generated JavaScript moduleにはdownstream modificationの記録があり、build identifierは `libav.js v6.5.7.1-61-g823eb97` です。現repository historyだけでは、**同梱binaryと正確に対応するsource/build recipeをまだ特定できていません**。したがって「公式v6.5.7.1の無改変binary」「generic upstream checkoutが対応ソース」とは表現しません。このprovenanceを解決するか再現buildへ置換することは、commercial v1.0 releaseのgateです。
 
 ## 免責事項
 
-このツールは、あなたが正規にアクセスできるページから、個人利用の範囲でメディアをダウンロードするためのものです。利用するサイトの利用規約と著作権を尊重してください。所有していないコンテンツの再配布には使わないでください。
+正規にアクセス・保存する権利があるmediaにのみ使用してください。著作権、契約、各サービスの利用規約を尊重してください。DRM回避は製品scope外です。
