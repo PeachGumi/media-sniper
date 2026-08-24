@@ -4,6 +4,8 @@
  */
 'use strict';
 
+importScripts('security-bootstrap.js');
+MediaSniperSecurityBootstrap.install(chrome);
 importScripts('security-guard.js');
 MediaSniperSecurity.prepare(chrome);
 try {
