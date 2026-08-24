@@ -17,6 +17,8 @@ const includes = [
   'src/logic.js',
   'src/bridge.js',
   'src/content.js',
+  'src/background-entry.js',
+  'src/security-guard.js',
   'src/background.js',
   'src/offscreen.html',
   'src/offscreen.js',
