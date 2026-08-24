@@ -6,7 +6,7 @@ Media Sniper is a browser extension that detects media requested by pages you vi
 
 ## Data Media Sniper handles
 
-To provide media detection and download functionality, the extension may process the following data locally in your browser:
+To provide media detection and download functionality, the extension may process the following data locally in your browser **for tabs/sites to which Chromium currently grants the extension access**:
 
 - the URL and hostname of the page you are viewing;
 - the page title, used to suggest downloaded filenames;
@@ -19,6 +19,17 @@ To provide media detection and download functionality, the extension may process
 - browser download-history metadata used by the “Save all” feature to avoid re-downloading an item that already completed.
 
 Media Sniper does not ask for or store your account password. It does not intentionally capture arbitrary `X-*` request headers or copy browser Cookie request headers into its own media-header cache.
+
+## Site-access model
+
+Media Sniper installs with **no persistent HTTP(S) host permission**.
+
+- **Click only (default):** opening the extension action grants temporary `activeTab` access to the current tab. This access does not become a permanent all-sites grant.
+- **Always this site:** the user may explicitly approve persistent access to the current HTTP(S) origin.
+- **Always all sites:** the user may explicitly approve persistent access to all HTTP(S) origins for the most complete cross-origin CDN/network detection.
+- **Click only** can be selected again to remove all persistent host grants made to Media Sniper.
+
+Permission additions/removals are reflected in dynamic content-script registrations. Media Sniper does not silently expand a single-site permission to unrelated CDN hosts. As a result, narrower modes can intentionally provide less complete network-level detection than all-sites mode.
 
 ## Why this data is used
 
@@ -45,13 +56,14 @@ Media requests still go to the websites/CDNs that host the media, because downlo
 
 ## Storage and retention
 
-Media Sniper uses Chromium extension storage as follows:
+Media Sniper uses Chromium-managed extension/browser storage as follows:
 
 - `chrome.storage.local`: extension settings and the version of the first-install disclosure you acknowledged. These remain in the browser profile until you change/remove them or uninstall/clear the extension’s data.
 - `chrome.storage.session`: detected media items. These are session-scoped and are cleared by Chromium when the browser session ends.
-- in-memory extension state: request metadata, download queue state, media-processing job state, and other temporary runtime information. This is not intentionally persisted to disk by Media Sniper.
+- in-memory extension state: request metadata, download queue state, media-processing job state, and other temporary runtime information.
+- Origin Private File System (OPFS): temporary local media assembly files may be used for supported HLS/DASH/fallback processing so large segment sets do not need to remain fully resident in RAM. Those files belong to extension-generated temporary URLs and are deleted when their ownership ends; teardown/TTL cleanup provides an additional fallback.
 
-Request headers are handled under an additional short-lived security boundary. Candidate `Authorization`, `Referer`, and `Origin` headers are held by request ID in memory for at most approximately 15 seconds, with a bounded pending set. They are promoted to the media-header cache only after the corresponding response is confirmed to look like media/HLS/DASH. Blacklisted domains are not promoted.
+Request headers are handled under an additional short-lived security boundary. Candidate `Authorization`, `Referer`, and `Origin` headers are held by request ID in memory for at most approximately 15 seconds, with a bounded pending set. They are promoted to the media-header cache only after the corresponding response is confirmed to look like media/HLS/DASH. Confirmed-media header entries also expire after a bounded idle period. Blacklisted domains are not promoted.
 
 The extension may also read Chromium download-history metadata when “Save all” is used. Media Sniper does not copy the browser’s full download history into its own persistent storage.
 
@@ -85,6 +97,11 @@ Media Sniper does not include analytics, telemetry, advertising SDKs, or trackin
 
 You can:
 
+- use Media Sniper only temporarily on the tab where you opened the popup;
+- grant persistent access only to the current site;
+- explicitly enable all HTTP(S) sites for full automatic/CDN coverage;
+- return to Click only mode to remove persistent host grants;
+- revoke site permissions through Chromium’s own extension controls;
 - clear detected items for the current tab from the popup;
 - change or clear extension settings from the options page;
 - exclude domains from media collection using the blacklist setting;
@@ -95,19 +112,21 @@ The domain exclusion setting is applied to both detected media collection and pr
 
 ## First-install disclosure
 
-On a fresh installation, Media Sniper opens a local onboarding page that explains the browser activity it observes for media detection, the temporary use of authentication-related request metadata for confirmed media, browser-managed cookie behavior, local processing, storage, deletion controls, and the absence of a Media Sniper backend/telemetry service.
+On a fresh installation, Media Sniper opens a local onboarding page that explains the browser activity it may process for media detection, the temporary use of authentication-related request metadata for confirmed media, browser-managed cookie behavior, local processing, storage, deletion controls, and the absence of a Media Sniper backend/telemetry service.
+
+Installing the extension itself does not grant persistent all-sites access. Persistent host permissions are requested only later through explicit user actions in the popup.
 
 ## Permissions
 
 Media Sniper requests browser permissions only to implement its stated media-detection and download purpose. A detailed explanation is maintained in [`docs/PERMISSIONS.md`](docs/PERMISSIONS.md).
 
-The current full build intentionally supports automatic detection across sites and therefore uses broad host access. Users who require a narrower site-access model should use Chromium’s extension site-access controls where supported. A future product flavor may adopt optional per-site permissions; it must update this policy and its onboarding disclosure before release.
+Required permissions do not include `tabs` or persistent `host_permissions`. The maximum optional host scope is HTTP(S), and users choose whether to grant one site or all sites. The release CI verifies this manifest contract and packaged browser E2E covers grant and revocation behavior.
 
 ## Distribution
 
 The full Media Sniper build in this repository is self-distributed through source/GitHub Releases and loaded unpacked in Chromium-based browsers. It is not presented as a Chrome Web Store artifact. See [`DISTRIBUTION.md`](DISTRIBUTION.md).
 
-If a separate Chrome Web Store edition is created in the future, it must undergo a separate feature, permission, privacy, and policy review. Its disclosures must match that edition’s actual artifact and Chrome Web Store User Data / Limited Use requirements at the time of submission.
+If a separate Chrome Web Store edition is created in the future, it must undergo a separate feature, permission, privacy, and policy review. Its disclosures must match that edition’s actual artifact and Chrome Web Store requirements at the time of submission.
 
 ## Security reports
 

@@ -90,5 +90,18 @@
   "privacyPolicy": {"message": "Privacy Policy"},
   "permissions": {"message": "Permission details"},
   "selfDistributionNote": {"message": "The full build is self-distributed through GitHub Releases/source and is not a Chrome Web Store edition."},
-  "version": {"message": "Version"}
+  "version": {"message": "Version"},
+  "accessTitle": {"message": "Site access"},
+  "accessSite": {"message": "Always this site"},
+  "accessAll": {"message": "Always all sites"},
+  "accessClick": {"message": "Click only"},
+  "accessModeClick": {"message": "Click-only: this tab is enabled temporarily; no persistent site access."},
+  "accessModeSite": {"message": "Persistent access is enabled for this site."},
+  "accessModeAll": {"message": "Persistent access is enabled for all HTTP(S) sites."},
+  "accessGrantedSite": {"message": "Persistent access enabled for this site."},
+  "accessGrantedAll": {"message": "Persistent access enabled for all sites."},
+  "accessCleared": {"message": "Persistent site access cleared. Opening the popup still enables the current tab temporarily."},
+  "accessDenied": {"message": "Permission was not granted."},
+  "accessFailed": {"message": "Could not update site access."},
+  "accessUnsupported": {"message": "Site access is unavailable on this browser page."}
 }

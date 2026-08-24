@@ -19,7 +19,7 @@ Media processing happens locally in Chromium. Media Sniper has no backend servic
 | YouTube | Progressive formats, audio-only, adaptive video+audio mux in the full self-distributed build |
 | Batch | Save all, completed-download skip check, serialized HLS/DASH jobs |
 | Settings | Downloads subfolder, minimum direct-media size, domain blacklist |
-| Privacy | Confirmed-media-only credential promotion, origin-bound sensitive header replay, no telemetry |
+| Privacy | No persistent site access by default; confirmed-media-only credential promotion; no telemetry |
 
 ### Limitations
 
@@ -46,15 +46,18 @@ Replace the unpacked folder with the new release (or `git pull`) and press the e
 ## Usage
 
 1. Open a page with video/audio and play it so the browser requests the media.
-2. Open the Media Sniper popup.
-3. Choose an item and press Save, or use Save all.
-4. Files are written to Downloads or your configured subfolder.
+2. Open the Media Sniper popup. This temporarily enables detection for the current tab through `activeTab`; installation itself grants no persistent website access.
+3. If desired, choose **Always this site** or **Always all sites** for persistent automatic detection. **Click only** removes persistent host grants again.
+4. Choose an item and press Save, or use Save all.
+5. Files are written to Downloads or your configured subfolder.
+
+Site-only access deliberately does not expand itself to unrelated CDN origins. For sites whose playlists/media live entirely on unrelated CDNs, the explicit all-sites mode gives the most complete network-level detection. See [docs/PERMISSIONS.md](docs/PERMISSIONS.md).
 
 For detailed behavior and troubleshooting, see [docs/USAGE.ja.md](docs/USAGE.ja.md).
 
 ## Security and privacy model
 
-The extension needs broad browser access because its prominent function is automatic media detection across arbitrary sites. That access is constrained by explicit trust boundaries:
+Media Sniper installs without required host permissions. Opening the action grants temporary access to the current tab, while persistent site/all-sites access is optional and user-controlled. Network observation is limited by whichever HTTP(S) origins Chrome currently grants to the extension. Within that scope, explicit trust boundaries apply:
 
 - request headers are first held in a bounded short-lived request-ID buffer;
 - only `Authorization`, `Referer`, and `Origin` are candidates for capture;
@@ -74,8 +77,13 @@ Read the full [Privacy Policy](PRIVACY.md), [permission rationale](docs/PERMISSI
 ## Architecture
 
 ```text
-page / player
-   │
+user action / optional site grant
+             │
+             ▼
+      site-access manager
+             │
+page / player│
+   │         │
    ├─ webRequest response metadata ───────────────┐
    └─ content/page media reports (untrusted) ──┐ │
                                                ▼ ▼
@@ -97,6 +105,7 @@ Key files:
 
 ```text
 src/background-entry.js      service-worker entrypoint / security bootstrap
+src/site-access.js           optional host grants + dynamic content scripts
 src/security-guard.js        request/message trust boundary
 src/background-lifecycle.js  bounded queue/job/header/blob lifecycle policy
 src/logic.js                 shared media parsing/naming helpers
@@ -108,7 +117,7 @@ src/offscreen.js             ffmpeg/libav.js operations and legacy fallback
 src/content.js               isolated-world relay and page metadata
 src/bridge.js                page media/blob scanner
 src/youtube.js               full-build YouTube MAIN-world adapter
-popup/                       popup, settings, first-install disclosure
+popup/                       popup, access controls, settings, first-install disclosure
 ```
 
 ## Development and release checks
@@ -124,9 +133,9 @@ Pull requests and `main` run unit/syntax checks, manifest/package/UI version val
 
 Only after both the test job and packaged browser E2E succeed does CI create the verified workflow artifact. It contains `media-sniper.zip` and `media-sniper.zip.sha256`.
 
-`v*` tags go through the same jobs. A public GitHub Release is created only after all checks pass, the tag version matches the manifest/package version, and the explicit repository release-approval gate is enabled. The release attaches both the ZIP and its SHA-256 file. While a v1/commercial blocker remains, that approval file is deliberately absent, so an accidental tag cannot publish a release.
+`v*` tags go through the same jobs. A public GitHub Release is created only after all checks pass, the tag version matches the manifest/package version, and the explicit repository release-approval gate is enabled. The release attaches both the ZIP and its SHA-256 file.
 
-The E2E runner uses a throwaway browser profile, dynamically discovers the extension ID, and can load a separate unpacked artifact directory via `MEDIA_SNIPER_EXTENSION_ROOT`.
+The E2E runner uses a throwaway browser profile, starts with no persistent host access, grants optional HTTP(S) access through the real Permissions API, verifies dynamic detector registration/revocation, and loads the exact packaged artifact via `MEDIA_SNIPER_EXTENSION_ROOT`.
 
 See [docs/RELEASE.md](docs/RELEASE.md) for the exact release gate and manual acceptance checklist.
 
