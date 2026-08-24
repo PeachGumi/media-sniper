@@ -21,6 +21,9 @@
   button:hover { background: #34363f; }
   button.primary { background: #ff7a45; border-color: #ff7a45; color: #17181c; font-weight: 600; }
   button.primary:hover { background: #ff8d5f; }
+  button:focus-visible, a:focus-visible {
+    outline: 2px solid #7cc4ff; outline-offset: 2px;
+  }
   #status { font-size: 11px; color: #9a9aa2; margin-bottom: 6px; min-height: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   #status.err { color: #ff6b6b; white-space: normal; }
   #list { max-height: 420px; overflow-y: auto; display: flex; flex-direction: column; gap: 5px; }
@@ -54,22 +57,23 @@
 <body>
   <header>
     <h1>Media<span>Sniper</span></h1>
-    <span class="count" id="count"></span>
+    <span class="count" id="count" aria-live="polite"></span>
   </header>
-  <div class="toolbar">
+  <div class="toolbar" role="toolbar" aria-label="メディア操作">
     <button id="rescan">再スキャン</button>
     <button id="saveall" class="primary" title="検出したアイテムを一括保存 (HLS/DASHは1件ずつ順番に処理)">全部保存</button>
     <button id="clear">クリア</button>
     <button id="ytdlp" title="このページのURLで yt-dlp コマンドをコピー">yt-dlp コマンド</button>
-    <a id="options" href="#" title="設定">⚙</a>
+    <a id="options" href="#" title="設定" aria-label="設定を開く">⚙</a>
   </div>
-  <div id="status"></div>
+  <div id="status" role="status" aria-live="polite" aria-atomic="true"></div>
   <div id="list"></div>
   <footer>
     <span id="destHint">保存先: ~/Downloads/ 直下</span>
-    <span>v0.10</span>
+    <span id="version" aria-label="バージョン"></span>
   </footer>
   <script src="../src/logic.js"></script>
   <script src="popup.js"></script>
+  <script src="meta.js"></script>
 </body>
 </html>

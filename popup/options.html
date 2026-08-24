@@ -21,7 +21,9 @@
     border: 1px solid #3a3d46; border-radius: 6px; padding: 8px 10px;
     font: inherit; font-size: 13px;
   }
-  input:focus, textarea:focus { outline: none; border-color: #ff7a45; }
+  input:focus-visible, textarea:focus-visible, button:focus-visible {
+    outline: 2px solid #7cc4ff; outline-offset: 2px; border-color: #ff7a45;
+  }
   textarea { height: 90px; resize: vertical; }
   .row { display: flex; gap: 10px; align-items: center; }
   button {
@@ -40,20 +42,20 @@
   <div class="sub">設定はこのブラウザのプロファイルごとに保存されます</div>
 
   <label for="rootFolder">保存先フォルダ名</label>
-  <div class="desc">Downloads の中に作るフォルダ。空欄なら Downloads 直下に保存。</div>
-  <input type="text" id="rootFolder" placeholder="例: media-sniper">
+  <div class="desc" id="rootFolderHelp">Downloads の中に作るフォルダ。空欄なら Downloads 直下に保存。</div>
+  <input type="text" id="rootFolder" aria-describedby="rootFolderHelp" placeholder="例: media-sniper">
 
   <label for="minSizeKb">最小サイズ (KB)</label>
-  <div class="desc">これより小さい直接リンク media は広告・アイコン扱いで無視。(0で無効)</div>
-  <input type="number" id="minSizeKb" min="0" step="50">
+  <div class="desc" id="minSizeHelp">これより小さい直接リンク media は広告・アイコン扱いで無視。1KB以上を指定。空欄・0・不正値は既定の500KBに戻ります。</div>
+  <input type="number" id="minSizeKb" min="1" step="50" aria-describedby="minSizeHelp">
 
   <label for="blacklist">除外ドメイン</label>
-  <div class="desc">ここに入れたドメインからの media は検出しない。<code>example.com</code> ならサブドメインも含む。改行かカンマで区切る。</div>
-  <textarea id="blacklist" placeholder="ads.example.com&#10;tracker.io"></textarea>
+  <div class="desc" id="blacklistHelp">ここに入れたドメインからの media は検出しない。<code>example.com</code> ならサブドメインも含む。改行かカンマで区切る。</div>
+  <textarea id="blacklist" aria-describedby="blacklistHelp" placeholder="ads.example.com&#10;tracker.io"></textarea>
 
   <div class="row">
     <button id="save">保存</button>
-    <span id="status"></span>
+    <span id="status" role="status" aria-live="polite" aria-atomic="true"></span>
   </div>
 
   <script src="options.js"></script>
