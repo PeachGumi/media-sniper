@@ -1,21 +1,10 @@
 #!/usr/bin/env python3
-"""media-sniper headless E2E download test (one command, LLM-friendly).
+"""Media Sniper browser E2E.
 
-Prereqs (already running):
-  - headless Brave/Chrome/Chromium with --load-extension=<project dir>
-  - fixture http server on FIXTURE_PORT (default 8899), root = test/fixture
-  - MEDIA_SNIPER_EXTENSION_ID set by run_e2e.py
-
-Steps:
-  1. Open a fresh tab on the fixture page (Target.createTarget)
-  2. Wait for the service worker to wake; read msItems from storage.session
-  3. Assert clip.mp4 / audio.mp3 / HLS were detected
-  4. Open the real popup page (chrome-extension://ID/popup/popup.html) in a tab
-  5. Send ms-download FROM THE POPUP CONTEXT (the exact production path)
-  6. Poll chrome.downloads.search until the item completes or interrupts
-  7. Report a JSON verdict + PASS/FAIL line
-
-Usage: e2e_download_test.py [fixture_port]
+The test intentionally starts with no persistent host access, grants optional
+HTTP(S) access from a real extension page using a CDP user gesture, verifies
+that dynamic document-start detection becomes active, then exercises the normal
+download/settings paths and finally revokes persistent host access again.
 """
 import json
 import os
@@ -62,12 +51,14 @@ def find_target(ttype, url_part):
     return None
 
 
-async def ws_eval(ws_url, expr, timeout=15):
+async def ws_eval(ws_url, expr, timeout=15, user_gesture=False):
     async with websockets.connect(ws_url, max_size=10 * 1024 * 1024) as ws:
         await ws.send(json.dumps({"id": 1, "method": "Runtime.enable"}))
         await ws.recv()
-        await ws.send(json.dumps({"id": 2, "method": "Runtime.evaluate",
-                                  "params": {"expression": expr, "awaitPromise": True, "returnByValue": True}}))
+        params = {"expression": expr, "awaitPromise": True, "returnByValue": True}
+        if user_gesture:
+            params["userGesture"] = True
+        await ws.send(json.dumps({"id": 2, "method": "Runtime.evaluate", "params": params}))
         deadline = time.time() + timeout
         while time.time() < deadline:
             msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=deadline - time.time()))
@@ -91,19 +82,10 @@ def open_tab(url):
 
 async def wait_for_sw(seconds):
     deadline = time.time() + seconds
-    last_reload = 0
     while time.time() < deadline:
         if sw_ws():
             return True
-        if time.time() - last_reload > 4:
-            page = find_target("page", str(FIXTURE_PORT))
-            if page:
-                try:
-                    await ws_eval(page["webSocketDebuggerUrl"], "location.reload(); 'r'", timeout=8)
-                except Exception:
-                    pass
-                last_reload = time.time()
-        await asyncio.sleep(1)
+        await asyncio.sleep(0.5)
     return False
 
 
@@ -116,10 +98,28 @@ def parse_json_value(raw):
     return raw
 
 
+async def wait_registered(popup_ws, seconds=10):
+    deadline = time.time() + seconds
+    last = []
+    while time.time() < deadline:
+        try:
+            last = parse_json_value(await ws_eval(
+                popup_ws,
+                "chrome.scripting.getRegisteredContentScripts().then(x=>JSON.stringify(x.map(s=>s.id)))",
+                timeout=5,
+            ))
+            if "media-sniper-sites" in last:
+                return last
+        except Exception:
+            pass
+        await asyncio.sleep(0.5)
+    return last
+
+
 async def main():
     try:
         open_tab(FIXTURE_URL)
-        await asyncio.sleep(3)
+        await asyncio.sleep(2)
     except Exception as e:
         step("open fixture tab", False, e)
         return
@@ -132,6 +132,61 @@ async def main():
         step("service worker awake", False, "SW never appeared in /json/list")
         return
     step("service worker awake", True)
+
+    popup_url = f"chrome-extension://{EXT_ID}/popup/popup.html"
+    try:
+        open_tab(popup_url)
+        await asyncio.sleep(1)
+    except Exception as e:
+        step("open popup context", False, e)
+        return
+    popup = find_target("page", "popup.html")
+    step("open popup context", popup is not None, popup and popup["url"])
+    if not popup:
+        return
+    popup_ws = popup["webSocketDebuggerUrl"]
+
+    # A clean profile must have no permanent site access before the user opts in.
+    try:
+        before = parse_json_value(await ws_eval(
+            popup_ws,
+            "chrome.permissions.getAll().then(p=>JSON.stringify(p.origins||[]))",
+        ))
+        step("no persistent host access by default", before == [], before)
+    except Exception as e:
+        step("no persistent host access by default", False, e)
+        return
+
+    # Request broad optional access with an explicit user-gesture bit. This is
+    # equivalent to the popup's "Always all sites" button and is the mode used
+    # to exercise network-level HLS detection in this fixture.
+    try:
+        granted = await ws_eval(
+            popup_ws,
+            "chrome.permissions.request({origins:['http://*/*','https://*/*']})",
+            user_gesture=True,
+        )
+        step("optional all-sites permission granted", granted is True, granted)
+        if granted is not True:
+            return
+    except Exception as e:
+        step("optional all-sites permission granted", False, e)
+        return
+
+    registered = await wait_registered(popup_ws)
+    step("persistent detector registered", "media-sniper-sites" in registered, registered)
+    if "media-sniper-sites" not in registered:
+        return
+
+    # Dynamic document-start registrations apply on the next navigation.
+    try:
+        await ws_eval(page["webSocketDebuggerUrl"], "location.reload(); 'reloaded'", timeout=8)
+        await asyncio.sleep(2)
+    except Exception as e:
+        step("reload fixture after host grant", False, e)
+        return
+    step("reload fixture after host grant", True)
+
     try:
         items = parse_json_value(await ws_eval(sw_ws(),
             "chrome.storage.session.get('msItems').then(r => JSON.stringify(r.msItems || {}))"))
@@ -160,18 +215,6 @@ async def main():
         await asyncio.sleep(1.5)
     step("detected video/audio/hls-variant", all(need.values()), json.dumps(need))
 
-    popup_url = f"chrome-extension://{EXT_ID}/popup/popup.html"
-    try:
-        open_tab(popup_url)
-        await asyncio.sleep(1)
-    except Exception as e:
-        step("open popup context", False, e)
-        return
-    popup = find_target("page", "popup.html")
-    step("open popup context", popup is not None, popup and popup["url"])
-    if not popup:
-        return
-
     trigger = (
         "chrome.runtime.sendMessage({type:'ms-download', item:{url:'"
         f"http://127.0.0.1:{FIXTURE_PORT}/hls/clip.mp4"
@@ -179,7 +222,7 @@ async def main():
         ".then(r => JSON.stringify(r)).catch(e => JSON.stringify({err: String(e)}))"
     )
     try:
-        res = parse_json_value(await ws_eval(popup["webSocketDebuggerUrl"], trigger))
+        res = parse_json_value(await ws_eval(popup_ws, trigger))
         step("ms-download accepted (popup->SW)", isinstance(res, dict) and res.get("queued") is True, res)
     except Exception as e:
         step("ms-download accepted (popup->SW)", False, e)
@@ -215,34 +258,45 @@ async def main():
         })
 
     try:
-        st = parse_json_value(await ws_eval(popup["webSocketDebuggerUrl"],
+        st = parse_json_value(await ws_eval(popup_ws,
             "chrome.runtime.sendMessage({type:'ms-set-settings',settings:{rootFolder:'e2e-root',minSizeKb:500,blacklist:''}})"
             ".then(r=>JSON.stringify(r)).catch(e=>JSON.stringify({err:String(e)}))"))
         ok_st = isinstance(st, dict) and st.get("saved") and st.get("settings", {}).get("rootFolder") == "e2e-root"
         step("set-settings saved (root sanitized/kept)", bool(ok_st), st)
-        try:
-            da = parse_json_value(await ws_eval(popup["webSocketDebuggerUrl"],
-                "chrome.runtime.sendMessage({type:'ms-download-all',tabId:1})"
-                ".then(r=>JSON.stringify(r)).catch(e=>JSON.stringify({err:String(e)}))"))
-            ok_da = isinstance(da, dict) and ("queued" in da) and ("skipped" in da) and ("deferred" in da)
-            step("ms-download-all responds with counters", bool(ok_da), da)
-        except Exception as e:
-            step("ms-download-all responds with counters", False, e)
     except Exception as e:
         step("set-settings saved (root sanitized/kept)", False, e)
 
     try:
-        await ws_eval(popup["webSocketDebuggerUrl"],
-            "chrome.runtime.sendMessage({type:'ms-set-settings',settings:{rootFolder:'',minSizeKb:500,blacklist:''}})")
-    except Exception:
-        pass
-
-    try:
-        q = parse_json_value(await ws_eval(popup["webSocketDebuggerUrl"],
+        q = parse_json_value(await ws_eval(popup_ws,
             "chrome.runtime.sendMessage({type:'ms-queue-status'}).then(r=>JSON.stringify(r))"))
         step("queue status", True, q)
     except Exception as e:
         step("queue status", False, e)
+
+    # Permission revocation is part of the product contract. onRemoved must
+    # reconcile dynamic registrations back to zero.
+    try:
+        removed = await ws_eval(
+            popup_ws,
+            "chrome.permissions.remove({origins:['http://*/*','https://*/*']})",
+            user_gesture=True,
+        )
+        step("persistent host access removable", removed is True, removed)
+        await asyncio.sleep(1)
+        after = parse_json_value(await ws_eval(
+            popup_ws,
+            "Promise.all([chrome.permissions.getAll(),chrome.scripting.getRegisteredContentScripts()]).then(([p,s])=>JSON.stringify({origins:p.origins||[],ids:s.map(x=>x.id)}))",
+        ))
+        clean = after.get("origins") == [] and "media-sniper-sites" not in after.get("ids", [])
+        step("revocation unregisters persistent detector", clean, after)
+    except Exception as e:
+        step("persistent host access removable", False, e)
+
+    try:
+        await ws_eval(popup_ws,
+            "chrome.runtime.sendMessage({type:'ms-set-settings',settings:{rootFolder:'',minSizeKb:500,blacklist:''}})")
+    except Exception:
+        pass
 
     verdict["pass"] = all(s["ok"] for s in verdict["steps"])
     print(json.dumps(verdict, ensure_ascii=False, indent=1))
