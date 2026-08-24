@@ -54,15 +54,15 @@ jobs:
           actions-cache-folder: cache-emsdk
 
       - name: Generate Media Sniper variant
-        working-directory: upstream
+        working-directory: upstream/configs
         env:
           VARIANT: ${{ steps.cfg.outputs.variant }}
           FRAGMENTS: ${{ steps.cfg.outputs.fragments }}
         run: |
           set -euxo pipefail
-          node configs/mkconfig.js "$VARIANT" "$FRAGMENTS"
-          cat "configs/configs/$VARIANT/config.json"
-          cat "configs/configs/$VARIANT/ffmpeg-config.txt"
+          node mkconfig.js "$VARIANT" "$FRAGMENTS"
+          cat "configs/$VARIANT/config.json"
+          cat "configs/$VARIANT/ffmpeg-config.txt"
 
       - name: Extract pinned dependency sources
         working-directory: upstream
