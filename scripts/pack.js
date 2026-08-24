@@ -17,6 +17,8 @@ const includes = [
   'PRIVACY.md',
   'DISTRIBUTION.md',
   'docs/PERMISSIONS.md',
+  '_locales/en/messages.json',
+  '_locales/ja/messages.json',
   'src/logic.js',
   'src/bridge.js',
   'src/content.js',
@@ -32,6 +34,7 @@ const includes = [
   'src/youtube.js',
   'src/libav/libav-6.5.7.1-h264-aac-mp3.wasm.mjs',
   'src/libav/libav-6.5.7.1-h264-aac-mp3.wasm.wasm',
+  'popup/i18n.js',
   'popup/popup.html',
   'popup/popup.js',
   'popup/meta.js',
@@ -45,7 +48,6 @@ const includes = [
   'icons/icon128.png',
 ];
 
-// verify everything exists
 for (const f of includes) {
   const p = path.join(root, f);
   if (!fs.existsSync(p)) {
