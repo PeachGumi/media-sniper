@@ -106,7 +106,14 @@ jobs:
           browser="$root/chrome-linux64/chrome"
           test -x "$browser"
           "$browser" --version
-          echo "MEDIA_SNIPER_BRAVE=$browser" >> "$GITHUB_ENV"
+
+          # Ubuntu hosted runners restrict the user namespace Chrome normally
+          # uses for its sandbox. Keep the application runner secure by default
+          # and inject --no-sandbox only through this CI-only executable wrapper.
+          wrapper="$root/chrome-ci"
+          printf '#!/bin/sh\nexec "%s" --no-sandbox "$@"\n' "$browser" > "$wrapper"
+          chmod +x "$wrapper"
+          echo "MEDIA_SNIPER_BRAVE=$wrapper" >> "$GITHUB_ENV"
 
       - name: Install E2E dependency
         run: python -m pip install --disable-pip-version-check websockets
