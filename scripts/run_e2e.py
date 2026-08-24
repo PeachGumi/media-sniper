@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Media Sniper one-command browser E2E runner.
 
-Loads the unpacked extension in a disposable Chromium profile, discovers the
-extension's service worker from manifest.json, runs the browser test suite,
-and tears everything down. Exit code 0 means PASS.
+The test driver and fixtures live in the repository, while the extension under
+test can be a different directory (for example an unpacked release zip) via
+MEDIA_SNIPER_EXTENSION_ROOT. Exit code 0 means PASS.
 """
 import json
 import os
@@ -14,7 +14,8 @@ import sys
 import time
 import urllib.request
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+EXTENSION_ROOT = os.path.abspath(os.environ.get("MEDIA_SNIPER_EXTENSION_ROOT", REPO_ROOT))
 PROFILE = os.path.expanduser("~/.cache/ms-brave-test-e2e")
 KEEP = "--keep" in sys.argv
 
@@ -63,7 +64,10 @@ def find_browser():
 
 
 def manifest_service_worker():
-    with open(os.path.join(ROOT, "manifest.json"), encoding="utf-8") as f:
+    manifest_path = os.path.join(EXTENSION_ROOT, "manifest.json")
+    if not os.path.isfile(manifest_path):
+        raise RuntimeError("extension root has no manifest.json: " + EXTENSION_ROOT)
+    with open(manifest_path, encoding="utf-8") as f:
         manifest = json.load(f)
     path = manifest.get("background", {}).get("service_worker")
     if not path or not isinstance(path, str):
@@ -155,6 +159,7 @@ def main():
     fixture_port = free_port()
     prefs = write_prefs()
     print(f"[boot] prefs written: {prefs}")
+    print(f"[boot] extension root: {EXTENSION_ROOT}")
 
     browser = find_browser()
     if not browser:
@@ -179,10 +184,10 @@ def main():
         f"--remote-debugging-port={cdp_port}",
         f"--user-data-dir={PROFILE}",
         # Deterministic automation: runner/browser images can ship built-in or
-        # policy-installed extensions. Explicitly allow only this unpacked
-        # extension so --load-extension cannot be shadowed by profile state.
-        f"--disable-extensions-except={ROOT}",
-        f"--load-extension={ROOT}",
+        # policy-installed extensions. Explicitly allow only the exact artifact
+        # under test so source-only files can never make an E2E pass accidentally.
+        f"--disable-extensions-except={EXTENSION_ROOT}",
+        f"--load-extension={EXTENSION_ROOT}",
         "--enable-logging=stderr",
         "--v=1",
         "--no-first-run",
@@ -196,7 +201,7 @@ def main():
 
     fixture_proc = subprocess.Popen(
         [sys.executable, "-m", "http.server", str(fixture_port)],
-        cwd=os.path.join(ROOT, "test", "fixture"),
+        cwd=os.path.join(REPO_ROOT, "test", "fixture"),
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
@@ -253,7 +258,7 @@ def main():
         e2e_env["CDP_PORT"] = str(cdp_port)
         e2e_env["MEDIA_SNIPER_EXTENSION_ID"] = ext_id
         result = subprocess.run(
-            [sys.executable, os.path.join(ROOT, "scripts", "e2e_download_test.py"), str(fixture_port)],
+            [sys.executable, os.path.join(REPO_ROOT, "scripts", "e2e_download_test.py"), str(fixture_port)],
             env=e2e_env,
             timeout=180,
         )
