@@ -22,6 +22,7 @@ const includes = [
   'src/libav/libav-6.5.7.1-h264-aac-mp3.wasm.wasm',
   'popup/popup.html',
   'popup/popup.js',
+  'popup/meta.js',
   'popup/options.html',
   'popup/options.js',
   'icons/icon16.png',
