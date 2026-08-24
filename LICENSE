@@ -23,7 +23,12 @@ SOFTWARE.
 ------------------------------------------------------------------------------
 Third-party components:
 
-src/libav/ contains an unmodified ffmpeg WASM build (libav.js). ffmpeg is
-licensed under the GNU Lesser General Public License v2.1 — see
-LICENSE.libav. That component remains under its original license; this
-MIT license applies only to Media Sniper's own source files.
+src/libav/ contains a vendored libav.js / FFmpeg WebAssembly build. This
+third-party component is not covered by the Media Sniper MIT license. FFmpeg
+and applicable parts of the build are licensed under the GNU Lesser General
+Public License v2.1; see LICENSE.libav and THIRD_PARTY_NOTICES.md.
+
+The vendored generated JavaScript module has been modified downstream by
+Media Sniper (see THIRD_PARTY_NOTICES.md). Do not rely on this file as a
+statement that the vendored libav.js artifact is an unmodified upstream
+release.
