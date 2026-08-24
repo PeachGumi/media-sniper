@@ -1,80 +1,129 @@
 # Browser permissions
 
-This document explains why Media Sniper requests each Chrome/Chromium extension permission. It is intended to keep the implementation, privacy policy, store disclosures, and user-facing documentation aligned.
+Media Sniper follows a least-privilege site-access model. Installing the extension does **not** permanently grant access to every website.
 
-## Single purpose
+## Site access modes
 
-Media Sniper’s single purpose is to detect media associated with the page the user is viewing and, when the user chooses, save supported media using the browser’s existing session.
+### Click only — default
 
-Permissions must not be reused for unrelated browsing analysis, advertising, profiling, or telemetry.
+Opening the Media Sniper action grants Chrome's temporary `activeTab` access to the current HTTP(S) tab. The popup injects the media detector into that tab only.
 
-## `downloads`
+This is intentionally non-persistent: navigating away or closing the tab ends the temporary host grant. It is the default mode after installation.
 
-Used to start downloads, choose a filename inside the browser Downloads directory, observe completion/failure of downloads started by Media Sniper, and inspect completed download-history metadata for the user-invoked “Save all” skip-existing behavior.
+Because `activeTab` primarily covers the page the user invoked the extension on, some media delivered exclusively from unrelated CDN origins may not be visible to the network-level detector in this mode. DOM/Blob/direct-element detection on the active page still works where Chrome allows injection.
 
-It is not used to upload files or inspect arbitrary file contents on disk.
+### Always this site
 
-## `storage`
+The popup can request the current origin through `chrome.permissions.request()`. If the user approves, Media Sniper registers its detector dynamically for that granted origin at `document_start`, including frames Chrome permits for the grant.
+
+This improves early Blob/media-element coverage on that site without granting unrelated sites.
+
+Cross-origin CDN requests can still require access to the CDN origin itself. Media Sniper does not silently expand a site grant to unrelated hosts.
+
+### Always all sites — explicit power-user mode
+
+The user can explicitly grant:
+
+- `http://*/*`
+- `https://*/*`
+
+This gives the most complete automatic `webRequest`/CDN detection across arbitrary sites. It is **optional**, is requested only from a user gesture, and can be removed from the popup with “Click only”.
+
+The project intentionally does not request `file://`, browser-internal, or other non-HTTP(S) schemes.
+
+## Required permissions
+
+### `activeTab`
+
+Provides temporary host access after the user invokes the extension action. It powers the default click-only mode and avoids permanent access to every site.
+
+### `scripting`
+
+Used to:
+
+- inject `logic.js` + `content.js` into the current `activeTab`;
+- inject the YouTube MAIN-world adapter only on supported YouTube tabs;
+- register persistent document-start content scripts for origins the user explicitly grants;
+- unregister those scripts when persistent host access is removed.
+
+It is not used to execute remote code. Every injected script is packaged inside the extension.
+
+### `downloads`
+
+Used to start user-requested downloads, choose a filename under Downloads, observe completion/failure of Media Sniper downloads, and inspect completed download metadata for the Save-all skip-existing feature.
+
+It is not used to upload files or read arbitrary file contents from disk.
+
+### `storage`
 
 Used for:
 
-- `chrome.storage.local`: user settings such as download subfolder, minimum direct-media size, and excluded domains;
-- `chrome.storage.session`: detected media items needed to survive Manifest V3 service-worker restarts during the browser session.
+- `chrome.storage.local`: download subfolder, minimum direct-media size, excluded domains;
+- `chrome.storage.session`: detected media needed across Manifest V3 service-worker restarts.
 
-Authentication-related request headers must not be stored in persistent extension storage.
+Authentication-related request headers are never written to persistent extension storage.
 
-## `tabs`
+### `webRequest`
 
-Used to associate detected media with the correct browser tab, obtain the active tab for the popup, read page title/URL information needed for display and filename suggestions, and clean up tab-scoped state when a tab closes.
+Used to observe media network metadata **only for origins Chrome has currently granted to the extension**. This is required for reliable HLS/DASH detection and content type/size discovery that DOM inspection alone cannot provide.
 
-It must not be used to build a browsing-history profile.
+Request-header handling is constrained by the security boundary:
 
-## `webRequest`
+- only confirmed media requests can promote captured headers;
+- capture candidates are limited to `Authorization`, `Referer`, and `Origin`;
+- arbitrary `X-*` headers are not collected by this media path;
+- sensitive data remains origin-bound for extension-managed replay;
+- caches are bounded and short-lived;
+- captured authentication headers are not persisted.
 
-Used to observe media-related network requests and response metadata that cannot be reliably discovered from page DOM elements alone, including HLS/DASH manifests and media response content types/sizes.
+### `offscreen`
 
-Some media hosts require request context used by the page player. Request-header handling is security-sensitive and must follow these release requirements:
+Creates the Manifest V3 offscreen document used for Blob URLs, OPFS-backed media assembly, and the bundled ffmpeg/libav.js processing paths.
 
-- retain only data needed for confirmed media requests;
-- avoid broad capture of unrelated API traffic;
-- keep sensitive headers bound to appropriate origins;
-- apply exclusions consistently;
-- keep temporary data bounded and short-lived;
-- never persist captured authentication headers in extension storage.
+The offscreen document is not used for hidden browsing, analytics, advertising, or telemetry.
 
-General release remains gated on the corresponding security issues.
+## Optional host permissions
 
-## `offscreen`
+The manifest declares only these as `optional_host_permissions`:
 
-Used to create a Manifest V3 offscreen document for browser-context tasks that the service worker cannot perform directly, including creating Blob URLs and running the bundled media-processing WebAssembly for supported remux/mux operations.
+```text
+http://*/*
+https://*/*
+```
 
-The offscreen document is not used for advertising, hidden browsing, or background tracking.
+They define the maximum site-access scope the user may choose later; they are not granted merely because the extension was installed.
 
-## Host permission: `<all_urls>`
+Permission changes are reconciled into dynamic content-script registrations by `src/site-access.js`. Removing host permissions unregisters persistent detectors. The popup's current-tab `activeTab` mode remains available.
 
-The current full-feature build requests access to all HTTP(S) sites because users may encounter media on arbitrary sites and HLS/DASH media can be served from CDNs on different hosts from the page itself.
+## Content-script timing and frames
 
-This is a broad permission and therefore a v1.0 review item. The project tracks a least-privilege design in which users can grant site access more selectively where technically practical.
+Persistent site grants use `document_start` and `allFrames: true` for the generic isolated-world detector because early Blob URLs can be created before DOM ready and embedded players often live in frames.
 
-Broad host access does not authorize use of site data for unrelated purposes.
+This cost applies only to origins the user has explicitly granted persistently. The default click-only mode injects on demand after the extension action is opened.
 
-## Content scripts on `<all_urls>` / `all_frames`
+The YouTube-specific adapter runs in the MAIN world only on YouTube and only when that tab/site is currently accessible.
 
-The current build injects content-side detection support into pages/frames to discover media elements and Blob-backed media that `webRequest` cannot represent as a normal downloadable URL.
+## Why `tabs` is no longer required
 
-Because always-on, all-frame injection has privacy, compatibility, and performance cost, the release-readiness roadmap requires reevaluating whether this can be delayed or restricted to user-enabled sites/frames.
+The popup only needs the currently active tab after the user opens the extension action. `activeTab` provides the temporary page access needed for its URL/title and injection, so the broader `tabs` permission is unnecessary and has been removed.
 
-## YouTube-specific MAIN-world script
+## User control guarantees
 
-The full/sideload build currently contains a YouTube-specific adapter. Chrome Web Store distribution has separate policy constraints around YouTube downloading, so any Web Store artifact must follow the distribution decision tracked in the release-readiness issues and must not accidentally contain prohibited functionality.
+- Install: no persistent HTTP(S) host grant.
+- Open popup: temporary access to the current tab only.
+- “Always this site”: explicit current-origin persistent grant.
+- “Always all sites”: explicit broad HTTP(S) persistent grant.
+- “Click only”: removes all persistent host grants and dynamic persistent detectors.
+- Revoking permissions in browser settings is also supported; `permissions.onRemoved` reconciles registrations automatically.
 
 ## Review checklist
 
-Before every store/release submission, verify:
+For every release:
 
-- the manifest permissions exactly match this document;
-- the Privacy Policy describes all data actually processed;
-- Store Dashboard permission justifications use the same single-purpose rationale;
-- no new permission is introduced without documentation and a user-facing reason;
-- security tests cover request-header minimization and origin boundaries;
-- the packaged artifact, not only the source tree, is inspected for unexpected permissions or code paths.
+- required permissions remain limited to current core features;
+- no required `host_permissions` are introduced without an architectural review;
+- optional origins remain HTTP(S)-only unless a concrete product requirement is documented;
+- permission request UX remains user-gesture initiated;
+- grant and revocation paths are covered by unit and packaged-browser E2E tests;
+- privacy/security documentation matches actual code and packaged manifest;
+- the packaged artifact is inspected for unexpected static content scripts or broad required host access.
