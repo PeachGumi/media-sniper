@@ -36,7 +36,11 @@ jobs:
           test -f /tmp/media-sniper-package/LICENSE
           test -f /tmp/media-sniper-package/LICENSE.libav
           test -f /tmp/media-sniper-package/THIRD_PARTY_NOTICES.md
+          test -f /tmp/media-sniper-package/PRIVACY.md
+          test -f /tmp/media-sniper-package/DISTRIBUTION.md
+          test -f /tmp/media-sniper-package/docs/PERMISSIONS.md
           test -f /tmp/media-sniper-package/src/background-entry.js
+          test -f /tmp/media-sniper-package/src/install.js
           test -f /tmp/media-sniper-package/src/security-bootstrap.js
           test -f /tmp/media-sniper-package/src/security-guard.js
           test -f /tmp/media-sniper-package/src/dash-inheritance.js
@@ -45,6 +49,8 @@ jobs:
           test -f /tmp/media-sniper-package/src/libav/libav-6.5.7.1-h264-aac-mp3.wasm.wasm
           test -f /tmp/media-sniper-package/popup/popup.html
           test -f /tmp/media-sniper-package/popup/meta.js
+          test -f /tmp/media-sniper-package/popup/onboarding.html
+          test -f /tmp/media-sniper-package/popup/onboarding.js
           echo "distribution zip:"
           sha256sum media-sniper.zip
           echo "vendored libav wasm:"
