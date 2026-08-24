@@ -1,79 +1,70 @@
 <!DOCTYPE html>
-<html lang="ja">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Media Sniper — はじめに</title>
+<title>Media Sniper</title>
 <style>
   :root { color-scheme: dark; }
   * { box-sizing: border-box; }
-  body {
-    margin: 0; background: #17181c; color: #e8e8ea;
-    font: 15px/1.7 -apple-system, BlinkMacSystemFont, "Segoe UI", "Hiragino Sans", sans-serif;
-  }
+  body { margin: 0; background: #17181c; color: #e8e8ea; font: 15px/1.7 -apple-system, BlinkMacSystemFont, "Segoe UI", "Hiragino Sans", sans-serif; }
   main { max-width: 760px; margin: 0 auto; padding: 48px 24px 64px; }
   h1 { font-size: 28px; margin: 0 0 8px; }
-  h1 span { color: #ff7a45; }
   h2 { margin-top: 30px; font-size: 18px; }
   .lead { color: #b5b5bd; margin: 0 0 28px; }
   .card { background: #1f2127; border: 1px solid #30333c; border-radius: 10px; padding: 20px; margin: 16px 0; }
   ul { padding-left: 22px; }
   li { margin: 8px 0; }
-  strong { color: #fff; }
   .actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 30px; }
-  button, a.button {
-    display: inline-block; border-radius: 7px; padding: 9px 16px;
-    border: 1px solid #3a3d46; background: #2a2c33; color: #e8e8ea;
-    font: inherit; text-decoration: none; cursor: pointer;
-  }
+  button, a.button { display: inline-block; border-radius: 7px; padding: 9px 16px; border: 1px solid #3a3d46; background: #2a2c33; color: #e8e8ea; font: inherit; text-decoration: none; cursor: pointer; }
   button.primary { background: #ff7a45; border-color: #ff7a45; color: #17181c; font-weight: 700; }
   button:focus-visible, a:focus-visible { outline: 2px solid #7cc4ff; outline-offset: 2px; }
   .small { color: #999aa4; font-size: 12px; margin-top: 24px; }
-  code { background: #2a2c33; padding: 1px 5px; border-radius: 4px; }
 </style>
 </head>
 <body>
 <main>
-  <h1>Media<span>Sniper</span> を使う前に</h1>
-  <p class="lead">メディア検出と保存のためにブラウザ内で扱う情報を説明します。</p>
+  <h1 data-i18n="onboardingTitle">Before using Media Sniper</h1>
+  <p class="lead" data-i18n="onboardingLead">What Media Sniper processes locally for media detection and saving.</p>
 
   <section class="card" aria-labelledby="monitoring-title">
-    <h2 id="monitoring-title">閲覧中サイトのメディア通信を検出します</h2>
+    <h2 id="monitoring-title" data-i18n="monitoringTitle">Media-related browser activity is observed</h2>
     <ul>
-      <li>ページURL・タイトル、メディアURL、HLS/DASH playlist/segment URL、content typeなどをブラウザ内で処理します。</li>
-      <li>認証が必要な<strong>確認済みメディア通信</strong>では、サイトのプレイヤーが送った <code>Authorization</code> / <code>Referer</code> / <code>Origin</code> を短時間だけ利用する場合があります。</li>
-      <li>認証関連headerは永続保存せず、別originへそのまま転送しないよう制限します。</li>
-      <li>メディア取得時には、Chromiumが対象サイト向けCookieを通常のブラウザsessionとして送信する場合があります。</li>
+      <li data-i18n="monitoring1">Page and media metadata are processed locally.</li>
+      <li data-i18n="monitoring2">Authentication-related headers may be used briefly for confirmed media.</li>
+      <li data-i18n="monitoring3">Sensitive headers are not persisted or replayed unchanged across origins.</li>
+      <li data-i18n="monitoring4">Chromium may attach cookies for the target media site.</li>
     </ul>
   </section>
 
   <section class="card" aria-labelledby="local-title">
-    <h2 id="local-title">Media Sniperのサーバーへは送りません</h2>
+    <h2 id="local-title" data-i18n="localTitle">Nothing is sent to a Media Sniper server</h2>
     <ul>
-      <li>解析・取得・HLS/DASH処理・ffmpeg WASMによるmux/remuxはブラウザ内で実行します。</li>
-      <li>Media Sniperのバックエンド、analytics、telemetry、広告SDKはありません。</li>
-      <li>当然ながら、保存するメディア自体を取得するため、そのメディアを配信しているWebサイト/CDNとは通信します。</li>
+      <li data-i18n="local1">Media processing runs in the browser.</li>
+      <li data-i18n="local2">There is no Media Sniper backend or telemetry.</li>
+      <li data-i18n="local3">Saving media contacts the site/CDN that serves it.</li>
     </ul>
   </section>
 
   <section class="card" aria-labelledby="storage-title">
-    <h2 id="storage-title">保存と削除</h2>
+    <h2 id="storage-title" data-i18n="storageTitle">Storage and deletion</h2>
     <ul>
-      <li>設定は <code>chrome.storage.local</code>、検出項目はsession storageに保存します。</li>
-      <li>ポップアップの「クリア」で現在タブの検出項目を削除できます。</li>
-      <li>拡張機能を削除すると、Chromiumが管理する拡張機能ローカルデータも削除されます。</li>
+      <li data-i18n="storage1">Settings and detected items use Chromium extension storage.</li>
+      <li data-i18n="storage2">Clear removes detected items for the current tab.</li>
+      <li data-i18n="storage3">Removing the extension removes extension-local data managed by Chromium.</li>
     </ul>
   </section>
 
   <div class="actions">
-    <button id="continue" class="primary">理解して使い始める</button>
-    <button id="settings">設定を開く</button>
-    <a class="button" href="https://github.com/PeachGumi/media-sniper/blob/main/PRIVACY.md" target="_blank" rel="noreferrer">Privacy Policy</a>
-    <a class="button" href="https://github.com/PeachGumi/media-sniper/blob/main/docs/PERMISSIONS.md" target="_blank" rel="noreferrer">権限の説明</a>
+    <button id="continue" class="primary" data-i18n="continue">I understand — continue</button>
+    <button id="settings" data-i18n="openSettings">Open settings</button>
+    <a class="button" href="https://github.com/PeachGumi/media-sniper/blob/main/PRIVACY.md" target="_blank" rel="noreferrer" data-i18n="privacyPolicy">Privacy Policy</a>
+    <a class="button" href="https://github.com/PeachGumi/media-sniper/blob/main/docs/PERMISSIONS.md" target="_blank" rel="noreferrer" data-i18n="permissions">Permission details</a>
   </div>
 
-  <p class="small">Media Sniper full build はGitHub Releases等からself-distributionされる開発者モード向け拡張で、Chrome Web Store版ではありません。</p>
+  <p class="small" data-i18n="selfDistributionNote">The full build is self-distributed and is not a Chrome Web Store edition.</p>
 </main>
+<script src="i18n.js"></script>
 <script src="onboarding.js"></script>
 </body>
 </html>
