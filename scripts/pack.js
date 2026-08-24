@@ -31,6 +31,7 @@ const includes = [
   'src/background.js',
   'src/offscreen.html',
   'src/offscreen-policy.js',
+  'src/offscreen-streaming.js',
   'src/offscreen.js',
   'src/youtube.js',
   'src/libav/libav-6.5.7.1-h264-aac-mp3.wasm.mjs',
