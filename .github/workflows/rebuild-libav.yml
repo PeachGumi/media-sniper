@@ -2,7 +2,6 @@ name: Rebuild bundled libav
 
 on:
   push:
-    branches: [fix/reproducible-libav]
     paths:
       - 'tools/libav/config.json'
       - '.github/workflows/rebuild-libav.yml'
@@ -19,7 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Media Sniper
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: app
           fetch-depth: 0
@@ -41,14 +40,14 @@ jobs:
           PY
 
       - name: Checkout pinned upstream libav.js
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: Yahweasel/libav.js
           ref: ${{ steps.cfg.outputs.tag }}
           path: upstream
           fetch-depth: 1
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '24'
 
@@ -131,15 +130,19 @@ jobs:
 
       - name: Commit generated runtime to build branch
         working-directory: app
+        shell: bash
         run: |
           set -euxo pipefail
-          # Documentation and unrelated PR commits may land while this long
-          # build is running. Rebase the generated-files commit on the current
-          # branch head, but never rebase stale artifacts over a changed build
+          branch="$GITHUB_REF_NAME"
+          test -n "$branch"
+
+          # A long compile may overlap with documentation or review commits on
+          # the same feature branch. Rebase the generated-files commit onto the
+          # current branch head, but never publish artifacts built from a stale
           # configuration.
           cp tools/libav/config.json /tmp/built-config.json
-          git fetch origin fix/reproducible-libav
-          git show origin/fix/reproducible-libav:tools/libav/config.json > /tmp/current-config.json
+          git fetch origin "$branch"
+          git show "origin/$branch:tools/libav/config.json" > /tmp/current-config.json
           cmp /tmp/built-config.json /tmp/current-config.json || {
             echo 'Build config changed while libav was compiling; refusing to publish stale artifacts.' >&2
             exit 1
@@ -153,5 +156,5 @@ jobs:
             exit 0
           fi
           git commit -m 'build: regenerate libav from pinned upstream source'
-          git rebase origin/fix/reproducible-libav
-          git push origin HEAD:fix/reproducible-libav
+          git rebase "origin/$branch"
+          git push origin "HEAD:$branch"
