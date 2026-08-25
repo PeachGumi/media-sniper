@@ -106,6 +106,16 @@ def wait_sw(port,expected_path,seconds=25):
     return None
 
 
+def print_log_tail(path, limit=30000):
+    try:
+        with open(path,encoding="utf-8",errors="replace") as f: text=f.read()
+        if text:
+            print("[browser log tail]",flush=True)
+            print(text[-limit:],flush=True)
+    except Exception as exc:
+        print("[browser log unavailable]",repr(exc),flush=True)
+
+
 def browser_run(browser, root, functional=False):
     cdp_port,fixture_port=free_port(),free_port()
     profile=tempfile.mkdtemp(prefix="ms-browser-profile-")
@@ -143,9 +153,14 @@ def browser_run(browser, root, functional=False):
 
         e={**env,"CDP_PORT":str(cdp_port),"MEDIA_SNIPER_EXTENSION_ID":ext_id,"MEDIA_SNIPER_E2E_PREGRANTED":"1"}
         general=subprocess.run([sys.executable,os.path.join(REPO_ROOT,"scripts","e2e_pregranted_test.py"),str(fixture_port)],env=e,timeout=180)
-        if general.returncode!=0: return False
+        if general.returncode!=0:
+            log.flush(); print_log_tail(log_path)
+            return False
         libav=subprocess.run([sys.executable,os.path.join(REPO_ROOT,"scripts","verify_aes.py"),str(fixture_port)],env=e,timeout=240)
-        return libav.returncode==0
+        if libav.returncode!=0:
+            log.flush(); print_log_tail(log_path)
+            return False
+        return True
     finally:
         teardown()
 
