@@ -23,6 +23,9 @@
     "parser-vp8",
     "parser-vp9",
     "parser-av1",
+    "decoder-aac",
+    "decoder-h264",
+    "decoder-hevc",
     "bsf-aac_adtstoasc",
     "bsf-extract_extradata",
     "bsf-h264_metadata",
@@ -30,5 +33,5 @@
     "bsf-vp9_metadata",
     "bsf-av1_metadata"
   ],
-  "design": "Stream-copy-only media plumbing. No H.264/AAC encoder or decoder fragments are requested; Media Sniper uses ffmpeg CLI demux/mux/remux with -c copy."
+  "design": "Stream-copy media plumbing. AAC/H.264/HEVC decoders are included only so FFmpeg can probe complete stream parameters required by output containers; Media Sniper still remuxes with -c copy and does not transcode media."
 }
