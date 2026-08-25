@@ -63,16 +63,16 @@ function makeChrome(opts) {
           return chrome.__ctx.fetch(msg.url, { headers: msg.headers || {} }).then(function (res) {
             if (!res.ok) return { error: 'http ' + res.status };
             return res.arrayBuffer().then(function (buf) {
-              return { url: 'blob:fake/fb-' + buf.byteLength, size: buf.byteLength };
+              return { url: 'blob:chrome-extension://testextensionid/fb-' + buf.byteLength, size: buf.byteLength };
             });
           });
         }
         if (msg && msg.type === 'ms-offscreen-mux-local') {
           chrome.__muxCalls.push(msg);
-          return Promise.resolve({ url: 'blob:fake/muxed-' + chrome.__muxCalls.length, size: 4242 });
+          return Promise.resolve({ url: 'blob:chrome-extension://testextensionid/muxed-' + chrome.__muxCalls.length, size: 4242 });
         }
         if (msg && msg.type === 'ms-offscreen-ffmpeg-run') {
-          return Promise.resolve({ url: 'blob:fake/ffmpeg-x', size: 1000 });
+          return Promise.resolve({ url: 'blob:chrome-extension://testextensionid/ffmpeg-x', size: 1000 });
         }
         if (msg && msg.type === 'ms-offscreen-ffmpeg-status') { return Promise.resolve({ running: false, done: null }); }
         return Promise.resolve(undefined);

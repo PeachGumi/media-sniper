@@ -9,6 +9,9 @@ class FakeFile {
     this.size = this._bytes.byteLength;
     this.type = type || '';
   }
+  async arrayBuffer() {
+    return this._bytes.buffer.slice(this._bytes.byteOffset, this._bytes.byteOffset + this._bytes.byteLength);
+  }
 }
 
 class FakeHandle {
@@ -97,6 +100,7 @@ const context = vm.createContext({
   Math,
   Uint8Array,
   ArrayBuffer,
+  Blob,
   RangeError,
   Error,
   globalThis: null,
