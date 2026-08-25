@@ -131,7 +131,13 @@ Pull Requestと`main`では、unit/syntax、manifest/package/UI version整合、
 
 E2Eは `media-sniper.zip` を実際に生成し、そのZIPをクリーンなディレクトリへ展開した配布物そのものを固定versionのChrome for Testingへ読み込みます。クリーンprofileでは常時host権限が0件であることを確認した後、Permissions APIでoptional accessを許可し、dynamic detector登録、media検出、download、permission revoke、detector解除まで検証します。
 
+さらにlibav media-engine gateとして、**AES-128暗号化HLS fixtureを配布ZIP内の実WASMで復号→stream-copy remux→MP4保存**し、Chromium Downloads完了・100KB超・MP4 `ftyp` signatureまで確認します。WASMが「buildできた」だけでは合格にしません。
+
+CIは `src/libav/PROVENANCE.json` に記録されたmodule/WASMのSHA-256を再計算し、固定configと一致しないartifactや旧来の出所不明WASMが混入した場合は失敗します。
+
 unit系jobと配布artifactのbrowser E2Eが両方成功した場合だけ、後段artifact jobが `media-sniper.zip` と `media-sniper.zip.sha256` をverified workflow artifactとして作成します。
+
+承認済み`v*` releaseでは、extension ZIPに加えて **`media-sniper-libav-corresponding-source.tar.gz`** とそのSHA-256も生成・添付します。このsource bundleは、同梱WASMと同じ固定libav.js revision、生成variant config、展開済みdependency source、rebuild recipe、PROVENANCEを含みます。
 
 正確なrelease手順とmanual acceptance checklistは [docs/RELEASE.md](docs/RELEASE.md) を参照してください。
 
@@ -145,9 +151,11 @@ Full版にはYouTube adapter、adaptive mux、yt-dlp helperが含まれます。
 
 Media Sniper自身のsourceはMITです。[LICENSE](LICENSE) を参照してください。
 
-`src/libav/` にはlibav.js / FFmpeg WebAssembly artifactをvendorしています。適用されるLGPL noticeは [LICENSE.libav](LICENSE.libav)、詳細なprovenanceは [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) を参照してください。
+現在配布するlibav.js / FFmpeg WebAssembly runtimeは、`Yahweasel/libav.js` tag `v6.10.9.0`、commit `c80e885c3461f7bb7ea565c9631b34243ae0dbf1`、FFmpeg 9.0、Emscripten 6.0.5から生成するMedia Sniper専用の再現buildです。正確なfragment、compiler version、upstream revision、artifact SHA-256は `tools/libav/config.json` と `src/libav/PROVENANCE.json` に固定しています。
 
-同梱generated JavaScript moduleにはdownstream modificationの記録があり、build identifierは `libav.js v6.5.7.1-61-g823eb97` です。現repository historyだけでは、**同梱binaryと正確に対応するsource/build recipeをまだ特定できていません**。したがって「公式v6.5.7.1の無改変binary」「generic upstream checkoutが対応ソース」とは表現しません。このprovenanceを解決するか再現buildへ置換することは、再現性・supply-chain品質の残課題です。
+以前の`v6.5.7.1-61-g823eb97` WASMは正確なsource provenanceを復元できなかったため、現在の配布物・runtimeから削除しました。旧`.mjs` pathだけは既存import互換の薄いshimとして残し、新しい再現runtimeへredirectします。
+
+承認済みreleaseではextension ZIPと同時に対応ソースbundleを添付します。詳細は [LICENSE.libav](LICENSE.libav)、[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)、[tools/libav/README.md](tools/libav/README.md) を参照してください。
 
 ## 免責事項
 
