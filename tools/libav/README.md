@@ -1,10 +1,16 @@
 # Reproducible libav.js build
 
-Media Sniper does not need to decode or encode H.264/AAC. Its bundled ffmpeg
-runtime is used for demuxing, stream-copy remuxing/muxing, HLS handling, and
-writing MP4/AAC outputs. The custom `media-sniper` libav.js variant therefore
-keeps those container/protocol/parser/CLI facilities while intentionally
-omitting H.264/AAC encoder/decoder fragments.
+Media Sniper uses its bundled ffmpeg runtime for demuxing, stream-copy
+remuxing/muxing, HLS handling, and writing MP4/AAC outputs. It does not
+transcode captured media: production ffmpeg jobs use `-c copy`.
+
+Some input codecs still need decoder support during FFmpeg stream probing.
+In particular, HLS/MPEG-TS can identify an H.264/AAC stream without exposing
+all container-output parameters (for example width/height, sample rate and
+channel layout) unless FFmpeg can inspect codec headers. The custom
+`media-sniper` variant therefore includes AAC, H.264 and HEVC decoders for
+**stream-parameter probing only**, while deliberately omitting their encoders.
+This keeps the shipped operation as stream copy rather than transcoding.
 
 ## Pinned inputs
 
@@ -60,6 +66,8 @@ The generated variant must support the operations Media Sniper actually uses:
 - `ffmpeg` CLI;
 - H.264/H.265/AAC/Opus/VP8/VP9/AV1 parser/bitstream metadata needed for copying
   streams between supported containers;
+- AAC/H.264/HEVC decode support sufficient to probe complete input stream
+  parameters before a `-c copy` output header is written;
 - local video+audio MP4 mux with `-c copy`;
 - fragmented MP4 output for live-recording mode.
 
