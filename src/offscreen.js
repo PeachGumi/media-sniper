@@ -132,12 +132,18 @@ async function runFfmpegJob(msg, sendResponse) {
     // document context — which pops a blocking dialog on real browsers
     // (headless returns null instantly, which is why tests never saw it).
     const args = ['-y', '-nostdin'];
-    args.push('-analyzeduration', '10M', '-f', 'hls', '-i', 'jsfetch:' + msg.url);
+    // The HLS demuxer derives nested `crypto+jsfetch:` URLs for AES-128
+    // segments. libav.js starts from a jsfetch input and otherwise narrows the
+    // protocol whitelist to jsfetch/http/https, which rejects the compiled
+    // crypto protocol before decryption begins. Keep the allowlist explicit
+    // and limited to protocols the extension actually needs.
+    const hlsProtocols = 'file,data,jsfetch,crypto,http,https';
+    args.push('-protocol_whitelist', hlsProtocols, '-analyzeduration', '10M', '-f', 'hls', '-i', 'jsfetch:' + msg.url);
     if (msg.audioUrl) {
       // VDH "m3u8_audio_video_two_sources": separate audio rendition
       // playlist. -map 0:v:0 + 1:a:0? = video from the first input, audio
       // from the second (the "?" tolerates a missing audio stream).
-      args.push('-i', 'jsfetch:' + msg.audioUrl);
+      args.push('-protocol_whitelist', hlsProtocols, '-i', 'jsfetch:' + msg.audioUrl);
     }
     args.push('-c', 'copy');
     if (msg.audioUrl) {

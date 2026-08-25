@@ -36,8 +36,11 @@ const includes = [
   'src/offscreen-streaming.js',
   'src/offscreen.js',
   'src/youtube.js',
+  // Historical import path is kept as a tiny compatibility shim only.
   'src/libav/libav-6.5.7.1-h264-aac-mp3.wasm.mjs',
-  'src/libav/libav-6.5.7.1-h264-aac-mp3.wasm.wasm',
+  'src/libav/libav-6.10.9.0-media-sniper.wasm.mjs',
+  'src/libav/libav-6.10.9.0-media-sniper.wasm.wasm',
+  'src/libav/PROVENANCE.json',
   'popup/i18n.js',
   'popup/site-access-ui.js',
   'popup/access-refresh.js',

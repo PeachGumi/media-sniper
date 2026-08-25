@@ -83,20 +83,26 @@
     const clickBtn = document.getElementById('accessClick');
     if (!siteBtn || !allBtn || !clickBtn) return;
 
+    const all = await containsAll();
+    const permissions = await chrome.permissions.getAll();
+    const origins = permissions.origins || [];
+
+    // Site-specific access needs an HTTP(S) tab, but global opt-in/revocation
+    // does not. Keeping those controls available also lets users remove an
+    // existing broad grant while they happen to be viewing chrome://, about:,
+    // or another unsupported page.
     if (!pattern) {
       siteBtn.disabled = true;
-      allBtn.disabled = true;
-      clickBtn.disabled = true;
-      status(t('accessUnsupported'), true);
+      allBtn.disabled = all;
+      clickBtn.disabled = !origins.length;
+      status(all ? t('accessModeAll') : t('accessUnsupported'), !all);
       return;
     }
 
-    const all = await containsAll();
     const site = all || await containsSite(pattern);
-    const permissions = await chrome.permissions.getAll();
     siteBtn.disabled = site;
     allBtn.disabled = all;
-    clickBtn.disabled = !(permissions.origins || []).length;
+    clickBtn.disabled = !origins.length;
     status(all ? t('accessModeAll') : (site ? t('accessModeSite') : t('accessModeClick')));
   }
 
@@ -140,10 +146,10 @@
     try {
       const granted = await chrome.permissions.request({ origins: ALL });
       if (!granted) { status(t('accessDenied'), true); return; }
-      await injectTab(activeTab);
+      const injected = await injectTab(activeTab);
       status(t('accessGrantedAll'));
       await refresh();
-      notifyReady(true);
+      notifyReady(injected);
     } catch (e) { status(t('accessFailed'), true); }
   });
 

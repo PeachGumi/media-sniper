@@ -1,281 +1,253 @@
 #!/usr/bin/env python3
-"""Media Sniper one-command browser E2E runner.
+"""Media Sniper browser E2E runner.
 
-The test driver and fixtures live in the repository, while the extension under
-test can be a different directory (for example an unpacked release zip) via
-MEDIA_SNIPER_EXTENSION_ROOT. Exit code 0 means PASS.
+One invocation performs two isolated browser runs:
+1. load the exact extension artifact unchanged and require its MV3 service
+   worker to start;
+2. copy that artifact to a temporary functional harness, changing *only*
+   manifest.host_permissions to `http://127.0.0.1/*`, then exercise detection,
+   direct download and the bundled libav HLS/AES-128 remux path.
+
+The localhost manifest overlay exists solely because headless Chrome cannot
+approve the interactive optional-permission confirmation UI. Runtime JS/WASM
+bytes are copied unchanged from the exact packaged artifact.
+
+HLS media fixtures are generated at test time with the host ffmpeg instead of
+checking binary MPEG-TS/AES blobs into Git. This makes the fixture deterministic
+and prevents text/binary transport corruption from turning the media into an
+invalid TS stream while still testing the extension's bundled libav runtime.
 """
 import json
 import os
 import re
-import signal
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.request
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-EXTENSION_ROOT = os.path.abspath(os.environ.get("MEDIA_SNIPER_EXTENSION_ROOT", REPO_ROOT))
-PROFILE = os.path.expanduser("~/.cache/ms-brave-test-e2e")
+BASE_EXTENSION_ROOT = os.path.abspath(os.environ.get("MEDIA_SNIPER_EXTENSION_ROOT", REPO_ROOT))
 KEEP = "--keep" in sys.argv
+SMOKE_ONLY = os.environ.get("MEDIA_SNIPER_E2E_SMOKE_ONLY") == "1"
 
 
 def find_browser():
-    import shutil
-
     env_browser = os.environ.get("MEDIA_SNIPER_BRAVE")
-    if env_browser and os.path.exists(env_browser):
-        return env_browser
-
-    candidates = []
-    if sys.platform == "darwin":
-        candidates += [
-            "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
-            os.path.expanduser("~/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"),
-            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-            os.path.expanduser("~/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
-        ]
-    elif os.name == "nt":
-        pf = os.environ.get("PROGRAMFILES", r"C:\Program Files")
-        pf86 = os.environ.get("PROGRAMFILES(X86)", pf)
-        local = os.environ.get("LOCALAPPDATA", "")
-        candidates += [
-            os.path.join(pf, "BraveSoftware", "Brave-Browser", "Application", "brave.exe"),
-            os.path.join(pf86, "BraveSoftware", "Brave-Browser", "Application", "brave.exe"),
-            os.path.join(local, "BraveSoftware", "Brave-Browser", "Application", "brave.exe"),
-            os.path.join(pf, "Google", "Chrome", "Application", "chrome.exe"),
-            os.path.join(local, "Google", "Chrome", "Application", "chrome.exe"),
-        ]
-    else:
-        candidates += [
-            "brave-browser", "brave-browser-stable", "brave",
-            "google-chrome", "google-chrome-stable", "chromium", "chromium-browser",
-        ]
-
-    for candidate in candidates:
-        if os.sep in candidate or "/" in candidate:
-            if os.path.exists(candidate):
-                return candidate
-        else:
-            found = shutil.which(candidate)
-            if found:
-                return found
+    if env_browser and os.path.exists(env_browser): return env_browser
+    candidates=[]
+    if sys.platform=="darwin": candidates += ["/Applications/Brave Browser.app/Contents/MacOS/Brave Browser","/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"]
+    elif os.name=="nt":
+        pf=os.environ.get("PROGRAMFILES",r"C:\Program Files"); local=os.environ.get("LOCALAPPDATA","")
+        candidates += [os.path.join(pf,"BraveSoftware","Brave-Browser","Application","brave.exe"),os.path.join(local,"Google","Chrome","Application","chrome.exe")]
+    else: candidates += ["brave-browser","brave","google-chrome","google-chrome-stable","chromium"]
+    for c in candidates:
+        if os.path.isabs(c) and os.path.exists(c): return c
+        found=shutil.which(c)
+        if found: return found
     return None
-
-
-def manifest_service_worker():
-    manifest_path = os.path.join(EXTENSION_ROOT, "manifest.json")
-    if not os.path.isfile(manifest_path):
-        raise RuntimeError("extension root has no manifest.json: " + EXTENSION_ROOT)
-    with open(manifest_path, encoding="utf-8") as f:
-        manifest = json.load(f)
-    path = manifest.get("background", {}).get("service_worker")
-    if not path or not isinstance(path, str):
-        raise RuntimeError("manifest background.service_worker is missing")
-    return path.lstrip("/")
 
 
 def free_port():
     import socket
-    sock = socket.socket()
-    sock.bind(("127.0.0.1", 0))
-    port = sock.getsockname()[1]
-    sock.close()
-    return port
+    s=socket.socket(); s.bind(("127.0.0.1",0)); p=s.getsockname()[1]; s.close(); return p
 
 
-def write_prefs():
-    base = os.path.join(PROFILE, "Default")
-    os.makedirs(base, exist_ok=True)
-    prefs_path = os.path.join(base, "Preferences")
-    prefs = {}
-    if os.path.exists(prefs_path):
-        try:
-            with open(prefs_path, encoding="utf-8") as f:
-                prefs = json.load(f)
-        except Exception:
-            prefs = {}
-    prefs.setdefault("download", {})["prompt_for_download"] = False
-    prefs["download"]["default_directory"] = os.path.expanduser("~/Downloads")
-    prefs["download"]["directory_upgrade"] = True
-    with open(prefs_path, "w", encoding="utf-8") as f:
-        json.dump(prefs, f)
-    return prefs_path
+def read_manifest(root):
+    p=os.path.join(root,"manifest.json")
+    if not os.path.isfile(p): raise RuntimeError("extension root has no manifest.json: "+root)
+    with open(p,encoding="utf-8") as f: return json.load(f)
 
 
-def cdp_targets(port):
-    return json.load(urllib.request.urlopen(f"http://127.0.0.1:{port}/json/list", timeout=2))
+def service_worker_path(root):
+    sw=read_manifest(root).get("background",{}).get("service_worker")
+    if not isinstance(sw,str) or not sw: raise RuntimeError("manifest background.service_worker is missing")
+    return sw.lstrip("/")
 
 
-def wait_cdp(port, seconds=30):
-    deadline = time.time() + seconds
-    while time.time() < deadline:
-        try:
-            json.load(urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=2))
-            return True
-        except Exception:
-            time.sleep(0.5)
+def make_functional_harness(root):
+    dst=tempfile.mkdtemp(prefix="media-sniper-e2e-functional-")
+    shutil.rmtree(dst)
+    shutil.copytree(root,dst)
+    manifest=read_manifest(dst)
+    if manifest.get("host_permissions"):
+        raise RuntimeError("release artifact unexpectedly already has required host_permissions")
+    manifest["host_permissions"]=["http://127.0.0.1/*"]
+    with open(os.path.join(dst,"manifest.json"),"w",encoding="utf-8") as f:
+        json.dump(manifest,f,ensure_ascii=False,indent=2); f.write("\n")
+    return dst
+
+
+def make_fixture_harness():
+    ffmpeg=shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise RuntimeError("ffmpeg is required to generate valid browser E2E HLS fixtures")
+    dst=tempfile.mkdtemp(prefix="media-sniper-e2e-fixture-")
+    shutil.rmtree(dst)
+    shutil.copytree(os.path.join(REPO_ROOT,"test","fixture"),dst)
+    hls=os.path.join(dst,"hls")
+    os.makedirs(hls,exist_ok=True)
+
+    for name in os.listdir(hls):
+        if re.match(r"^(?:seg|encseg)\d+\.ts$",name):
+            try: os.remove(os.path.join(hls,name))
+            except OSError: pass
+
+    common=[
+        ffmpeg,"-hide_banner","-loglevel","error","-y",
+        "-f","lavfi","-i","testsrc2=size=320x180:rate=24",
+        "-f","lavfi","-i","sine=frequency=1000:sample_rate=48000",
+        "-t","2","-c:v","libx264","-preset","ultrafast","-pix_fmt","yuv420p","-g","48",
+        "-c:a","aac","-b:a","96k",
+    ]
+    subprocess.run(common+[
+        "-f","hls","-hls_time","10","-hls_list_size","0",
+        "-hls_segment_filename",os.path.join(hls,"seg%d.ts"),
+        os.path.join(hls,"media.m3u8"),
+    ],check=True,timeout=60)
+
+    key_path=os.path.join(hls,"aes.key")
+    with open(key_path,"wb") as f: f.write(bytes(range(16)))
+    key_info=os.path.join(hls,"aes-key-info.txt")
+    with open(key_info,"w",encoding="utf-8") as f:
+        f.write("aes.key\n"+key_path+"\n000102030405060708090a0b0c0d0e0f\n")
+    subprocess.run([
+        ffmpeg,"-hide_banner","-loglevel","error","-y",
+        "-i",os.path.join(hls,"media.m3u8"),"-c","copy",
+        "-hls_time","10","-hls_list_size","0",
+        "-hls_key_info_file",key_info,
+        "-hls_segment_filename",os.path.join(hls,"encseg%d.ts"),
+        os.path.join(hls,"encindex.m3u8"),
+    ],check=True,timeout=60)
+    try: os.remove(key_info)
+    except OSError: pass
+
+    plain=os.path.join(hls,"seg0.ts"); enc=os.path.join(hls,"encseg0.ts")
+    if os.path.getsize(plain)<100_000 or os.path.getsize(enc)<100_000:
+        raise RuntimeError("generated HLS fixture is unexpectedly small")
+    print("[fixture] generated valid HLS/AES media",os.path.getsize(plain),os.path.getsize(enc),flush=True)
+    return dst
+
+
+def write_prefs(profile):
+    base=os.path.join(profile,"Default"); os.makedirs(base,exist_ok=True)
+    p=os.path.join(base,"Preferences")
+    prefs={"download":{"prompt_for_download":False,"default_directory":os.path.expanduser("~/Downloads"),"directory_upgrade":True}}
+    with open(p,"w",encoding="utf-8") as f: json.dump(prefs,f)
+
+
+def cdp_targets(port): return json.load(urllib.request.urlopen(f"http://127.0.0.1:{port}/json/list",timeout=2))
+
+
+def wait_cdp(port,seconds=30):
+    deadline=time.time()+seconds
+    while time.time()<deadline:
+        try: json.load(urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version",timeout=2)); return True
+        except Exception: time.sleep(.4)
     return False
 
 
-def extension_id_from_target(target):
-    match = re.match(r"^chrome-extension://([a-p]{32})/", target.get("url", ""))
-    return match.group(1) if match else None
-
-
-def wait_sw(port, expected_path, seconds=25):
-    """Return the dynamically assigned extension ID for the manifest SW."""
-    suffix = "/" + expected_path.lstrip("/")
-    deadline = time.time() + seconds
-    while time.time() < deadline:
+def wait_sw(port,expected_path,seconds=25):
+    suffix="/"+expected_path; deadline=time.time()+seconds
+    while time.time()<deadline:
         try:
-            for target in cdp_targets(port):
-                if target.get("type") != "service_worker":
-                    continue
-                if not target.get("url", "").endswith(suffix):
-                    continue
-                ext_id = extension_id_from_target(target)
-                if ext_id:
-                    return ext_id
-        except Exception:
-            pass
-        time.sleep(1)
+            for t in cdp_targets(port):
+                if t.get("type")!="service_worker" or not (t.get("url") or "").endswith(suffix): continue
+                m=re.match(r"^chrome-extension://([a-p]{32})/",t.get("url", ""))
+                if m: return m.group(1)
+        except Exception: pass
+        time.sleep(.4)
     return None
 
 
-def print_browser_log(path):
+def print_log_tail(path, limit=30000):
     try:
-        with open(path, encoding="utf-8", errors="replace") as f:
-            text = f.read()
+        with open(path,encoding="utf-8",errors="replace") as f: text=f.read()
         if text:
-            print("[browser stderr tail]")
-            print(text[-10000:])
-    except Exception:
-        pass
+            print("[browser log tail]",flush=True)
+            print(text[-limit:],flush=True)
+    except Exception as exc:
+        print("[browser log unavailable]",repr(exc),flush=True)
+
+
+def browser_run(browser, root, functional=False, fixture_root=None):
+    cdp_port,fixture_port=free_port(),free_port()
+    profile=tempfile.mkdtemp(prefix="ms-browser-profile-")
+    write_prefs(profile)
+    log_path=os.path.join(profile,"browser.log"); log=open(log_path,"w",encoding="utf-8")
+    env=dict(os.environ)
+    bp=subprocess.Popen([
+        browser,"--headless=new",f"--remote-debugging-port={cdp_port}",f"--user-data-dir={profile}",
+        f"--disable-extensions-except={root}",f"--load-extension={root}","--enable-logging=stderr","--v=1",
+        "--no-first-run","--no-default-browser-check","--disable-gpu","--autoplay-policy=no-user-gesture-required","about:blank",
+    ],env=env,stdout=log,stderr=log)
+    fp=None
+    if functional:
+        if not fixture_root: raise RuntimeError("functional browser run requires fixture_root")
+        fp=subprocess.Popen([sys.executable,"-m","http.server",str(fixture_port)],cwd=fixture_root,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+    procs=[p for p in (bp,fp) if p is not None]
+
+    def teardown():
+        for p in procs:
+            if p.poll() is None:
+                try: p.terminate()
+                except Exception: pass
+        for p in procs:
+            try: p.wait(timeout=5)
+            except Exception:
+                try: p.kill()
+                except Exception: pass
+        try: log.close()
+        except Exception: pass
+        if not KEEP: shutil.rmtree(profile,ignore_errors=True)
+
+    try:
+        if not wait_cdp(cdp_port): raise RuntimeError("CDP never came up")
+        ext_id=wait_sw(cdp_port,service_worker_path(root))
+        if not ext_id: raise RuntimeError("service worker never appeared")
+        print(f"[ok] {'functional harness' if functional else 'exact artifact'} service worker awake extension_id={ext_id}",flush=True)
+        if not functional: return True
+
+        e={**env,"CDP_PORT":str(cdp_port),"MEDIA_SNIPER_EXTENSION_ID":ext_id,"MEDIA_SNIPER_E2E_PREGRANTED":"1"}
+        general=subprocess.run([sys.executable,os.path.join(REPO_ROOT,"scripts","e2e_pregranted_test.py"),str(fixture_port)],env=e,timeout=180)
+        if general.returncode!=0:
+            log.flush(); print_log_tail(log_path)
+            return False
+        libav=subprocess.run([sys.executable,os.path.join(REPO_ROOT,"scripts","verify_aes.py"),str(fixture_port)],env=e,timeout=240)
+        if libav.returncode!=0:
+            log.flush(); print_log_tail(log_path)
+            return False
+        return True
+    finally:
+        teardown()
 
 
 def main():
-    cdp_port = free_port()
-    fixture_port = free_port()
-    prefs = write_prefs()
-    print(f"[boot] prefs written: {prefs}")
-    print(f"[boot] extension root: {EXTENSION_ROOT}")
-
-    browser = find_browser()
+    browser=find_browser()
     if not browser:
-        print("[FAIL] no Chromium browser found (install Brave/Chrome/Chromium, or set MEDIA_SNIPER_BRAVE)")
-        return False
-    print(f"[boot] browser: {browser}")
+        print("[FAIL] no Chromium browser found"); return False
+    exact=read_manifest(BASE_EXTENSION_ROOT)
+    if exact.get("host_permissions"):
+        print("[FAIL] exact release artifact has required host_permissions",exact.get("host_permissions")); return False
+    print("[gate 1] exact artifact browser startup",flush=True)
+    if not browser_run(browser,BASE_EXTENSION_ROOT,False): return False
+    if SMOKE_ONLY: return True
 
+    harness=None; fixture=None
     try:
-        expected_sw = manifest_service_worker()
-    except Exception as exc:
-        print(f"[FAIL] {exc}")
-        return False
-    print(f"[boot] expected service worker: {expected_sw}")
-
-    os.makedirs(PROFILE, exist_ok=True)
-    browser_log_path = os.path.join(PROFILE, "browser-e2e.log")
-    browser_log = open(browser_log_path, "w", encoding="utf-8")
-    env = dict(os.environ)
-    browser_cmd = [
-        browser,
-        "--headless=new",
-        f"--remote-debugging-port={cdp_port}",
-        f"--user-data-dir={PROFILE}",
-        # Deterministic automation: runner/browser images can ship built-in or
-        # policy-installed extensions. Explicitly allow only the exact artifact
-        # under test so source-only files can never make an E2E pass accidentally.
-        f"--disable-extensions-except={EXTENSION_ROOT}",
-        f"--load-extension={EXTENSION_ROOT}",
-        "--enable-logging=stderr",
-        "--v=1",
-        "--no-first-run",
-        "--no-default-browser-check",
-        "--disable-gpu",
-        "--autoplay-policy=no-user-gesture-required",
-        "about:blank",
-    ]
-    browser_proc = subprocess.Popen(browser_cmd, env=env, stdout=browser_log, stderr=browser_log)
-    print(f"[boot] browser pid={browser_proc.pid} cdp={cdp_port}")
-
-    fixture_proc = subprocess.Popen(
-        [sys.executable, "-m", "http.server", str(fixture_port)],
-        cwd=os.path.join(REPO_ROOT, "test", "fixture"),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    print(f"[boot] fixture server port={fixture_port}")
-
-    procs = [(browser_proc, "browser"), (fixture_proc, "fixture")]
-
-    def teardown(*_):
-        for proc, _name in procs:
-            if proc.poll() is not None:
-                continue
-            try:
-                proc.terminate()
-            except Exception:
-                pass
-        for proc, _name in procs:
-            try:
-                proc.wait(timeout=5)
-            except Exception:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
-        try:
-            browser_log.flush()
-            browser_log.close()
-        except Exception:
-            pass
-
-    signal.signal(signal.SIGINT, lambda *_: (teardown(), sys.exit(130)))
-    signal.signal(signal.SIGTERM, lambda *_: (teardown(), sys.exit(143)))
-
-    ok = False
-    try:
-        if not wait_cdp(cdp_port):
-            print("[FAIL] CDP never came up")
-            print_browser_log(browser_log_path)
-            return False
-        print("[ok] CDP up")
-
-        ext_id = wait_sw(cdp_port, expected_sw)
-        if not ext_id:
-            print(f"[FAIL] Media Sniper service worker never appeared at {expected_sw}")
-            try:
-                print("[debug] CDP targets:", json.dumps(cdp_targets(cdp_port), ensure_ascii=False)[:6000])
-            except Exception:
-                pass
-            browser_log.flush()
-            print_browser_log(browser_log_path)
-            return False
-        print(f"[ok] service worker awake extension_id={ext_id}")
-
-        e2e_env = dict(env)
-        e2e_env["CDP_PORT"] = str(cdp_port)
-        e2e_env["MEDIA_SNIPER_EXTENSION_ID"] = ext_id
-        result = subprocess.run(
-            [sys.executable, os.path.join(REPO_ROOT, "scripts", "e2e_download_test.py"), str(fixture_port)],
-            env=e2e_env,
-            timeout=180,
-        )
-        ok = result.returncode == 0
+        harness=make_functional_harness(BASE_EXTENSION_ROOT)
+        fixture=make_fixture_harness()
+        print("[gate 2] localhost-only functional harness",flush=True)
+        ok=browser_run(browser,harness,True,fixture)
+        print("RUNNER:","PASS" if ok else "FAIL",flush=True)
         return ok
     finally:
-        if KEEP:
-            print(f"[keep] browser left running: CDP={cdp_port} fixture={fixture_port}")
-            try:
-                browser_log.flush()
-            except Exception:
-                pass
-        else:
-            teardown()
-            print("[teardown] done")
-        print("RUNNER:", "PASS" if ok else "FAIL")
+        if harness and not KEEP: shutil.rmtree(harness,ignore_errors=True)
+        if fixture and not KEEP: shutil.rmtree(fixture,ignore_errors=True)
 
 
-if __name__ == "__main__":
-    sys.exit(0 if main() else 1)
+if __name__=="__main__":
+    try: sys.exit(0 if main() else 1)
+    except Exception as exc:
+        print("RUNNER: FAIL",repr(exc),flush=True); sys.exit(1)

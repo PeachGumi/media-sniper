@@ -51,6 +51,29 @@ jobs:
           console.log('manifest OK', m.version, 'least-privilege host model OK');
           NODE
 
+      - name: Verify reproducible libav provenance
+        run: |
+          node <<'NODE'
+          const fs = require('fs');
+          const crypto = require('crypto');
+          const cfg = JSON.parse(fs.readFileSync('tools/libav/config.json', 'utf8'));
+          const prov = JSON.parse(fs.readFileSync('src/libav/PROVENANCE.json', 'utf8'));
+          if (prov.upstream_repository !== cfg.upstream_repository || prov.upstream_tag !== cfg.upstream_tag || prov.libav_version !== cfg.upstream_version || prov.emscripten_version !== cfg.emscripten_version || prov.variant !== cfg.variant) {
+            throw new Error('libav provenance/config mismatch');
+          }
+          if (JSON.stringify(prov.fragments) !== JSON.stringify(cfg.fragments)) throw new Error('libav fragment provenance mismatch');
+          for (const [name, expected] of Object.entries(prov.artifact_sha256 || {})) {
+            const path = 'src/libav/' + name;
+            if (!fs.existsSync(path)) throw new Error('missing libav artifact: ' + path);
+            const actual = crypto.createHash('sha256').update(fs.readFileSync(path)).digest('hex');
+            if (actual !== expected) throw new Error('libav sha256 mismatch: ' + name + ' ' + actual + ' != ' + expected);
+          }
+          if (fs.existsSync('src/libav/libav-6.5.7.1-h264-aac-mp3.wasm.wasm')) throw new Error('untraceable legacy libav WASM must not remain');
+          const shim = fs.readFileSync('src/libav/libav-6.5.7.1-h264-aac-mp3.wasm.mjs', 'utf8');
+          if (!shim.includes('libav-6.10.9.0-media-sniper.wasm.mjs') || !shim.includes('libav-6.10.9.0-media-sniper.wasm.wasm')) throw new Error('legacy import shim must route to reproducible runtime');
+          console.log('libav provenance OK', prov.upstream_commit, prov.artifact_sha256);
+          NODE
+
       - name: Package
         run: npm run zip
 
@@ -81,7 +104,11 @@ jobs:
           test -f /tmp/media-sniper-package/src/offscreen-policy.js
           test -f /tmp/media-sniper-package/src/offscreen-streaming.js
           test -f /tmp/media-sniper-package/src/offscreen.js
-          test -f /tmp/media-sniper-package/src/libav/libav-6.5.7.1-h264-aac-mp3.wasm.wasm
+          test -f /tmp/media-sniper-package/src/libav/libav-6.5.7.1-h264-aac-mp3.wasm.mjs
+          test -f /tmp/media-sniper-package/src/libav/libav-6.10.9.0-media-sniper.wasm.mjs
+          test -f /tmp/media-sniper-package/src/libav/libav-6.10.9.0-media-sniper.wasm.wasm
+          test -f /tmp/media-sniper-package/src/libav/PROVENANCE.json
+          test ! -e /tmp/media-sniper-package/src/libav/libav-6.5.7.1-h264-aac-mp3.wasm.wasm
           test -f /tmp/media-sniper-package/popup/i18n.js
           test -f /tmp/media-sniper-package/popup/site-access-ui.js
           test -f /tmp/media-sniper-package/popup/access-refresh.js
@@ -90,8 +117,8 @@ jobs:
           test -f /tmp/media-sniper-package/popup/onboarding.html
           test -f /tmp/media-sniper-package/popup/onboarding.js
           sha256sum media-sniper.zip | tee media-sniper.zip.sha256
-          echo "vendored libav wasm:"
-          sha256sum src/libav/libav-6.5.7.1-h264-aac-mp3.wasm.wasm
+          echo "reproducible libav wasm:"
+          sha256sum src/libav/libav-6.10.9.0-media-sniper.wasm.wasm
 
       - name: Privacy scan
         run: |
@@ -121,6 +148,9 @@ jobs:
           test -f /tmp/media-sniper-e2e/manifest.json
           test -f /tmp/media-sniper-e2e/src/site-access.js
           test -f /tmp/media-sniper-e2e/src/offscreen-streaming.js
+          test -f /tmp/media-sniper-e2e/src/libav/libav-6.10.9.0-media-sniper.wasm.wasm
+          test -f /tmp/media-sniper-e2e/src/libav/PROVENANCE.json
+          test ! -e /tmp/media-sniper-e2e/src/libav/libav-6.5.7.1-h264-aac-mp3.wasm.wasm
           echo "MEDIA_SNIPER_EXTENSION_ROOT=/tmp/media-sniper-e2e" >> "$GITHUB_ENV"
 
       - name: Install Chrome for Testing
@@ -141,6 +171,12 @@ jobs:
           printf '#!/bin/sh\nexec "%s" --no-sandbox "$@"\n' "$browser" > "$wrapper"
           chmod +x "$wrapper"
           echo "MEDIA_SNIPER_BRAVE=$wrapper" >> "$GITHUB_ENV"
+
+      - name: Install fixture generator
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
+          ffmpeg -version | head -1
 
       - name: Install E2E dependency
         run: python -m pip install --disable-pip-version-check websockets
@@ -163,6 +199,29 @@ jobs:
           npm run zip
           sha256sum media-sniper.zip > media-sniper.zip.sha256
           cat media-sniper.zip.sha256
+      - name: Build corresponding libav source bundle
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -euxo pipefail
+          eval "$(python3 - <<'PY'
+          import json, shlex
+          c=json.load(open('tools/libav/config.json'))
+          print('LIBAV_TAG='+shlex.quote(c['upstream_tag']))
+          print('LIBAV_COMMIT='+shlex.quote(json.load(open('src/libav/PROVENANCE.json'))['upstream_commit']))
+          print('LIBAV_VARIANT='+shlex.quote(c['variant']))
+          print('LIBAV_FRAGMENTS='+shlex.quote(json.dumps(c['fragments'], separators=(',',':'))))
+          PY
+          )"
+          rm -rf /tmp/media-sniper-libav-source
+          git clone --depth 1 --branch "$LIBAV_TAG" https://github.com/Yahweasel/libav.js /tmp/media-sniper-libav-source
+          test "$(git -C /tmp/media-sniper-libav-source rev-parse HEAD)" = "$LIBAV_COMMIT"
+          (cd /tmp/media-sniper-libav-source/configs && node mkconfig.js "$LIBAV_VARIANT" "$LIBAV_FRAGMENTS")
+          make -C /tmp/media-sniper-libav-source extract
+          rm -rf /tmp/media-sniper-libav-source/.git /tmp/media-sniper-libav-source/dist
+          mkdir -p /tmp/media-sniper-libav-source/media-sniper-recipe
+          cp tools/libav/config.json tools/libav/README.md src/libav/PROVENANCE.json /tmp/media-sniper-libav-source/media-sniper-recipe/
+          tar -C /tmp -czf media-sniper-libav-corresponding-source.tar.gz media-sniper-libav-source
+          sha256sum media-sniper-libav-corresponding-source.tar.gz > media-sniper-libav-corresponding-source.tar.gz.sha256
       - name: Upload verified CI artifact
         uses: actions/upload-artifact@v4
         with:
@@ -172,6 +231,16 @@ jobs:
             media-sniper.zip.sha256
           if-no-files-found: error
           retention-days: 30
+      - name: Upload corresponding source artifact
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4
+        with:
+          name: media-sniper-libav-source-${{ github.sha }}
+          path: |
+            media-sniper-libav-corresponding-source.tar.gz
+            media-sniper-libav-corresponding-source.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 90
       - name: Enforce release-approval gate
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
@@ -182,5 +251,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" media-sniper.zip media-sniper.zip.sha256 \
+          gh release create "$GITHUB_REF_NAME" \
+            media-sniper.zip media-sniper.zip.sha256 \
+            media-sniper-libav-corresponding-source.tar.gz media-sniper-libav-corresponding-source.tar.gz.sha256 \
             --verify-tag --generate-notes --title "Media Sniper $GITHUB_REF_NAME"
