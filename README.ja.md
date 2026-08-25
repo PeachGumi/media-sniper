@@ -129,9 +129,11 @@ npm run zip
 
 Pull Requestと`main`では、unit/syntax、manifest/package/UI version整合、**required host権限がないこと**、optional host scopeがHTTP(S)だけであること、runtime/license/privacy必須ファイル、privacy scan、browser E2Eを自動検査します。
 
-E2Eは `media-sniper.zip` を実際に生成し、そのZIPをクリーンなディレクトリへ展開した配布物そのものを固定versionのChrome for Testingへ読み込みます。クリーンprofileでは常時host権限が0件であることを確認した後、Permissions APIでoptional accessを許可し、dynamic detector登録、media検出、download、permission revoke、detector解除まで検証します。
+E2Eはまず `media-sniper.zip` を実際に生成し、そのZIPをクリーンなディレクトリへ展開した**配布物そのものを無改変**で固定versionのChrome for Testingへ読み込み、required host permissionなしでMV3 service workerが正常起動することを確認します。
 
-さらにlibav media-engine gateとして、**AES-128暗号化HLS fixtureを配布ZIP内の実WASMで復号→stream-copy remux→MP4保存**し、Chromium Downloads完了・100KB超・MP4 `ftyp` signatureまで確認します。WASMが「buildできた」だけでは合格にしません。
+その後、機能E2Eだけは別の一時harnessを使います。headless Chromeではoptional host permissionの対話的な確認UIを自動承認できないため、展開済み配布物をコピーし、**manifestの`host_permissions`だけ**を `http://127.0.0.1/*` に変更します。JavaScript/WASM等のruntime byteは配布物と同一です。permission request/revoke自体はunit/manifest checkとmanual release checklistで検証し、CIがユーザー同意を勝手に承認したことにはしません。
+
+media-engine gateでは、CI内のhost FFmpegから毎回有効なH.264/AAC MPEG-TS HLSとAES-128 HLS fixtureを生成します。まず通常のmedia検出・direct downloadを確認し、その後、平文HLSと暗号化HLSの両方を配布WASMのlibav.js/FFmpegへ通し、`-c copy`でMP4へremux、Chromium Downloads完了、十分な出力サイズ、MP4 `ftyp` signatureまで確認します。古い・壊れたchecked-in binary fixtureをruntime不具合と誤認しない構成です。WASMが「buildできた」だけでは合格にしません。
 
 CIは `src/libav/PROVENANCE.json` に記録されたmodule/WASMのSHA-256を再計算し、固定configと一致しないartifactや旧来の出所不明WASMが混入した場合は失敗します。
 
@@ -151,7 +153,7 @@ Full版にはYouTube adapter、adaptive mux、yt-dlp helperが含まれます。
 
 Media Sniper自身のsourceはMITです。[LICENSE](LICENSE) を参照してください。
 
-現在配布するlibav.js / FFmpeg WebAssembly runtimeは、`Yahweasel/libav.js` tag `v6.10.9.0`、commit `c80e885c3461f7bb7ea565c9631b34243ae0dbf1`、FFmpeg 9.0、Emscripten 6.0.5から生成するMedia Sniper専用の再現buildです。正確なfragment、compiler version、upstream revision、artifact SHA-256は `tools/libav/config.json` と `src/libav/PROVENANCE.json` に固定しています。
+現在配布するlibav.js / FFmpeg WebAssembly runtimeは、`Yahweasel/libav.js` tag `v6.10.9.0`、commit `c80e885c3461f7bb7ea565c9631b34243ae0dbf1`、FFmpeg 9.0、Emscripten 6.0.5から生成するMedia Sniper専用の再現buildです。正確なfragment、compiler version、upstream revision、artifact SHA-256は `tools/libav/config.json` と `src/libav/PROVENANCE.json` に固定しています。AAC/H.264/HEVC decoderはFFmpegが入力streamの幅・高さ・sample parameter等をprobeするためだけに含め、実際のmedia出力は`-c copy`によるremuxのままです。対応encoderは同梱しません。
 
 以前の`v6.5.7.1-61-g823eb97` WASMは正確なsource provenanceを復元できなかったため、現在の配布物・runtimeから削除しました。旧`.mjs` pathだけは既存import互換の薄いshimとして残し、新しい再現runtimeへredirectします。
 
