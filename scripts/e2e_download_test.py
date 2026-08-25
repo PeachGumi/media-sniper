@@ -148,6 +148,22 @@ async def main():
         return
     step("service worker awake", True)
 
+    # Capture the real Web tab ID while it is still active. A Chrome action
+    # popup does not become the active tab; our CDP test popup is a normal tab,
+    # so we restore this Web tab to active before requesting optional access.
+    try:
+        fixture_tab_id = await ws_eval(
+            sw_ws(),
+            "chrome.tabs.query({active:true,currentWindow:true}).then(t=>t[0]&&t[0].id)",
+            timeout=5,
+        )
+        if not isinstance(fixture_tab_id, int):
+            raise RuntimeError("could not resolve active fixture tab")
+        step("capture fixture chrome tab", True, fixture_tab_id)
+    except Exception as e:
+        step("capture fixture chrome tab", False, e)
+        return
+
     popup_url = f"chrome-extension://{EXT_ID}/popup/popup.html"
     try:
         open_tab(popup_url)
@@ -170,10 +186,21 @@ async def main():
         step("no persistent host access by default", False, e)
         return
 
-    # Exercise the production control itself. CDP marks this JavaScript click as
-    # a user gesture; the click handler owns chrome.permissions.request(). We
-    # verify the resulting permission state instead of depending on whether a
-    # particular Chromium version surfaces the Promise return value through CDP.
+    try:
+        active = await ws_eval(
+            popup_ws,
+            f"chrome.tabs.update({fixture_tab_id},{{active:true}}).then(t=>t.id)",
+            timeout=5,
+        )
+        step("restore fixture as active tab", active == fixture_tab_id, active)
+        if active != fixture_tab_id:
+            return
+    except Exception as e:
+        step("restore fixture as active tab", False, e)
+        return
+
+    # Exercise the production control itself while the real Web page remains
+    # the browser's active tab, matching an actual extension action popup.
     try:
         clicked = await ws_eval(
             popup_ws,
