@@ -96,6 +96,7 @@ async def main():
     await asyncio.sleep(2)
     page = target("page", str(FIXTURE_PORT))
     step("fixture page opened", page is not None, page and page.get("url"))
+    page_ws = page["webSocketDebuggerUrl"]
 
     need = {"clip.mp4": False, "audio.mp3": False, "media.m3u8": False}
     deadline = time.time() + 15
@@ -109,6 +110,36 @@ async def main():
         if all(need.values()): break
         await asyncio.sleep(1)
     step("detect direct video/audio/HLS", all(need.values()), need)
+
+    # Simulate a SPA route change that reuses the same <video> element but
+    # replaces its media source. The extension must drop media belonging to the
+    # previous route and automatically scan/report the current route.
+    route = await evaluate(page_ws, """
+        (() => {
+          history.pushState({}, '', '/hls/route-two');
+          document.title = 'MediaSniper route two';
+          const v = document.getElementById('v1');
+          v.src = '/hls/clip.mp4?route=2';
+          v.load();
+          return location.href;
+        })()
+    """)
+    step("SPA route changed", str(route).endswith('/hls/route-two'), route)
+
+    spa_urls = []
+    spa_ok = False
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        raw = await evaluate(sw_ws, "chrome.storage.session.get('msItems').then(r=>JSON.stringify(r.msItems||{}))")
+        stored = decode(raw) or {}
+        spa_urls = [i.get("url", "") for arr in stored.values() for i in arr if f":{FIXTURE_PORT}/" in i.get("url", "")]
+        has_new = any("/hls/clip.mp4?route=2" in u for u in spa_urls)
+        has_old = any(u.endswith("/hls/clip.mp4") for u in spa_urls)
+        if has_new and not has_old:
+            spa_ok = True
+            break
+        await asyncio.sleep(.5)
+    step("SPA navigation clears stale media and rescans", spa_ok, spa_urls)
 
     popup_url = f"chrome-extension://{EXT_ID}/popup/popup.html"
     open_tab(popup_url)
