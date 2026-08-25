@@ -4,8 +4,9 @@
 
 | Version | Supported |
 |---------|-----------|
-| latest on `main` | yes |
-| older tags | no |
+| latest published release | yes |
+| latest on `main` | development / best effort |
+| older releases | no |
 
 ## Reporting a vulnerability
 
@@ -66,7 +67,11 @@ No remote JavaScript or WebAssembly is loaded at runtime.
 
 ### Third-party binary provenance
 
-The vendored libav.js/FFmpeg artifact has a documented downstream modification and unresolved exact corresponding-source provenance. See `THIRD_PARTY_NOTICES.md` and Issue #10. Dependency provenance and license compliance are release-security/supply-chain gates, not merely documentation tasks.
+The bundled libav.js/FFmpeg runtime is reproducibly built from pinned upstream inputs. `tools/libav/config.json` records the build inputs, `src/libav/PROVENANCE.json` records the exact upstream commit and generated artifact hashes, and CI recomputes those hashes before packaging.
+
+Approved `v*` releases attach the matching libav.js/FFmpeg corresponding-source bundle and checksum alongside the extension ZIP. See `THIRD_PARTY_NOTICES.md`, `tools/libav/README.md`, and `docs/RELEASE.md`.
+
+The historical untraceable libav WASM is not shipped by the current release path. Its old import name remains only as a compatibility shim and CI fails if the old WASM binary reappears.
 
 ## Security regression expectations
 
@@ -80,4 +85,4 @@ Changes affecting any of the following should add or update tests:
 - offscreen Blob/fetch ownership and cleanup;
 - permissions or site-access scope.
 
-A commercial/general release should also run the browser E2E suite on the actual packaged artifact and supported browser matrix.
+A public/commercial release must pass the packaged-artifact browser E2E gate and the manual release checklist in `docs/RELEASE.md`. The repository-level release approval marker must remain absent while a release blocker is unresolved.
