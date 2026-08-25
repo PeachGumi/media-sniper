@@ -18,6 +18,9 @@ try {
   // object. Runtime handlers read the object dynamically, so standalone .aac
   // files are accepted while obvious HLS ADTS chunks remain suppressed.
   importScripts('direct-media-guard.js');
+  // Reset stale per-tab media when trusted top-frame page metadata moves to a
+  // different page/SPA route.
+  importScripts('navigation-refresh.js');
   // Mutates the exported MediaSniperLogic object that background.js already
   // references, so all later DASH work uses the inherited-template resolver.
   importScripts('dash-inheritance.js');

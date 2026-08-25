@@ -4,7 +4,7 @@
   "private": true,
   "description": "MV3 media sniffer/downloader: detects videos, HLS streams and audio from any site using the browser's own logged-in session.",
   "scripts": {
-    "test": "node test/logic.test.js && node test/logic2.test.js && node test/logic3.test.js && node test/bridge.test.js && node test/background.test.js && node test/background2.test.js && node test/youtube.test.js && node test/dash-inheritance.test.js && node test/direct-media-guard.test.js && node test/install.test.js && node test/background-lifecycle.test.js && node test/site-access.test.js && node test/offscreen-policy.test.js && node test/offscreen-streaming.test.js && node test/i18n.test.js && node test/security-bootstrap.test.js && node test/security-guard.test.js",
+    "test": "node test/logic.test.js && node test/logic2.test.js && node test/logic3.test.js && node test/bridge.test.js && node test/background.test.js && node test/background2.test.js && node test/youtube.test.js && node test/dash-inheritance.test.js && node test/direct-media-guard.test.js && node test/navigation-refresh.test.js && node test/rescan-controller.test.js && node test/install.test.js && node test/background-lifecycle.test.js && node test/site-access.test.js && node test/offscreen-policy.test.js && node test/offscreen-streaming.test.js && node test/i18n.test.js && node test/security-bootstrap.test.js && node test/security-guard.test.js",
     "check": "for f in src/*.js popup/*.js test/*.js; do node --check $f || exit 1; done",
     "zip": "node scripts/pack.js",
     "e2e": "python3 scripts/run_e2e.py"

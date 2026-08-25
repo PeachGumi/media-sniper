@@ -25,6 +25,7 @@
   var MARKER = 'media-sniper-bridge';
   var MAX_EMIT_PER_PAGE = 500;
   var emitted = 0;
+  var scanPageUrl = String(location.href || '');
 
   var L = window.MediaSniperLogic || {
     classifyUrl: function () { return { kind: null, ext: null }; },
@@ -65,18 +66,25 @@
   }
 
   // ---- video element scanning (blob: sources & src attributes) --------------
-  function scanVideoEls() {
+  function scanVideoEls(force) {
     try {
+      var here = String(location.href || '');
+      if (here !== scanPageUrl) {
+        scanPageUrl = here;
+        emitted = 0;
+      }
       var els = document.querySelectorAll('video, video source, audio');
       for (var i = 0; i < els.length; i++) {
         var el = els[i];
         var src = el.currentSrc || el.src;
-        if (src && src.indexOf('blob:') === 0 && !el.__msEmitted) {
-          el.__msEmitted = true;
+        if (!src) continue;
+        var changed = el.__msEmittedSrc !== src;
+        if (src.indexOf('blob:') === 0 && (force || changed)) {
+          el.__msEmittedSrc = src;
           var dur = el.duration || 0;
           emit({ url: src, kind: 'video', contentType: null, size: 0, via: 'element', duration: dur || 0 });
-        } else if (src && looksMedia(src, null) && !el.__msEmitted) {
-          el.__msEmitted = true;
+        } else if (looksMedia(src, null) && (force || changed)) {
+          el.__msEmittedSrc = src;
           emitMedia(src, null, 0, 'element');
         }
       }
@@ -84,7 +92,9 @@
   }
 
   try {
-    var iv = setInterval(scanVideoEls, 2000);
+    // Do not wait two seconds for the first pass after injection/navigation.
+    scanVideoEls(false);
+    var iv = setInterval(function () { scanVideoEls(false); }, 2000);
     setTimeout(function () { clearInterval(iv); }, 5 * 60 * 1000);
   } catch (e) { /* ignore */ }
 
@@ -115,7 +125,10 @@
     try {
       var d = ev && ev.data;
       if (!d || d.source !== 'media-sniper-content') return;
-      if (d.type === 'scan') scanVideoEls();
+      // Explicit/manual scans must re-report the current source even if the
+      // same element was already seen. This makes Clear -> Rescan work and
+      // refreshes reused elements after SPA navigation.
+      if (d.type === 'scan') scanVideoEls(true);
     } catch (e) { /* ignore */ }
   });
 })();

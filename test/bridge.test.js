@@ -11,8 +11,8 @@ const bridgeSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'bridge.js')
 const posted = [];
 const intervalCbs = [];
 
-const videoEl = { currentSrc: 'blob:https://page.example.com/uuid-1', src: '', duration: 12.5, __msEmitted: false };
-const srcEl = { currentSrc: '', src: 'https://cdn.example.com/vid/movie.mp4', __msEmitted: false };
+const videoEl = { currentSrc: 'blob:https://page.example.com/uuid-1', src: '', duration: 12.5 };
+const srcEl = { currentSrc: '', src: 'https://cdn.example.com/vid/movie.mp4' };
 const elements = [videoEl, srcEl];
 
 function makeContext() {
@@ -64,39 +64,52 @@ async function run() {
 
   ok(ctx.__mediaSniperBridgeInstalled === true, 'bridge installed flag');
 
-  // 1. video element scan: blob + direct src, deduped across scans
+  // 1. first pass is immediate; periodic passes dedupe unchanged sources.
   const scan = intervalCbs[0];
   ok(typeof scan === 'function', 'scan interval registered');
-  scan();
   const blobEmit = posted.find(function (p) { return p.via === 'element' && p.url.indexOf('uuid-1') >= 0; });
-  ok(!!blobEmit, 'blob video emitted');
+  ok(!!blobEmit, 'blob video emitted immediately');
   eq(blobEmit && blobEmit.kind, 'video', 'blob kind=video');
   eq(blobEmit && blobEmit.source, 'media-sniper-bridge', 'marker present');
   eq(blobEmit && blobEmit.pageUrl, 'https://page.example.com/watch/42', 'pageUrl stamped');
   const directEmit = posted.find(function (p) { return p.via === 'element' && p.url.indexOf('movie.mp4') >= 0; });
-  ok(!!directEmit, 'direct src emitted');
+  ok(!!directEmit, 'direct src emitted immediately');
   eq(directEmit && directEmit.kind, 'video', 'direct src kind=video');
   const countAfterFirstScan = posted.length;
   scan();
-  eq(posted.length, countAfterFirstScan, 'second scan dedupes');
+  eq(posted.length, countAfterFirstScan, 'periodic scan dedupes unchanged source');
 
-  // 2. scan command via content-script message triggers a rescan
-  const newEl = { currentSrc: 'https://cdn.example.com/vid/other.webm', src: '', __msEmitted: false };
+  // 2. source changes on a reused media element are detected automatically.
+  srcEl.src = 'https://cdn.example.com/vid/reused-element.mp4';
+  scan();
+  ok(posted.some(function (p) { return p.url.indexOf('reused-element.mp4') >= 0; }), 'reused element with changed src is emitted');
+
+  // 3. explicit scan force-reports current sources. This is required after
+  // Clear and lets a manual rescan rebuild the list even when DOM is unchanged.
+  const beforeForced = posted.filter(function (p) { return p.url && p.url.indexOf('reused-element.mp4') >= 0; }).length;
+  ctx.__messageHandlers.forEach(function (fn) {
+    fn({ data: { source: 'media-sniper-content', type: 'scan' } });
+  });
+  const afterForced = posted.filter(function (p) { return p.url && p.url.indexOf('reused-element.mp4') >= 0; }).length;
+  eq(afterForced, beforeForced + 1, 'explicit scan re-emits unchanged current source');
+
+  // 4. explicit scan also picks up elements added since the last pass.
+  const newEl = { currentSrc: 'https://cdn.example.com/vid/other.webm', src: '' };
   elements.push(newEl);
   ctx.__messageHandlers.forEach(function (fn) {
     fn({ data: { source: 'media-sniper-content', type: 'scan' } });
   });
-  const rescanEmit = posted.find(function (p) { return p.url.indexOf('other.webm') >= 0; });
+  const rescanEmit = posted.find(function (p) { return p.url && p.url.indexOf('other.webm') >= 0; });
   ok(!!rescanEmit, 'scan command picks up new element');
 
-  // 3. playlists are never emitted from the bridge even if a video element
-  //    points at one (webRequest owns validation + variant expansion)
-  const hlsEl = { currentSrc: 'https://cdn.example.com/live/master.m3u8', src: '', __msEmitted: false };
+  // 5. playlists are never emitted from the bridge even if a video element
+  // points at one (webRequest owns validation + variant expansion)
+  const hlsEl = { currentSrc: 'https://cdn.example.com/live/master.m3u8', src: '' };
   elements.push(hlsEl);
   scan();
-  ok(!posted.some(function (p) { return p.url.indexOf('.m3u8') >= 0; }), 'm3u8 NOT emitted by bridge');
+  ok(!posted.some(function (p) { return p.url && p.url.indexOf('.m3u8') >= 0; }), 'm3u8 NOT emitted by bridge');
 
-  // 4. createObjectURL tracking answers blob-size queries
+  // 6. createObjectURL tracking answers blob-size queries
   const fakeBlob = { size: 9999, tag: 'q' };
   const blobUrl = ctx.URL.createObjectURL(fakeBlob);
   ctx.__messageHandlers.forEach(function (fn) {
@@ -106,7 +119,7 @@ async function run() {
   ok(!!sizeMsg, 'blob-size answered');
   eq(sizeMsg && sizeMsg.size, 9999, 'blob size correct');
 
-  // 5. unrelated page messages are ignored
+  // 7. unrelated page messages are ignored
   const beforeLen = posted.length;
   ctx.__messageHandlers.forEach(function (fn) {
     fn({ data: { source: 'some-other-extension', type: 'scan' } });
