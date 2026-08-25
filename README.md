@@ -129,17 +129,17 @@ npm run e2e
 npm run zip
 ```
 
-Pull requests and `main` run unit/syntax checks, manifest/package/UI version validation, runtime/license/privacy artifact checks, privacy scans, and browser E2E. CI builds `media-sniper.zip`, extracts **that exact distribution artifact** into a clean directory, and loads the extracted ZIP contents in pinned Chrome for Testing; source-only files therefore cannot make packaged-artifact E2E pass accidentally.
+Pull requests and `main` run unit/syntax checks, manifest/package/UI version validation, runtime/license/privacy artifact checks, privacy scans, and browser E2E. CI builds `media-sniper.zip`, extracts **that exact distribution artifact** into a clean directory, and first loads the extracted ZIP contents unchanged in pinned Chrome for Testing; source-only files therefore cannot make packaged-artifact startup validation pass accidentally.
 
 CI also verifies the SHA-256 values of the bundled reproducible libav.js module/WASM against `src/libav/PROVENANCE.json` and fails if the historical untraceable WASM reappears in source or package output.
 
-The browser E2E includes a dedicated media-engine gate: an AES-128 encrypted HLS fixture is fetched through the packaged extension, decrypted by the bundled libav.js/FFmpeg runtime, stream-copy remuxed to MP4, written through Chromium Downloads, and checked for a non-trivial MP4 `ftyp` signature.
+The browser E2E then uses a second, isolated functional harness. Headless Chrome cannot approve the interactive optional-host-permission confirmation UI, so the harness copies the exact extracted artifact and changes **only** its manifest to grant `http://127.0.0.1/*`. All runtime JavaScript and WASM bytes remain identical to the distribution artifact. The permission request/revoke policy itself remains covered by unit/manifest checks and the manual release checklist rather than being silently auto-approved in CI.
+
+For the media-engine gate, CI generates fresh valid H.264/AAC MPEG-TS HLS and AES-128 HLS fixtures with the host FFmpeg. It verifies normal detection/direct download first, then runs both plain and encrypted HLS through the bundled libav.js/FFmpeg runtime, stream-copy remuxes to MP4, requires Chromium download completion, and checks for a non-trivial MP4 `ftyp` signature. This avoids treating stale or corrupted checked-in binary fixtures as runtime failures, and a WASM that merely compiles is not accepted.
 
 Only after both the test job and packaged browser E2E succeed does CI create the verified workflow artifact. It contains `media-sniper.zip` and `media-sniper.zip.sha256`.
 
 `v*` tags go through the same jobs. A public GitHub Release is created only after all checks pass, the tag version matches the manifest/package version, and the explicit repository release-approval gate is enabled. The release attaches the ZIP/checksum **and** `media-sniper-libav-corresponding-source.tar.gz` plus its SHA-256 file, generated from the exact pinned libav.js source revision and dependency sources used for the bundled runtime.
-
-The E2E runner uses a throwaway browser profile, starts with no persistent host access, grants optional HTTP(S) access through the real Permissions API, verifies dynamic detector registration/revocation, and loads the exact packaged artifact via `MEDIA_SNIPER_EXTENSION_ROOT`.
 
 See [docs/RELEASE.md](docs/RELEASE.md) for the exact release gate and manual acceptance checklist.
 
@@ -153,7 +153,7 @@ A future Web Store edition would be a separate reviewed flavor and must remove t
 
 Media Sniper's own source is MIT licensed; see [LICENSE](LICENSE).
 
-The shipped libav.js / FFmpeg WebAssembly runtime is now a reproducible Media Sniper-specific build from `Yahweasel/libav.js` tag `v6.10.9.0`, commit `c80e885c3461f7bb7ea565c9631b34243ae0dbf1`, with FFmpeg 9.0 and Emscripten 6.0.5. The exact fragment list, compiler version, upstream revision and artifact SHA-256 values are version-controlled in `tools/libav/config.json` and `src/libav/PROVENANCE.json`.
+The shipped libav.js / FFmpeg WebAssembly runtime is now a reproducible Media Sniper-specific build from `Yahweasel/libav.js` tag `v6.10.9.0`, commit `c80e885c3461f7bb7ea565c9631b34243ae0dbf1`, with FFmpeg 9.0 and Emscripten 6.0.5. The exact fragment list, compiler version, upstream revision and artifact SHA-256 values are version-controlled in `tools/libav/config.json` and `src/libav/PROVENANCE.json`. AAC/H.264/HEVC decoder support is present only so FFmpeg can probe complete input stream parameters; production media output remains `-c copy` stream remuxing and the corresponding encoders are not shipped.
 
 The historical `v6.5.7.1-61-g823eb97` WASM whose exact source provenance could not be established is no longer packaged or used. Its old `.mjs` path remains only as a tiny compatibility shim that redirects callers to the new reproducible runtime.
 
