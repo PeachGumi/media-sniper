@@ -16,6 +16,7 @@ const includes = [
   'THIRD_PARTY_NOTICES.md',
   'PRIVACY.md',
   'DISTRIBUTION.md',
+  'SUPPORT.md',
   'docs/PERMISSIONS.md',
   'docs/MEMORY.md',
   '_locales/en/messages.json',
