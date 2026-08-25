@@ -60,6 +60,7 @@ jobs:
           test -s THIRD_PARTY_NOTICES.md
           test -s docs/RELEASE.md
           ! grep -q 'unresolved exact corresponding-source provenance' SECURITY.md
+          node scripts/sync_libav_license.js --check
           echo 'release policy files OK'
 
       - name: Verify reproducible libav provenance
