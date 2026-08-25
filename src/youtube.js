@@ -17,6 +17,10 @@
   window.__mediaSniperYtInstalled = true;
 
   var MARKER = 'media-sniper-yt';
+  // videoId -> fingerprint of the last emitted URLs. Player responses can be
+  // repeated verbatim, but signed googlevideo URLs can also refresh while the
+  // same video remains open. Deduplicate only identical URL sets, never the
+  // videoId itself.
   var seen = {};
   var buffered = [];   // last report, kept until the content script picks it up
   var bufferedId = null;
@@ -36,13 +40,17 @@
     return null;
   }
 
+  function bitrateOf(f) {
+    return parseInt(f && f.bitrate, 10) || 0;
+  }
+
   function report(pr) {
     try {
       var sd = pr && pr.streamingData;
       var vd = pr && pr.videoDetails;
       if (!sd || !vd) return;
       var videoId = vd.videoId;
-      if (!videoId || seen[videoId]) return;
+      if (!videoId) return;
       var title = vd.title || videoId;
       var duration = parseFloat(vd.lengthSeconds) || 0;
       var pageUrl = location.href;
@@ -61,11 +69,19 @@
         });
       });
 
-      // best audio-only adaptive format (higher quality than progressive audio)
+      // Keep two audio choices. The best audio-only item may be Opus/WebM,
+      // while the MP4 mux path specifically needs an audio/mp4 (m4a) track.
+      // Choosing one global "best audio" first lets a higher-bitrate Opus
+      // track accidentally hide a perfectly valid m4a mux track.
       var bestAudio = null;
+      var bestMuxAudio = null;
       (sd.adaptiveFormats || []).forEach(function (f) {
         if (!f || !f.url || String(f.url).indexOf('http') !== 0 || !/^audio\//.test(f.mimeType || '')) return;
-        if (!bestAudio || (parseInt(f.bitrate, 10) || 0) > (parseInt(bestAudio.bitrate, 10) || 0)) bestAudio = f;
+        if (!bestAudio || bitrateOf(f) > bitrateOf(bestAudio)) bestAudio = f;
+        if (String(f.mimeType || '').indexOf('audio/mp4') === 0 &&
+            (!bestMuxAudio || bitrateOf(f) > bitrateOf(bestMuxAudio))) {
+          bestMuxAudio = f;
+        }
       });
 
       // best VIDEO-ONLY adaptive mp4 + mp4 audio -> mux item (1080p+).
@@ -75,18 +91,17 @@
       (sd.adaptiveFormats || []).forEach(function (f) {
         if (!f || !f.url || String(f.url).indexOf('http') !== 0) return;
         if (String(f.mimeType || '').indexOf('video/mp4') !== 0) return;
-        if (!bestVideoOnly || (parseInt(f.bitrate, 10) || 0) > (parseInt(bestVideoOnly.bitrate, 10) || 0)) bestVideoOnly = f;
+        if (!bestVideoOnly || bitrateOf(f) > bitrateOf(bestVideoOnly)) bestVideoOnly = f;
       });
-      var muxAudio = bestAudio && String(bestAudio.mimeType || '').indexOf('audio/mp4') === 0 ? bestAudio : null;
-      if (bestVideoOnly && muxAudio && muxAudio.url !== bestVideoOnly.url) {
+      if (bestVideoOnly && bestMuxAudio && bestMuxAudio.url !== bestVideoOnly.url) {
         items.push({
           url: bestVideoOnly.url, kind: 'video', contentType: bestVideoOnly.mimeType || null,
-          size: (parseInt(bestVideoOnly.contentLength, 10) || 0) + (parseInt(muxAudio.contentLength, 10) || 0),
+          size: (parseInt(bestVideoOnly.contentLength, 10) || 0) + (parseInt(bestMuxAudio.contentLength, 10) || 0),
           ext: 'mp4',
           title: title + ' [' + (bestVideoOnly.qualityLabel || bestVideoOnly.quality || '?') + ']+音声',
           via: 'youtube', pageUrl: pageUrl, duration: duration,
           ytVideoId: videoId,
-          audioUrl: muxAudio.url,
+          audioUrl: bestMuxAudio.url,
         });
       }
 
@@ -102,7 +117,11 @@
       }
 
       if (!items.length) return;
-      seen[videoId] = true;
+      var fingerprint = items.map(function (item) {
+        return String(item.url || '') + '\n' + String(item.audioUrl || '');
+      }).join('\n--\n');
+      if (seen[videoId] === fingerprint) return;
+      seen[videoId] = fingerprint;
       buffered = items;
       bufferedId = videoId;
       postReport(items, videoId);
