@@ -4,8 +4,12 @@ on:
   push:
     branches: [fix/reproducible-libav]
     paths:
-      - 'tools/libav/**'
+      - 'tools/libav/config.json'
       - '.github/workflows/rebuild-libav.yml'
+
+concurrency:
+  group: rebuild-libav-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: write
