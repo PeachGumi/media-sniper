@@ -14,6 +14,10 @@ importScripts('security-guard.js');
 MediaSniperSecurity.prepare(chrome);
 try {
   importScripts('background.js');
+  // Refine the legacy segment heuristic after background.js exports its logic
+  // object. Runtime handlers read the object dynamically, so standalone .aac
+  // files are accepted while obvious HLS ADTS chunks remain suppressed.
+  importScripts('direct-media-guard.js');
   // Mutates the exported MediaSniperLogic object that background.js already
   // references, so all later DASH work uses the inherited-template resolver.
   importScripts('dash-inheritance.js');
