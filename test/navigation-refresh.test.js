@@ -21,12 +21,16 @@ const source = fs.readFileSync(path.join(__dirname, '../src/navigation-refresh.j
   eq(p.sameOriginNavigationUrl('https://a.test/watch/2', 'https://a.test/watch/1'), 'https://a.test/watch/2', 'same-origin SPA URL accepted');
   eq(p.sameOriginNavigationUrl('https://evil.test/watch/2', 'https://a.test/watch/1'), null, 'cross-origin SPA URL rejected');
   eq(p.sameOriginNavigationUrl('javascript:alert(1)', 'https://a.test/watch/1'), null, 'non-http SPA URL rejected');
+  eq(p.originPattern('https://a.test:8443/watch'), 'https://a.test/*', 'site origin pattern follows Chrome host matching');
+  eq(p.isYoutube('https://www.youtube.com/watch?v=x'), true, 'YouTube host recognized');
 }
 
 {
   let persistCalls = 0;
   let badgeTab = null;
   const listeners = [];
+  const tabUpdatedListeners = [];
+  const injected = [];
   const state = {
     itemsByTab: new Map([[7, [{ pageUrl: 'https://a.test/old', url: 'https://cdn.test/old.mp4' }]]]),
     pageMeta: new Map([[7, { title: 'old', url: 'https://a.test/old' }]]),
@@ -38,6 +42,15 @@ const source = fs.readFileSync(path.join(__dirname, '../src/navigation-refresh.j
       runtime: {
         id: 'extid',
         onMessage: { addListener: function (fn) { listeners.push(fn); } },
+      },
+      tabs: {
+        onUpdated: { addListener: function (fn) { tabUpdatedListeners.push(fn); } },
+      },
+      permissions: {
+        contains: async function () { return false; },
+      },
+      scripting: {
+        executeScript: async function (details) { injected.push(details); return []; },
       },
     },
     persistItems: function () { persistCalls++; },
@@ -66,6 +79,14 @@ const source = fs.readFileSync(path.join(__dirname, '../src/navigation-refresh.j
   }, function (r) { response = r; });
   eq(response && response.ok, false, 'cross-origin navigation claim rejected');
   eq(state.itemsByTab.has(7), true, 'rejected claim cannot clear tab media');
+
+  // A real document navigation must reset the old page immediately. The
+  // reinjection itself is asynchronous, but the reset is synchronous with the
+  // trusted tabs.onUpdated URL signal.
+  eq(tabUpdatedListeners.length, 1, 'full-navigation listener registered');
+  tabUpdatedListeners[0](7, { url: 'https://a.test/full-page' }, { id: 7, title: 'full page', url: 'https://a.test/full-page' });
+  eq(state.pageMeta.get(7).url, 'https://a.test/full-page', 'full navigation stores new page identity');
+  eq(state.itemsByTab.has(7), false, 'full navigation clears stale media immediately');
 }
 
 report('navigation-refresh');
