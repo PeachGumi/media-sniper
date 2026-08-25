@@ -26,6 +26,7 @@ const includes = [
   'src/content.js',
   'src/background-entry.js',
   'src/background-lifecycle.js',
+  'src/direct-media-guard.js',
   'src/site-access.js',
   'src/install.js',
   'src/security-bootstrap.js',
