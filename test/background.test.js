@@ -70,7 +70,7 @@ function makeChrome() {
             .then(function (res) {
               if (!res.ok) return { error: 'http ' + res.status };
               return res.arrayBuffer().then(function (buf) {
-                return { url: 'blob:fake/combined-' + buf.byteLength, size: buf.byteLength };
+                return { url: 'blob:chrome-extension://testextensionid/combined-' + buf.byteLength, size: buf.byteLength };
               });
             });
         }
@@ -87,7 +87,7 @@ function makeChrome() {
           return Promise.all(all.map(fetchOne)).then(function (bufs) {
             let total = 0;
             bufs.forEach(function (b) { total += b.byteLength; });
-            return { url: 'blob:fake/combined-' + total, size: total };
+            return { url: 'blob:chrome-extension://testextensionid/combined-' + total, size: total };
           }).catch(function (err) { return { error: String(err && err.message || err) }; });
         }
         if (msg && msg.type === 'ms-offscreen-ffmpeg-status') {
@@ -105,11 +105,11 @@ function makeChrome() {
             return new Promise(function (resolve) { chrome.__ffmpegLiveResolve = resolve; });
           }
           // emulate a VOD remux: real ffmpeg would jsfetch everything itself
-          chrome.__ffmpegDone = { jobId: msg.jobId, url: 'blob:fake/ffmpeg-remux', size: 5000, ext: msg.ext, partial: false };
+          chrome.__ffmpegDone = { jobId: msg.jobId, url: 'blob:chrome-extension://testextensionid/ffmpeg-remux', size: 5000, ext: msg.ext, partial: false };
           return Promise.resolve({ url: chrome.__ffmpegDone.url, size: chrome.__ffmpegDone.size, partial: false });
         }
         if (msg && msg.type === 'ms-offscreen-mux-local') {
-          return Promise.resolve({ url: 'blob:fake/mux-local', size: 7777 });
+          return Promise.resolve({ url: 'blob:chrome-extension://testextensionid/mux-local', size: 7777 });
         }
         if (msg && msg.type === 'ms-offscreen-dash-build') {
           chrome.__dashBuilds.push(msg);
@@ -131,14 +131,14 @@ function makeChrome() {
           return Promise.all(urls.map(fetchOne)).then(function (bufs) {
             let total = 0;
             bufs.forEach(function (b) { total += b.byteLength; });
-            return { url: 'blob:fake/dash-' + total, size: total };
+            return { url: 'blob:chrome-extension://testextensionid/dash-' + total, size: total };
           }).catch(function (err) { return { error: String(err && err.message || err) }; });
         }
         if (msg && msg.type === 'ms-offscreen-ffmpeg-abort') {
           if (chrome.__ffmpegLiveResolve) {
             const resolve = chrome.__ffmpegLiveResolve;
             chrome.__ffmpegLiveResolve = null;
-            resolve({ url: 'blob:fake/ffmpeg-live-partial', size: 3000, partial: true });
+            resolve({ url: 'blob:chrome-extension://testextensionid/ffmpeg-live-partial', size: 3000, partial: true });
             return Promise.resolve({ ok: true });
           }
           return Promise.resolve({ ok: false });
@@ -273,9 +273,10 @@ async function run() {
     { url: 'https://cdn.example.com/a.mp4?tok=1', kind: 'video', size: 0 },
     { url: 'https://cdn.example.com/b.m3u8', kind: 'hls' },
     { url: 'blob:https://site.example.com/u1', kind: 'video' },
+    { url: 'blob:chrome-extension://' + 'a'.repeat(32) + '/assembled', kind: 'video', ext: 'aac', size: 123 },
     { url: 'https://site.example.com/page.html' },
   ], tabId: 1 });
-  eq(r.added, 3, '3 distinct items added (query dup merged, html rejected)');
+  eq(r.added, 3, '3 distinct items added (page blob rejected as dead, query dup merged, html rejected)');
   r = await send(chrome, { type: 'ms-get-items', tabId: 1 });
   eq(r.items.length, 3, 'get-items returns 3');
   eq(r.items[0].kind, 'video', 'video sorted first');
@@ -323,7 +324,7 @@ async function run() {
   await flush();
 
   // --- 5. blob download: same filename-option path, no listener machinery ----
-  await send(chrome, { type: 'ms-download-blob', url: 'blob:https://site.example.com/blob1', kind: 'video' }, {});
+  await send(chrome, { type: 'ms-download-blob', url: 'blob:chrome-extension://' + 'a'.repeat(32) + '/blob1', kind: 'video' }, {});
   await flush();
   const blobDl = chrome.downloads.__downloads[chrome.downloads.__downloads.length - 1];
   eq(blobDl.opts.filename, 'video_blob1.mp4', 'blob download carries flat computed filename');

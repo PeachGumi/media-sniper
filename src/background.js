@@ -77,6 +77,13 @@ function normalizeItem(raw, tabId) {
   if (!raw || !raw.url) return null;
   const url = String(raw.url);
   if (url.indexOf('data:') === 0 || url.indexOf('chrome-extension:') === 0) return null;
+  // Page-created blob URLs (MSE players, X above all) are revoked by the page
+  // the moment playback context changes; downloading one reliably fails with
+  // SERVER_CANCELED and Chrome surfaces it as "check your internet
+  // connection". They were dead weight in the list. Real downloads of page
+  // media go through http(s) detection or our own assembled artifacts, which
+  // arrive as blob:chrome-extension:// URLs from HLS/DASH jobs.
+  if (url.indexOf('blob:') === 0 && url.indexOf('blob:chrome-extension://') !== 0) return null;
   // never report individual HLS/DASH segments (clutters the list)
   if (L.isSegmentUrl(url)) return null;
   const kind = raw.kind || L.kindFromContentType(raw.contentType || null, url);

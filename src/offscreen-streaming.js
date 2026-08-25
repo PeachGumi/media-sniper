@@ -102,11 +102,29 @@
     return streamResponseInto(writable, response, budget, state);
   }
 
-  async function fileUrl(temp, mime) {
+  async function fileUrl(temp, mime, typed) {
     const file = await temp.handle.getFile();
     if (file.size > MAX_DISK_ASSEMBLY_BYTES) {
       await removeTemp(temp.name);
       throw new RangeError('media exceeds supported assembly limit');
+    }
+    // Two distinct consumers need two distinct URL kinds:
+    // - chrome.downloads CANNOT save a blob: URL whose backing is an OPFS
+    //   file (or a Blob wrapping one): the transfer dies instantly with
+    //   USER_CANCELED ("check your internet connection" in the popup).
+    //   Final user-facing artifacts therefore must be plain in-memory Blobs,
+    //   typed so the saved filename keeps the right extension (an untyped
+    //   body gets sniffed — ADTS/AAC's ID3 header reads as text/plain and
+    //   silently renamed the file to .txt). Size is already capped by the
+    //   assembly budget, matching the legacy full-buffer peak.
+    // - DASH mux inputs are fetched back in-page by the ffmpeg wasm runtime,
+    //   never downloaded, so they keep the zero-copy OPFS File URL.
+    if (typed) {
+      const mime_ = mime || 'application/octet-stream';
+      const data = new Uint8Array(await file.arrayBuffer());
+      const url = URL.createObjectURL(new Blob([data], { type: mime_ }));
+      filesByUrl.set(url, temp.name);
+      return { url, size: file.size, mime: mime_ };
     }
     const url = URL.createObjectURL(file);
     filesByUrl.set(url, temp.name);
@@ -122,7 +140,8 @@
       await appendUrl(writable, msg.url, msg.headers, MAX_DISK_ASSEMBLY_BYTES, state);
       await writable.close();
       writable = null;
-      return fileUrl(temp, msg.mime);
+      // final user-facing artifact: typed in-memory Blob (downloadable)
+      return fileUrl(temp, msg.mime, true);
     } catch (e) {
       try { if (writable) await writable.abort(); } catch (_) {}
       await removeTemp(temp.name);
@@ -156,7 +175,8 @@
       }
       await writable.close();
       writable = null;
-      return fileUrl(temp, msg.mime || 'application/octet-stream');
+      // final user-facing artifact: typed in-memory Blob (downloadable)
+      return fileUrl(temp, msg.mime || 'application/octet-stream', true);
     } catch (e) {
       try { if (writable) await writable.abort(); } catch (_) {}
       await removeTemp(temp.name);
