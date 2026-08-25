@@ -1,7 +1,7 @@
 {
   "artifact_sha256": {
-    "libav-6.10.9.0-media-sniper.wasm.mjs": "edae5d0dc7facfa59355b43e2c4d2b15997d73b4e082c38d1cf8a50d6831f761",
-    "libav-6.10.9.0-media-sniper.wasm.wasm": "a0a6cb0383a0deaecf123c7b083f10b139eee60774ff18d2fe1b729adfb69638"
+    "libav-6.10.9.0-media-sniper.wasm.mjs": "2ff2d0c7f5c2fe47972c3b4aba8454d45a931ea0dd8674cd03f1e4f92076d85e",
+    "libav-6.10.9.0-media-sniper.wasm.wasm": "f7003217799f263ae503135e070e03d2d2652caca529c837e75867712f6689fd"
   },
   "dependency_source_archive_sha256": {
     "emfiberthreads-1.3.tar.gz": "0fe933d7742de3b3213608e0fb087a1ae0d060604d5835f7c9cdfcee0fc8cbcb",
@@ -35,6 +35,9 @@
     "parser-vp8",
     "parser-vp9",
     "parser-av1",
+    "decoder-aac",
+    "decoder-h264",
+    "decoder-hevc",
     "bsf-aac_adtstoasc",
     "bsf-extract_extradata",
     "bsf-h264_metadata",
