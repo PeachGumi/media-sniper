@@ -10,11 +10,11 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: 24
 
       - name: Unit tests
         run: npm test
@@ -50,6 +50,18 @@ jobs:
           }
           console.log('manifest OK', m.version, 'least-privilege host model OK');
           NODE
+
+      - name: Verify release policy files
+        run: |
+          test -s PRIVACY.md
+          test -s DISTRIBUTION.md
+          test -s SUPPORT.md
+          test -s SECURITY.md
+          test -s THIRD_PARTY_NOTICES.md
+          test -s docs/RELEASE.md
+          ! grep -q 'unresolved exact corresponding-source provenance' SECURITY.md
+          node scripts/sync_libav_license.js --check
+          echo 'release policy files OK'
 
       - name: Verify reproducible libav provenance
         run: |
@@ -88,6 +100,7 @@ jobs:
           test -f /tmp/media-sniper-package/THIRD_PARTY_NOTICES.md
           test -f /tmp/media-sniper-package/PRIVACY.md
           test -f /tmp/media-sniper-package/DISTRIBUTION.md
+          test -f /tmp/media-sniper-package/SUPPORT.md
           test -f /tmp/media-sniper-package/docs/PERMISSIONS.md
           test -f /tmp/media-sniper-package/docs/MEMORY.md
           test -f /tmp/media-sniper-package/_locales/en/messages.json
@@ -129,13 +142,13 @@ jobs:
   e2e:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: 24
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
 
@@ -146,6 +159,7 @@ jobs:
           mkdir -p /tmp/media-sniper-e2e
           unzip -q media-sniper.zip -d /tmp/media-sniper-e2e
           test -f /tmp/media-sniper-e2e/manifest.json
+          test -f /tmp/media-sniper-e2e/SUPPORT.md
           test -f /tmp/media-sniper-e2e/src/site-access.js
           test -f /tmp/media-sniper-e2e/src/offscreen-streaming.js
           test -f /tmp/media-sniper-e2e/src/libav/libav-6.10.9.0-media-sniper.wasm.wasm
@@ -190,10 +204,10 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: 24
       - name: Rebuild verified artifact and checksum
         run: |
           npm run zip

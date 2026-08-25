@@ -25,6 +25,22 @@ The functional gate generates fresh valid H.264/AAC MPEG-TS HLS and AES-128 HLS 
 
 This generated-fixture design deliberately avoids treating stale or corrupted checked-in binary media as a runtime regression.
 
+## Repository controls
+
+Before v1.0 or any paid/general release is approved, `main` must be protected in GitHub repository settings.
+
+Minimum expected controls:
+
+- require a pull request before merging to `main`;
+- require the `test`, `e2e`, and `artifact` CI checks to succeed before merge;
+- block force-pushes and branch deletion;
+- do not allow administrators to routinely bypass the release checks;
+- keep the branch up to date with its base before merge when GitHub offers that requirement.
+
+The exact GitHub UI/ruleset representation may change over time, but the invariant is that a normal code path must not be able to land on `main` while the release CI is red.
+
+Branch protection is a repository-administration setting, not something the extension source can enforce. Verify it directly in repository settings before adding the release approval marker.
+
 ## Public GitHub Release
 
 For a tag such as `v1.0.0`:
@@ -32,6 +48,7 @@ For a tag such as `v1.0.0`:
 - the tag version must exactly equal `manifest.json` and `package.json`;
 - test and packaged-artifact browser E2E must both pass;
 - the bundled libav.js module/WASM hashes must match `src/libav/PROVENANCE.json`;
+- the repository controls above must already be active;
 - the repository must contain `docs/RELEASE_APPROVED` with exactly the text `approved`;
 - only then does CI call `gh release create`.
 
@@ -44,7 +61,7 @@ An approved release attaches:
 
 The corresponding-source bundle is assembled from the exact pinned libav.js revision, generated custom variant configuration, extracted dependency sources, rebuild recipe, and shipped provenance used for the runtime binary.
 
-`docs/RELEASE_APPROVED` is intentionally absent while a commercial/v1.0 release blocker remains. It is a final explicit repository-level release switch, not a substitute for resolving the tracked blockers.
+`docs/RELEASE_APPROVED` is intentionally absent while a commercial/v1.0 release blocker remains. It is a final explicit repository-level release switch, not a substitute for resolving the tracked blockers or enabling repository controls.
 
 ## Chrome for Testing
 
@@ -57,11 +74,13 @@ The functional HLS fixtures are generated at test time and therefore require a h
 Before adding `docs/RELEASE_APPROVED` and creating a `v*` tag:
 
 - all v1.0 blocker issues in the release-readiness tracker are resolved or explicitly scoped out with documented rationale;
-- privacy, permissions, security, third-party notices, supported browsers, and known limitations match the actual artifact;
+- `main` branch protection/rulesets enforce the required CI checks described above;
+- privacy, permissions, security, third-party notices, `SUPPORT.md`, and known limitations match the actual artifact;
 - optional site/all-sites grant and revoke are manually exercised in a normal interactive browser, because CI does not auto-approve permission consent;
 - libav.js/FFmpeg corresponding-source and build provenance requirements are satisfied for commercial distribution;
 - large-media behavior is within the documented safety envelope;
-- clean-profile install → disclosure → detect → save has been accepted on supported browser/OS combinations;
+- clean-profile install → disclosure → detect → save has been accepted on every browser/OS combination claimed as verified in release notes;
+- the release notes name those verified browser/OS combinations instead of implying a broader matrix;
 - support/update/refund policy is defined for any paid distribution channel.
 
 Do not manually upload a different ZIP to a release and call it CI-verified. The release assets are expected to be the outputs created by the tag workflow.

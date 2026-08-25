@@ -1,11 +1,11 @@
-License notice shipped inside the vendored ffmpeg WASM build
-(src/libav/libav-6.5.7.1-h264-aac-mp3.wasm.*), redistributed unmodified.
-See https://ffmpeg.org/legal.html and https://libav.js.org.
-
-===== original header (verbatim) =====
+License notices extracted from the libav.js/FFmpeg WebAssembly module shipped by Media Sniper.
+Runtime: src/libav/libav-6.10.9.0-media-sniper.wasm.mjs / .wasm
+Build provenance: src/libav/PROVENANCE.json and tools/libav/config.json
+This file is generated from the shipped module header; do not edit it independently.
 
 /*!
- * libav.js v6.5.7.1-61-g823eb97
+ * libav.js v6.10.9.0
+ *
  * This software is compiled from several sources, the licenses for which are
  * included herein.
  *
@@ -13,7 +13,7 @@ See https://ffmpeg.org/legal.html and https://libav.js.org.
  *
  * ffmpeg:
  *
- *  Copyright (c) 2000-2023 Fabrice Bellard et al
+ *  Copyright (c) 2000-2024 Fabrice Bellard et al
  *
  *                   GNU LESSER GENERAL PUBLIC LICENSE
  *                        Version 2.1, February 1999
@@ -521,127 +521,10 @@ See https://ffmpeg.org/legal.html and https://libav.js.org.
  *
  * ---
  *
- * ffmpeg-faandct:
- *
- * Copyright (c) 2003 Michael Niedermayer <michaelni@gmx.at>
- * Copyright (c) 2003 Roman Shaposhnik
- *
- * Permission to use, copy, modify, and/or distribute this software for any
- * purpose with or without fee is hereby granted, provided that the above
- * copyright notice and this permission notice appear in all copies.
- *
- * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
- * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
- * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
- * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
- * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
- * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
- * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
- *
- *
- * ---
- *
- * ffmepg (JPEG components):
- *
- * The authors make NO WARRANTY or representation, either express or implied,
- * with respect to this software, its quality, accuracy, merchantability, or
- * fitness for a particular purpose.  This software is provided "AS IS", and
- * you, its user, assume the entire risk as to its quality and accuracy.
- *
- * This software is copyright (C) 1991, 1992, Thomas G. Lane.
- * All Rights Reserved except as specified below.
- *
- * Permission is hereby granted to use, copy, modify, and distribute this
- * software (or portions thereof) for any purpose, without fee, subject to
- * these conditions:
- * (1) If any part of the source code for this software is distributed, then
- * this README file must be included, with this copyright and no-warranty
- * notice unaltered; and any additions, deletions, or changes to the original
- * files must be clearly indicated in accompanying documentation.
- * (2) If only executable code is distributed, then the accompanying
- * documentation must state that "this software is based in part on the work
- * of the Independent JPEG Group".
- * (3) Permission for use of this software is granted only if the user accepts
- * full responsibility for any undesirable consequences; the authors accept
- * NO LIABILITY for damages of any kind.
- *
- * These conditions apply to any software derived from or based on the IJG
- * code, not just to the unmodified library.  If you use our work, you ought
- * to acknowledge us.
- *
- * Permission is NOT granted for the use of any IJG author's name or company
- * name in advertising or publicity relating to this software or products
- * derived from it.  This software may be referred to only as "the Independent
- * JPEG Group's software".
- *
- * We specifically permit and encourage the use of this software as the basis
- * of commercial products, provided that all warranty or liability claims are
- * assumed by the product vendor.
- *
- *
- * ---
- *
- * ffmpeg-avsscanf:
- *
- * Copyright (c) 2005-2014 Rich Felker, et al.
- *
- * Permission is hereby granted, free of charge, to any person obtaining
- * a copy of this software and associated documentation files (the
- * "Software"), to deal in the Software without restriction, including
- * without limitation the rights to use, copy, modify, merge, publish,
- * distribute, sublicense, and/or sell copies of the Software, and to
- * permit persons to whom the Software is furnished to do so, subject to
- * the following conditions:
- *
- * The above copyright notice and this permission notice shall be
- * included in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
- * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
- * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
- * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
- * CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
- * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
- * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
- *
- *
- * ---
- *
- * libopenh264:
- *
- * Copyright (c) 2013, Cisco Systems
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without modification,
- * are permitted provided that the following conditions are met:
- *
- * * Redistributions of source code must retain the above copyright notice, this
- *   list of conditions and the following disclaimer.
- *
- * * Redistributions in binary form must reproduce the above copyright notice, this
- *   list of conditions and the following disclaimer in the documentation and/or
- *   other materials provided with the distribution.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR
- * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
- * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
- * ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
- * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- *
- *
- *
- * ---
- *
  * emscripten and musl:
  *
- * Copyright (c) 2010-2023 Emscripten authors, see AUTHORS file.
- * Copyright © 2005-2023 Rich Felker, et al.
+ * Copyright (c) 2010-2026 Emscripten authors, see AUTHORS file.
+ * Copyright © 2005-2026 Rich Felker, et al.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to
@@ -661,10 +544,6 @@ See https://ffmpeg.org/legal.html and https://libav.js.org.
  * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
  * IN THE SOFTWARE.
  *
- * emcc (Emscripten gcc/clang-like replacement + linker emulating GNU ld) 3.1.71 (4171ae200b77a6c266b0e1ebb507d61d1ade3501)
+ * emcc (Emscripten gcc/clang-like replacement + linker emulating GNU ld) 6.0.5 (1db513782be24469589d7cb8a1f1834e9a33f271)
  *
- */var Wt=(()=>{var me=import.meta.url;return(async function(te={}){var W,r=te,N,ve,O=new Promise((e,a)=>{N=e,ve=a}),_e=typeof window=="object",le=typeof WorkerGlobalScope<"u",L=typeof process=="object"&&typeof process.versions=="object"&&typeof process.versions.node=="string"&&process.type!="renderer";if(L){const{createRequire:e}=await import("module");let a=import.meta.url;a.startsWith("data:")&&(a="/");var Pe=e(a)}let ue;typeof ue>"u"&&(typeof LibAV=="object"&&LibAV&&LibAV.base?ue=LibAV.base+"/libav-6.5.7.1-h264-aac-mp3.wasm.mjs":typeof self=="object"&&self&&self.location&&(ue=self.location.href)),typeof requestAnimation<"u"&&(r.thisProgram="./thisProgram"),typeof this_program=="string"&&(r.thisProgram=this_program),r.printErr=console.log.bind(console),typeof _LOG>"u"&&(r.printErr=()=>{},r.print=()=>{}),r.locateFile=function(e,a){if(e.lastIndexOf(".wasm")===e.length-5&&e.indexOf("libav-")!==-1){if(r.wasmurl)return r.wasmurl;if(r.variant)return a+"libav-6.5.7.1-"+r.variant+".wasm.wasm"}return a+e};var Le=Object.assign({},r),Qr=[],cr="./this.program",ir=(e,a)=>{throw a},Z="";function $t(e){return r.locateFile?r.locateFile(e,Z):Z+e}var He,Ee;if(L){var mr=Pe("fs"),lr=Pe("path");import.meta.url.startsWith("data:")||(Z=lr.dirname(Pe("url").fileURLToPath(import.meta.url))+"/"),Ee=e=>{e=$e(e)?new URL(e):lr.normalize(e);var a=mr.readFileSync(e);return a},He=(e,a=!0)=>(e=$e(e)?new URL(e):lr.normalize(e),new Promise((t,_)=>{mr.readFile(e,a?void 0:"utf8",(n,i)=>{n?_(n):t(a?i.buffer:i)})})),!r.thisProgram&&process.argv.length>1&&(cr=process.argv[1].replace(/\\/g,"/")),Qr=process.argv.slice(2),ir=(e,a)=>{throw process.exitCode=e,a}}else(_e||le)&&(le?Z=self.location.href:typeof document<"u"&&document.currentScript&&(Z=document.currentScript.src),ue&&(Z=ue),Z.startsWith("blob:")?Z="":Z=Z.substr(0,Z.replace(/[?#].*/,"").lastIndexOf("/")+1),le&&(Ee=e=>{var a=new XMLHttpRequest;return a.open("GET",e,!1),a.responseType="arraybuffer",a.send(null),new Uint8Array(a.response)}),He=e=>$e(e)?new Promise((a,t)=>{var _=new XMLHttpRequest;_.open("GET",e,!0),_.responseType="arraybuffer",_.onload=()=>{if(_.status==200||_.status==0&&_.response){a(_.response);return}t(_.status)},_.onerror=t,_.send(null)}):fetch(e,{credentials:"same-origin"}).then(a=>a.ok?a.arrayBuffer():Promise.reject(new Error(a.status+" : "+a.url))));var ur=r.print||console.log.bind(console),ne=r.printErr||console.error.bind(console);Object.assign(r,Le),Le=null,r.arguments&&(Qr=r.arguments),r.thisProgram&&(cr=r.thisProgram);var Be=r.wasmBinary,qe,oe=!1,pe,$,Ae,Ve,Yt,V,z,Jt,ea;function ra(){var e=qe.buffer;r.HEAP8=$=new Int8Array(e),r.HEAP16=Ve=new Int16Array(e),r.HEAPU8=Ae=new Uint8Array(e),r.HEAPU16=Yt=new Uint16Array(e),r.HEAP32=V=new Int32Array(e),r.HEAPU32=z=new Uint32Array(e),r.HEAPF32=Jt=new Float32Array(e),r.HEAPF64=ea=new Float64Array(e)}var aa=[],ta=[],_a=[],Xt=!1;function Gt(){if(r.preRun)for(typeof r.preRun=="function"&&(r.preRun=[r.preRun]);r.preRun.length;)Qt(r.preRun.shift());pr(aa)}function Kt(){Xt=!0,!r.noFSInit&&!o.initialized&&o.init(),o.ignorePermissions=!1,ce.init(),pr(ta)}function Zt(){if(r.postRun)for(typeof r.postRun=="function"&&(r.postRun=[r.postRun]);r.postRun.length;)r_(r.postRun.shift());pr(_a)}function Qt(e){aa.unshift(e)}function e_(e){ta.unshift(e)}function r_(e){_a.unshift(e)}var de=0,dr=null,De=null;function Lv(e){return e}function fr(e){de++,r.monitorRunDependencies?.(de)}function We(e){if(de--,r.monitorRunDependencies?.(de),de==0&&(dr!==null&&(clearInterval(dr),dr=null),De)){var a=De;De=null,a()}}function se(e){r.onAbort?.(e),e="Aborted("+e+")",ne(e),oe=!0,e+=". Build with -sASSERTIONS for more info.";var a=new WebAssembly.RuntimeError(e);throw ve(a),a}var a_="data:application/octet-stream;base64,",na=e=>e.startsWith(a_),$e=e=>e.startsWith("file://");function t_(){if(r.locateFile){var e="libav-6.5.7.1-h264-aac-mp3.wasm.wasm";return na(e)?e:$t(e)}return new URL("libav-6.5.7.1-h264-aac-mp3.wasm.wasm",import.meta.url).href}var vr;function oa(e){if(e==vr&&Be)return new Uint8Array(Be);if(Ee)return Ee(e);throw"both async and sync fetching of the wasm failed"}function __(e){return Be?Promise.resolve().then(()=>oa(e)):He(e).then(a=>new Uint8Array(a),()=>oa(e))}function sa(e,a,t){return __(e).then(_=>WebAssembly.instantiate(_,a)).then(t,_=>{ne(`failed to asynchronously prepare wasm: ${_}`),se(_)})}function n_(e,a,t,_){return!e&&typeof WebAssembly.instantiateStreaming=="function"&&!na(a)&&!$e(a)&&!L&&typeof fetch=="function"?fetch(a,{credentials:"same-origin"}).then(n=>{var i=WebAssembly.instantiateStreaming(n,t);return i.then(_,function(m){return ne(`wasm streaming compile failed: ${m}`),ne("falling back to ArrayBuffer instantiation"),sa(a,t,_)})}):sa(a,t,_)}function o_(){return{a:Hn}}function s_(){var e=o_();function a(_,n){return s=_.exports,s=h.instrumentWasmExports(s),qe=s.qa,ra(),On=s.Zf,e_(s.ra),We("wasm-instantiate"),s}fr("wasm-instantiate");function t(_){a(_.instance)}if(r.instantiateWasm)try{return r.instantiateWasm(e,a)}catch(_){ne(`Module.instantiateWasm callback failed with error: ${_}`),ve(_)}return vr??=t_(),n_(Be,vr,e,t).catch(ve),{}}var C,D,c_={853640:()=>{X.trampolineRunning=!1}};function i_(){throw new Error("Out of memory")}function m_(e){return h.handleAsync(function(){return new Promise(function(a){var t=r.fdName(e),_=r.ff_reader_dev_waiters[t];_||(_=r.ff_reader_dev_waiters[t]=[]),_.push(a)})})}function l_(){r.initialized||(r.MAX_SIZE_TO_SKIP_ON_READ_FAILURE=41943040,r.FETCH_TIMEOUT=r.FETCH_TIMEOUT||3e4,r.READ_TIMEOUT=r.READ_TIMEOUT||3e4,r.INITIAL_RETRY_DELAY=r.INITIAL_RETRY_DELAY||250,r.libavjsJSFetch={ctr:1,fetches:{},pos:0,read_failures:0},r.abortController=new AbortController,r.readFailureMap=new Map,r.initialized=!0)}function u_(e){r.FETCH_TIMEOUT=e}function d_(e){r.READ_TIMEOUT=e}function f_(e){r.INITIAL_RETRY_DELAY=e}function v_(){return r.returnCode||0}function p_(){const e=r.abortController;e?e.abort("Download aborted by user"):(r.abortController=new AbortController,r.abortController.abort("Download aborted by user"))}function A_(e){const a=r.libavjsJSFetch.fetches[e];a&&(a.buf=null,a.abortController.abort())}function V_(e){r.bypassCache=e}function b_(e,a,t,_,n){return h.handleAsync(async function(){if(r.abortController.signal.aborted)return console.log("Open aborted."),-1415072069;e=fe(e);let i=e.startsWith("jsfetch:")?e.slice(8):e;i=MutateUrl(i),(e.endsWith(".m3u8")||e.endsWith(".mpd"))&&(n=!1);let m={},l;t?(l=a?fe(a):void 0,m.Range=l):n&&(m.Range="bytes=0-");const u=new AbortController,f=AbortSignal.any([u.signal,r.abortController.signal]);let d;if(n&&(d=await FetchWithRetry(i,m,1,r.FETCH_TIMEOUT,r.INITIAL_RETRY_DELAY,r.bypassCache,f),d.ok||delete m.Range),!n||!d.ok){if(d=await FetchWithRetry(i,m,MAX_FETCH_ATTEMPTS,r.FETCH_TIMEOUT,r.INITIAL_RETRY_DELAY,r.bypassCache,f),d.aborted)return-1415072069;if(d.timeout)return r.returnCode=1003,-541478725;if(d instanceof Error)return r.returnCode=1001,-541478725;if(d.err_status)return r.returnCode=d.err_status,-541478725}const A=_||r.libavjsJSFetch.ctr++,p=(d.headers.get("accept-ranges")||"").toLowerCase(),v=d.headers.get("content-range"),b=p&&p=="bytes"||d.status==206&&v!=null,y=parseInt(d.headers.get("content-length")||"0",10);let w=0;if(v){const P=v.match(/bytes \d+-\d+\/(\d+)/);w=P?parseInt(P[1]):0}else if(y){const P=r.libavjsJSFetch.fetches[A];(P?P.total_size:0)||(w=y)}const F=d.body.getReader();f.addEventListener("abort",async()=>{try{await F.cancel()}catch{}});const M=l?Number(l.match(/bytes=(\d+)/)?.[1]??0):0;return r.libavjsJSFetch.fetches[A]={abortController:u,url:e,reader:F,support_range:b,total_size:w,pos:M,first_read:!0,buf:null,rej:null},A})}function h_(e,a,t){return h.handleAsync(async function(){const _=async function(){const n=r.libavjsJSFetch.fetches[e];if(r.abortController.signal.aborted||!n)return console.log("Read aborted."),-1415072069;try{if(n.buf&&n.buf.value&&n.buf.value.length>0){const v=n.buf.value,b=Math.min(t,v.length);return r.HEAPU8.set(v.subarray(0,b),a),n.buf.value=v.subarray(b),n.buf.value.length===0&&(n.buf=null),n.pos+=b,b}const i=new AbortController,m=AbortSignal.any([i.signal,r.abortController.signal]),l=DoAbortableSleep(r.READ_TIMEOUT,m),u=n.reader.read(),f=await Promise.race([l,u]);if(i.abort(),f.timeout_id&&clearTimeout(f.timeout_id),f.aborted)return-1415072069;if(f.timed_out)throw await n.reader.cancel(),`Timed out after ${r.READ_TIMEOUT} ms.`;if(f.done){const v=r.libavjsJSFetch.read_failures>=MAX_READ_ATTEMPTS,b=n.support_range&&n.total_size&&n.pos<n.total_size;return!v&&b?-1e3:-541478725}r.libavjsJSFetch.read_failures=0;let d=f.value;const A=r.readFailureMap.get(e);if(A>n.pos){const v=A-n.pos;if(v>=d.length)return n.pos+=d.length,_();d=d.subarray(v),n.pos+=v,r.readFailureMap.delete(e)}if(n.first_read){n.first_read=!1;const v=FindPngSliceIndex(d);v>=0&&(d=d.subarray(v),n.pos+=v)}const p=Math.min(t,d.length);return r.HEAPU8.set(d.subarray(0,p),a),d.length>p?n.buf={value:d.subarray(p)}:n.buf=null,n.pos+=p,p}catch(i){if(n.abortController.signal.aborted||r.abortController.signal.aborted)return console.log("Read aborted."),-1415072069;console.log("Read error",i),r.libavjsJSFetch.read_failures++;const m=n.total_size>r.MAX_SIZE_TO_SKIP_ON_READ_FAILURE;if(r.libavjsJSFetch.read_failures>=MAX_READ_ATTEMPTS||!n.support_range&&m)return console.log(`Cant retry. read_failures: ${r.libavjsJSFetch.read_failures}, too_big: ${m}`),r.returnCode=1002,-541478725;const l=Math.pow(2,r.libavjsJSFetch.read_failures)*r.INITIAL_RETRY_DELAY;console.log(`Retrying read in ${l} ms`);const u=AbortSignal.any([n.abortController.signal,r.abortController.signal]),f=await DoAbortableSleep(l,u);if(f.timeout_id&&clearTimeout(f.timeout_id),f.aborted)return-1415072069;if(!n.support_range){console.log(`Retrying without range support, will skip ${n.pos} bytes`);const d=r.readFailureMap.get(e)||0,A=Math.max(d,n.pos);return r.readFailureMap.set(e,A),-1001}return console.log(`Retrying with range support from ${n.pos}`),-1e3}};return _()})}function C_(e){const a=r.libavjsJSFetch.fetches[e];return a&&a.support_range?1:0}function w_(e){const a=r.libavjsJSFetch.fetches[e];return a?a.total_size:0}function y_(e){const a=r.libavjsJSFetch.fetches[e];return a?a.pos:0}function g_(e){const a=r.libavjsJSFetch.fetches[e];a&&(a.reader.cancel().catch(t=>{}),a.abortController.abort(),delete r.libavjsJSFetch.fetches[e])}function x_(e,a,t,_,n){r.HEAPU32[t/4]=0;var i=_*1e3+n/1e6-new Date().getTime();return setTimeout(function(){r.HEAPU32[t/4]=1,r.ccall("emfiberthreads_timeout_expiry",null,["number","number"],[e,a])},i)}function k_(e){clearTimeout(e)}class ca{name="ExitStatus";constructor(a){this.message=`Program terminated with exit(${a})`,this.status=a}}var pr=e=>{for(;e.length>0;)e.shift()(r)},F_=r.noExitRuntime||!0,H=e=>Pa(e),B=()=>Da(),ia=typeof TextDecoder<"u"?new TextDecoder:void 0,be=(e,a=0,t=NaN)=>{for(var _=a+t,n=a;e[n]&&!(n>=_);)++n;if(n-a>16&&e.buffer&&ia)return ia.decode(e.subarray(a,n));for(var i="";a<n;){var m=e[a++];if(!(m&128)){i+=String.fromCharCode(m);continue}var l=e[a++]&63;if((m&224)==192){i+=String.fromCharCode((m&31)<<6|l);continue}var u=e[a++]&63;if((m&240)==224?m=(m&15)<<12|l<<6|u:m=(m&7)<<18|l<<12|u<<6|e[a++]&63,m<65536)i+=String.fromCharCode(m);else{var f=m-65536;i+=String.fromCharCode(55296|f>>10,56320|f&1023)}}return i},fe=(e,a)=>e?be(Ae,e,a):"",P_=(e,a,t,_)=>{se(`Assertion failed: ${fe(e)}, at: `+[a?fe(a):"unknown filename",t,_?fe(_):"unknown function"])},j={isAbs:e=>e.charAt(0)==="/",splitPath:e=>{var a=/^(\/?|)([\s\S]*?)((?:\.{1,2}|[^\/]+?|)(\.[^.\/]*|))(?:[\/]*)$/;return a.exec(e).slice(1)},normalizeArray:(e,a)=>{for(var t=0,_=e.length-1;_>=0;_--){var n=e[_];n==="."?e.splice(_,1):n===".."?(e.splice(_,1),t++):t&&(e.splice(_,1),t--)}if(a)for(;t;t--)e.unshift("..");return e},normalize:e=>{var a=j.isAbs(e),t=e.substr(-1)==="/";return e=j.normalizeArray(e.split("/").filter(_=>!!_),!a).join("/"),!e&&!a&&(e="."),e&&t&&(e+="/"),(a?"/":"")+e},dirname:e=>{var a=j.splitPath(e),t=a[0],_=a[1];return!t&&!_?".":(_&&(_=_.substr(0,_.length-1)),t+_)},basename:e=>{if(e==="/")return"/";e=j.normalize(e),e=e.replace(/\/$/,"");var a=e.lastIndexOf("/");return a===-1?e:e.substr(a+1)},join:(...e)=>j.normalize(e.join("/")),join2:(e,a)=>j.normalize(e+"/"+a)},E_=()=>{if(typeof crypto=="object"&&typeof crypto.getRandomValues=="function")return _=>crypto.getRandomValues(_);if(L)try{var e=Pe("crypto"),a=e.randomFillSync;if(a)return _=>e.randomFillSync(_);var t=e.randomBytes;return _=>(_.set(t(_.byteLength)),_)}catch{}se("initRandomDevice")},ma=e=>(ma=E_())(e),re={resolve:(...e)=>{for(var a="",t=!1,_=e.length-1;_>=-1&&!t;_--){var n=_>=0?e[_]:o.cwd();if(typeof n!="string")throw new TypeError("Arguments to path.resolve must be strings");if(!n)return"";a=n+"/"+a,t=j.isAbs(n)}return a=j.normalizeArray(a.split("/").filter(i=>!!i),!t).join("/"),(t?"/":"")+a||"."},relative:(e,a)=>{e=re.resolve(e).substr(1),a=re.resolve(a).substr(1);function t(f){for(var d=0;d<f.length&&f[d]==="";d++);for(var A=f.length-1;A>=0&&f[A]==="";A--);return d>A?[]:f.slice(d,A-d+1)}for(var _=t(e.split("/")),n=t(a.split("/")),i=Math.min(_.length,n.length),m=i,l=0;l<i;l++)if(_[l]!==n[l]){m=l;break}for(var u=[],l=m;l<_.length;l++)u.push("..");return u=u.concat(n.slice(m)),u.join("/")}},Ar=[],Vr=e=>{for(var a=0,t=0;t<e.length;++t){var _=e.charCodeAt(t);_<=127?a++:_<=2047?a+=2:_>=55296&&_<=57343?(a+=4,++t):a+=3}return a},br=(e,a,t,_)=>{if(!(_>0))return 0;for(var n=t,i=t+_-1,m=0;m<e.length;++m){var l=e.charCodeAt(m);if(l>=55296&&l<=57343){var u=e.charCodeAt(++m);l=65536+((l&1023)<<10)|u&1023}if(l<=127){if(t>=i)break;a[t++]=l}else if(l<=2047){if(t+1>=i)break;a[t++]=192|l>>6,a[t++]=128|l&63}else if(l<=65535){if(t+2>=i)break;a[t++]=224|l>>12,a[t++]=128|l>>6&63,a[t++]=128|l&63}else{if(t+3>=i)break;a[t++]=240|l>>18,a[t++]=128|l>>12&63,a[t++]=128|l>>6&63,a[t++]=128|l&63}}return a[t]=0,t-n};function la(e,a,t){var _=t>0?t:Vr(e)+1,n=new Array(_),i=br(e,n,0,n.length);return a&&(n.length=i),n}var D_=()=>{if(!Ar.length){var e=null;if(L){var a=256,t=Buffer.alloc(a),_=0,n=process.stdin.fd;try{_=mr.readSync(n,t,0,a)}catch(i){if(i.toString().includes("EOF"))_=0;else throw i}_>0&&(e=t.slice(0,_).toString("utf-8"))}else typeof window<"u"&&typeof window.prompt=="function"&&(e=null,e!==null&&(e+=`
-
-ffmpeg is licensed under the GNU Lesser General Public License v2.1 (LGPL-2.1).
-Complete text: https://www.gnu.org/licenses/old-licenses/lgpl-2.1.txt
-Corresponding source for this build: https://github.com/Yahweasel/libav.js
+ */
