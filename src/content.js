@@ -5,8 +5,15 @@
 'use strict';
 
 (function () {
+  // popup injection and persistent dynamic content scripts can overlap on the
+  // same document. One relay/navigation watcher per frame is enough.
+  if (globalThis.__mediaSniperContentInstalled) return;
+  globalThis.__mediaSniperContentInstalled = true;
+
   const MARKER = 'media-sniper-bridge';
   const CONTENT_MARK = 'media-sniper-content';
+  let topFrame = false;
+  try { topFrame = window === window.top; } catch (_) { topFrame = false; }
 
   function injectBridge() {
     try {
@@ -23,34 +30,75 @@
   }
   injectBridge();
 
+  function isYoutubePage() {
+    try { return /^(www\.|m\.|music\.)?youtube\.com$/.test(location.hostname); }
+    catch (_) { return false; }
+  }
+
+  function requestYoutubeFormats() {
+    if (!isYoutubePage()) return;
+    try { window.postMessage({ source: CONTENT_MARK, type: 'yt-request' }, '*'); } catch (_) {}
+  }
+
+  function requestDomScan() {
+    try { window.postMessage({ source: CONTENT_MARK, type: 'scan' }, '*'); } catch (_) {}
+    requestYoutubeFormats();
+  }
+
   // ---- YouTube adapter handshake --------------------------------------------
   // On youtube.com the MAIN-world adapter may have posted formats before our
   // message listener was ready; ask it to re-send. Repeat briefly to cover
   // late initial-player-response delivery.
-  (function () {
-    let host = '';
-    try { host = location.hostname; } catch (e) { /* ignore */ }
-    if (!/^(www\.|m\.|music\.)?youtube\.com$/.test(host)) return;
+  if (topFrame && isYoutubePage()) {
     let count = 0;
     const iv = setInterval(function () {
-      try { window.postMessage({ source: 'media-sniper-content', type: 'yt-request' }, '*'); } catch (e) { /* ignore */ }
+      requestYoutubeFormats();
       if (++count >= 30) clearInterval(iv);
     }, 2000);
-    try { window.postMessage({ source: 'media-sniper-content', type: 'yt-request' }, '*'); } catch (e) { /* ignore */ }
-  })();
+    requestYoutubeFormats();
+  }
 
-  // ---- page metadata (title for naming) -------------------------------------
-  function sendMeta() {
+  // ---- page metadata + SPA navigation ---------------------------------------
+  function sendMeta(after) {
+    if (!topFrame) {
+      if (after) after();
+      return;
+    }
     try {
       chrome.runtime.sendMessage({ type: 'ms-page-meta', title: document.title, url: location.href }, function () {
         void chrome.runtime.lastError;
+        if (after) after();
       });
-    } catch (e) { /* ignore */ }
+    } catch (e) { if (after) after(); }
   }
-  sendMeta();
-  document.addEventListener('visibilitychange', function () {
-    if (!document.hidden) sendMeta();
-  });
+
+  if (topFrame) {
+    let lastHref = String(location.href || '');
+    sendMeta();
+
+    function checkNavigation() {
+      let next = '';
+      try { next = String(location.href || ''); } catch (_) { return; }
+      if (!next || next === lastHref) return;
+      lastHref = next;
+      // The background updates page identity (and clears stale items) before
+      // the forced DOM scan can report media for the new SPA route.
+      sendMeta(requestDomScan);
+    }
+
+    window.addEventListener('popstate', checkNavigation, true);
+    window.addEventListener('hashchange', checkNavigation, true);
+    // pushState/replaceState do not reliably emit a DOM event to an isolated
+    // content world. A lightweight href check covers those SPA transitions.
+    setInterval(checkNavigation, 500);
+
+    document.addEventListener('visibilitychange', function () {
+      if (!document.hidden) {
+        checkNavigation();
+        sendMeta();
+      }
+    });
+  }
 
   const pending = [];
   let flushTimer = null;
@@ -58,9 +106,9 @@
   function flush() {
     flushTimer = null;
     if (!pending.length) return;
-    const items = pending.splice(0);
+    const reported = pending.splice(0);
     try {
-      chrome.runtime.sendMessage({ type: 'ms-report', items: items }, function () {
+      chrome.runtime.sendMessage({ type: 'ms-report', items: reported }, function () {
         void chrome.runtime.lastError;
       });
     } catch (e) { /* ignore */ }
@@ -101,7 +149,7 @@
       return false;
     }
     if (msg.type === 'ms-scan') {
-      window.postMessage({ source: CONTENT_MARK, type: 'scan' }, '*');
+      requestDomScan();
       sendResponse({ ok: true });
       return false;
     }
