@@ -131,9 +131,13 @@ npm run zip
 
 Pull requests and `main` run unit/syntax checks, manifest/package/UI version validation, runtime/license/privacy artifact checks, privacy scans, and browser E2E. CI builds `media-sniper.zip`, extracts **that exact distribution artifact** into a clean directory, and loads the extracted ZIP contents in pinned Chrome for Testing; source-only files therefore cannot make packaged-artifact E2E pass accidentally.
 
+CI also verifies the SHA-256 values of the bundled reproducible libav.js module/WASM against `src/libav/PROVENANCE.json` and fails if the historical untraceable WASM reappears in source or package output.
+
+The browser E2E includes a dedicated media-engine gate: an AES-128 encrypted HLS fixture is fetched through the packaged extension, decrypted by the bundled libav.js/FFmpeg runtime, stream-copy remuxed to MP4, written through Chromium Downloads, and checked for a non-trivial MP4 `ftyp` signature.
+
 Only after both the test job and packaged browser E2E succeed does CI create the verified workflow artifact. It contains `media-sniper.zip` and `media-sniper.zip.sha256`.
 
-`v*` tags go through the same jobs. A public GitHub Release is created only after all checks pass, the tag version matches the manifest/package version, and the explicit repository release-approval gate is enabled. The release attaches both the ZIP and its SHA-256 file.
+`v*` tags go through the same jobs. A public GitHub Release is created only after all checks pass, the tag version matches the manifest/package version, and the explicit repository release-approval gate is enabled. The release attaches the ZIP/checksum **and** `media-sniper-libav-corresponding-source.tar.gz` plus its SHA-256 file, generated from the exact pinned libav.js source revision and dependency sources used for the bundled runtime.
 
 The E2E runner uses a throwaway browser profile, starts with no persistent host access, grants optional HTTP(S) access through the real Permissions API, verifies dynamic detector registration/revocation, and loads the exact packaged artifact via `MEDIA_SNIPER_EXTENSION_ROOT`.
 
@@ -149,9 +153,11 @@ A future Web Store edition would be a separate reviewed flavor and must remove t
 
 Media Sniper's own source is MIT licensed; see [LICENSE](LICENSE).
 
-`src/libav/` contains a vendored libav.js / FFmpeg WebAssembly artifact under its applicable LGPL terms; see [LICENSE.libav](LICENSE.libav) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+The shipped libav.js / FFmpeg WebAssembly runtime is now a reproducible Media Sniper-specific build from `Yahweasel/libav.js` tag `v6.10.9.0`, commit `c80e885c3461f7bb7ea565c9631b34243ae0dbf1`, with FFmpeg 9.0 and Emscripten 6.0.5. The exact fragment list, compiler version, upstream revision and artifact SHA-256 values are version-controlled in `tools/libav/config.json` and `src/libav/PROVENANCE.json`.
 
-The vendored generated JavaScript module has a recorded downstream modification and identifies itself as `libav.js v6.5.7.1-61-g823eb97`. Repository history does **not currently establish the exact corresponding source/build recipe** for that shipped artifact. Do not describe it as an unmodified official v6.5.7.1 binary or claim that a generic upstream checkout is necessarily its corresponding source. Resolving/replacing that artifact remains a reproducibility/supply-chain quality task.
+The historical `v6.5.7.1-61-g823eb97` WASM whose exact source provenance could not be established is no longer packaged or used. Its old `.mjs` path remains only as a tiny compatibility shim that redirects callers to the new reproducible runtime.
+
+Approved releases attach the complete corresponding-source bundle alongside the extension ZIP. See [LICENSE.libav](LICENSE.libav), [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), and [tools/libav/README.md](tools/libav/README.md).
 
 ## Disclaimer
 
