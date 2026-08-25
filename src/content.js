@@ -72,6 +72,22 @@
     } catch (e) { if (after) after(); }
   }
 
+  function sendNavigation(after) {
+    if (!topFrame) {
+      if (after) after();
+      return;
+    }
+    try {
+      // MessageSender.url can remain the original document URL after
+      // history.pushState(). The background accepts this explicit URL only
+      // after verifying that it has the same origin as MessageSender.
+      chrome.runtime.sendMessage({ type: 'ms-navigation', title: document.title, url: location.href }, function () {
+        void chrome.runtime.lastError;
+        if (after) after();
+      });
+    } catch (e) { if (after) after(); }
+  }
+
   if (topFrame) {
     let lastHref = String(location.href || '');
     sendMeta();
@@ -83,7 +99,7 @@
       lastHref = next;
       // The background updates page identity (and clears stale items) before
       // the forced DOM scan can report media for the new SPA route.
-      sendMeta(requestDomScan);
+      sendNavigation(requestDomScan);
     }
 
     window.addEventListener('popstate', checkNavigation, true);
