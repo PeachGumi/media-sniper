@@ -5,6 +5,7 @@ on:
     paths:
       - 'tools/libav/config.json'
       - '.github/workflows/rebuild-libav.yml'
+      - 'scripts/sync_libav_license.js'
 
 concurrency:
   group: rebuild-libav-${{ github.ref }}
@@ -127,6 +128,7 @@ jobs:
           (base/'PROVENANCE.json').write_text(json.dumps(provenance, indent=2, sort_keys=True)+'\n')
           print(json.dumps(provenance, indent=2, sort_keys=True))
           PY
+          node scripts/sync_libav_license.js
 
       - name: Commit generated runtime to build branch
         working-directory: app
@@ -150,9 +152,9 @@ jobs:
 
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add src/libav tools/libav/config.json
+          git add src/libav LICENSE.libav tools/libav/config.json
           if git diff --cached --quiet; then
-            echo 'Generated artifacts already match the pinned build.'
+            echo 'Generated artifacts and license notice already match the pinned build.'
             exit 0
           fi
           git commit -m 'build: regenerate libav from pinned upstream source'
