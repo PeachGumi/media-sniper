@@ -6,17 +6,21 @@ One invocation performs two isolated browser runs:
    worker to start;
 2. copy that artifact to a temporary functional harness, changing *only*
    manifest.host_permissions to `http://127.0.0.1/*`, then exercise detection,
-   direct download and the bundled libav AES-128 HLS remux path.
+   direct download and the bundled libav HLS/AES-128 remux path.
 
 The localhost manifest overlay exists solely because headless Chrome cannot
 approve the interactive optional-permission confirmation UI. Runtime JS/WASM
 bytes are copied unchanged from the exact packaged artifact.
+
+HLS media fixtures are generated at test time with the host ffmpeg instead of
+checking binary MPEG-TS/AES blobs into Git. This makes the fixture deterministic
+and prevents text/binary transport corruption from turning the media into an
+invalid TS stream while still testing the extension's bundled libav runtime.
 """
 import json
 import os
 import re
 import shutil
-import signal
 import subprocess
 import sys
 import tempfile
@@ -75,6 +79,57 @@ def make_functional_harness(root):
     return dst
 
 
+def make_fixture_harness():
+    ffmpeg=shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise RuntimeError("ffmpeg is required to generate valid browser E2E HLS fixtures")
+    dst=tempfile.mkdtemp(prefix="media-sniper-e2e-fixture-")
+    shutil.rmtree(dst)
+    shutil.copytree(os.path.join(REPO_ROOT,"test","fixture"),dst)
+    hls=os.path.join(dst,"hls")
+    os.makedirs(hls,exist_ok=True)
+
+    for name in os.listdir(hls):
+        if re.match(r"^(?:seg|encseg)\d+\.ts$",name):
+            try: os.remove(os.path.join(hls,name))
+            except OSError: pass
+
+    common=[
+        ffmpeg,"-hide_banner","-loglevel","error","-y",
+        "-f","lavfi","-i","testsrc2=size=320x180:rate=24",
+        "-f","lavfi","-i","sine=frequency=1000:sample_rate=48000",
+        "-t","2","-c:v","libx264","-preset","ultrafast","-pix_fmt","yuv420p","-g","48",
+        "-c:a","aac","-b:a","96k",
+    ]
+    subprocess.run(common+[
+        "-f","hls","-hls_time","10","-hls_list_size","0",
+        "-hls_segment_filename",os.path.join(hls,"seg%d.ts"),
+        os.path.join(hls,"media.m3u8"),
+    ],check=True,timeout=60)
+
+    key_path=os.path.join(hls,"aes.key")
+    with open(key_path,"wb") as f: f.write(bytes(range(16)))
+    key_info=os.path.join(hls,"aes-key-info.txt")
+    with open(key_info,"w",encoding="utf-8") as f:
+        f.write("aes.key\n"+key_path+"\n000102030405060708090a0b0c0d0e0f\n")
+    subprocess.run([
+        ffmpeg,"-hide_banner","-loglevel","error","-y",
+        "-i",os.path.join(hls,"media.m3u8"),"-c","copy",
+        "-hls_time","10","-hls_list_size","0",
+        "-hls_key_info_file",key_info,
+        "-hls_segment_filename",os.path.join(hls,"encseg%d.ts"),
+        os.path.join(hls,"encindex.m3u8"),
+    ],check=True,timeout=60)
+    try: os.remove(key_info)
+    except OSError: pass
+
+    plain=os.path.join(hls,"seg0.ts"); enc=os.path.join(hls,"encseg0.ts")
+    if os.path.getsize(plain)<100_000 or os.path.getsize(enc)<100_000:
+        raise RuntimeError("generated HLS fixture is unexpectedly small")
+    print("[fixture] generated valid HLS/AES media",os.path.getsize(plain),os.path.getsize(enc),flush=True)
+    return dst
+
+
 def write_prefs(profile):
     base=os.path.join(profile,"Default"); os.makedirs(base,exist_ok=True)
     p=os.path.join(base,"Preferences")
@@ -116,7 +171,7 @@ def print_log_tail(path, limit=30000):
         print("[browser log unavailable]",repr(exc),flush=True)
 
 
-def browser_run(browser, root, functional=False):
+def browser_run(browser, root, functional=False, fixture_root=None):
     cdp_port,fixture_port=free_port(),free_port()
     profile=tempfile.mkdtemp(prefix="ms-browser-profile-")
     write_prefs(profile)
@@ -127,8 +182,11 @@ def browser_run(browser, root, functional=False):
         f"--disable-extensions-except={root}",f"--load-extension={root}","--enable-logging=stderr","--v=1",
         "--no-first-run","--no-default-browser-check","--disable-gpu","--autoplay-policy=no-user-gesture-required","about:blank",
     ],env=env,stdout=log,stderr=log)
-    fp=subprocess.Popen([sys.executable,"-m","http.server",str(fixture_port)],cwd=os.path.join(REPO_ROOT,"test","fixture"),stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
-    procs=[bp,fp]
+    fp=None
+    if functional:
+        if not fixture_root: raise RuntimeError("functional browser run requires fixture_root")
+        fp=subprocess.Popen([sys.executable,"-m","http.server",str(fixture_port)],cwd=fixture_root,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+    procs=[p for p in (bp,fp) if p is not None]
 
     def teardown():
         for p in procs:
@@ -176,15 +234,17 @@ def main():
     if not browser_run(browser,BASE_EXTENSION_ROOT,False): return False
     if SMOKE_ONLY: return True
 
-    harness=None
+    harness=None; fixture=None
     try:
         harness=make_functional_harness(BASE_EXTENSION_ROOT)
+        fixture=make_fixture_harness()
         print("[gate 2] localhost-only functional harness",flush=True)
-        ok=browser_run(browser,harness,True)
+        ok=browser_run(browser,harness,True,fixture)
         print("RUNNER:","PASS" if ok else "FAIL",flush=True)
         return ok
     finally:
         if harness and not KEEP: shutil.rmtree(harness,ignore_errors=True)
+        if fixture and not KEEP: shutil.rmtree(fixture,ignore_errors=True)
 
 
 if __name__=="__main__":
