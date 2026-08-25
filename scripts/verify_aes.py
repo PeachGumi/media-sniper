@@ -28,6 +28,7 @@ FIX = f"http://127.0.0.1:{FIXTURE_PORT}"
 ENC = FIX + "/hls/encindex.m3u8"
 PAGE = FIX + "/hls/index.html"
 TITLE = "e2e aes libav"
+ALL = ["http://*/*", "https://*/*"]
 
 
 def targets():
@@ -65,6 +66,27 @@ async def eval_ws(ws_url, expr, timeout=30, user_gesture=False):
     raise TimeoutError("Runtime.evaluate timeout")
 
 
+async def permission_origins(popup_ws):
+    raw = await eval_ws(
+        popup_ws,
+        "chrome.permissions.getAll().then(p=>JSON.stringify(p.origins||[]))",
+        timeout=5,
+    )
+    return json.loads(raw) if isinstance(raw, str) else (raw or [])
+
+
+async def wait_permission(popup_ws, granted, seconds=12):
+    deadline = time.time() + seconds
+    last = []
+    while time.time() < deadline:
+        last = await permission_origins(popup_ws)
+        has_all = all(x in last for x in ALL)
+        if has_all == granted:
+            return last
+        await asyncio.sleep(0.4)
+    return last
+
+
 async def main():
     popup = find_target("page", "popup/popup.html")
     if not popup:
@@ -73,25 +95,25 @@ async def main():
         popup = find_target("page", "popup/popup.html")
     if not popup:
         raise RuntimeError("popup target not found")
+    popup_ws = popup["webSocketDebuggerUrl"]
 
-    # The previous general E2E revokes persistent access intentionally. Grant it
-    # again with an explicit user gesture for this dedicated media-engine test.
-    granted = await eval_ws(
-        popup["webSocketDebuggerUrl"],
-        "chrome.permissions.request({origins:['http://*/*','https://*/*']})",
+    # The general E2E intentionally revoked persistent access. Exercise the
+    # production popup button to opt in again rather than relying on the return
+    # value Chrome chooses to expose for permissions.request() through CDP.
+    await eval_ws(
+        popup_ws,
+        "(function(){const b=document.getElementById('accessAll'); if(!b) throw new Error('accessAll missing'); b.click(); return true;})()",
         user_gesture=True,
     )
-    if granted is not True:
-        raise RuntimeError("optional host permission was not granted")
+    origins = await wait_permission(popup_ws, True)
+    if not all(x in origins for x in ALL):
+        raise RuntimeError("optional host permission was not granted: " + repr(origins))
 
     sw = find_target("service_worker", EXT_ID)
     if not sw:
         raise RuntimeError("service worker target not found")
     sw_url = sw["webSocketDebuggerUrl"]
 
-    # Use the same internal HLS entry point invoked by the privileged message
-    # handler. This test is specifically for media-engine compatibility; the
-    # separate E2E already verifies page -> extension privilege boundaries.
     start_expr = (
         "startHls(9003," + json.dumps(ENC) + "," + json.dumps(ENC) + "," +
         json.dumps(TITLE) + "," + json.dumps(PAGE) + ",null,null)"
@@ -99,7 +121,7 @@ async def main():
     )
     started_raw = await eval_ws(sw_url, start_expr, timeout=30)
     started = json.loads(started_raw) if started_raw else {}
-    print("AES start:", started)
+    print("AES start:", started, flush=True)
     if started.get("error"):
         raise RuntimeError("startHls failed: " + str(started.get("error")))
 
@@ -114,7 +136,7 @@ async def main():
         )
         if raw:
             job = json.loads(raw)
-            print("AES job:", job)
+            print("AES job:", job, flush=True)
             if job.get("status") in ("complete", "failed"):
                 break
         await asyncio.sleep(1)
@@ -146,8 +168,6 @@ async def main():
     if not filename.lower().endswith(".mp4"):
         raise RuntimeError("AES HLS output is not MP4: " + filename)
 
-    # Chromium reports completion only after the file is finalized. Verify a
-    # basic ISO BMFF signature without requiring host ffprobe/ffmpeg packages.
     for _ in range(30):
         if os.path.isfile(filename):
             break
@@ -159,22 +179,25 @@ async def main():
     if b"ftyp" not in head:
         raise RuntimeError("downloaded file lacks MP4 ftyp signature")
 
-    print("AES-128 HLS -> reproducible libav -> MP4: PASS", record)
+    print("AES-128 HLS -> reproducible libav -> MP4: PASS", record, flush=True)
     try:
         os.remove(filename)
     except OSError:
         pass
 
     await eval_ws(
-        popup["webSocketDebuggerUrl"],
-        "chrome.permissions.remove({origins:['http://*/*','https://*/*']})",
+        popup_ws,
+        "(function(){const b=document.getElementById('accessClick'); if(!b) throw new Error('accessClick missing'); b.click(); return true;})()",
         user_gesture=True,
     )
+    origins = await wait_permission(popup_ws, False)
+    if origins:
+        raise RuntimeError("persistent host permission was not removed: " + repr(origins))
 
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except Exception as exc:
-        print("AES-128 HLS E2E: FAIL", repr(exc))
+        print("AES-128 HLS E2E: FAIL", repr(exc), flush=True)
         sys.exit(1)
