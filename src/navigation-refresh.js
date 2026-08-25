@@ -39,6 +39,62 @@
     return claimed.href;
   }
 
+  function originPattern(raw) {
+    const u = parseUrl(raw);
+    return u ? (u.protocol + '//' + u.hostname + '/*') : null;
+  }
+
+  function isYoutube(raw) {
+    const u = parseUrl(raw);
+    return !!u && /^(www\.|m\.|music\.)?youtube\.com$/i.test(u.hostname);
+  }
+
+  async function hasPersistentAccess(raw) {
+    const p = originPattern(raw);
+    if (!p || typeof chrome === 'undefined' || !chrome.permissions || !chrome.permissions.contains) return false;
+    try {
+      if (await chrome.permissions.contains({ origins: ['http://*/*', 'https://*/*'] })) return true;
+      return await chrome.permissions.contains({ origins: [p] });
+    } catch (_) { return false; }
+  }
+
+  async function injectAfterNavigation(tabId, rawUrl) {
+    const u = parseUrl(rawUrl);
+    if (!u || typeof chrome === 'undefined' || !chrome.scripting || !chrome.scripting.executeScript) return false;
+    // Persistent grants already have document_start dynamic scripts. Avoid a
+    // duplicate injection in that case; this path is primarily for activeTab,
+    // which Chrome can retain across same-origin navigation.
+    if (await hasPersistentAccess(u.href)) return true;
+
+    try {
+      // content.js does not depend on the isolated-world copy of logic.js; it
+      // injects logic.js + bridge.js into MAIN itself. Injecting only content.js
+      // also avoids redeclaring MediaSniperLogic if another path already ran.
+      await chrome.scripting.executeScript({
+        target: { tabId: tabId, allFrames: true },
+        files: ['src/content.js'],
+      });
+    } catch (_) {
+      try {
+        await chrome.scripting.executeScript({
+          target: { tabId: tabId, frameIds: [0] },
+          files: ['src/content.js'],
+        });
+      } catch (_) { return false; }
+    }
+
+    if (isYoutube(u.href)) {
+      try {
+        await chrome.scripting.executeScript({
+          target: { tabId: tabId, frameIds: [0] },
+          files: ['src/youtube.js'],
+          world: 'MAIN',
+        });
+      } catch (_) {}
+    }
+    return true;
+  }
+
   function installRuntime() {
     if (typeof state === 'undefined' || !state.pageMeta || !state.itemsByTab) return false;
     if (state.pageMeta.__mediaSniperNavigationWrapped) return true;
@@ -91,10 +147,37 @@
         return false;
       });
     }
+
+    // Full document navigation destroys the old content-script context. When
+    // Chrome still exposes the new URL to us (persistent host permission, or
+    // activeTab retained across a same-origin navigation), clear the previous
+    // page immediately and make sure a detector exists in the new document.
+    if (typeof chrome !== 'undefined' && chrome.tabs && chrome.tabs.onUpdated) {
+      chrome.tabs.onUpdated.addListener(function (tabId, changeInfo, tab) {
+        if (!changeInfo || !changeInfo.url) return;
+        const next = parseUrl(changeInfo.url);
+        if (!next) return;
+        state.pageMeta.set(tabId, {
+          title: (tab && tab.title) ? String(tab.title).slice(0, 500) : null,
+          url: next.href,
+        });
+        injectAfterNavigation(tabId, next.href).catch(function () {});
+      });
+    }
     return true;
   }
 
-  const api = { parseUrl, routeHash, shouldResetPage, sameOriginNavigationUrl, installRuntime };
+  const api = {
+    parseUrl,
+    routeHash,
+    shouldResetPage,
+    sameOriginNavigationUrl,
+    originPattern,
+    isYoutube,
+    hasPersistentAccess,
+    injectAfterNavigation,
+    installRuntime,
+  };
   globalThis.MediaSniperNavigationRefresh = api;
   installRuntime();
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
