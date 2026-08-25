@@ -90,8 +90,6 @@ jobs:
         env:
           VERSION: ${{ steps.cfg.outputs.version }}
           VARIANT: ${{ steps.cfg.outputs.variant }}
-          TAG: ${{ steps.cfg.outputs.tag }}
-          EMSCRIPTEN: ${{ steps.cfg.outputs.emscripten }}
         run: |
           set -euxo pipefail
           mkdir -p src/libav
@@ -109,12 +107,10 @@ jobs:
           ]
           hashes={}
           for name in names:
-              h=hashlib.sha256((base/name).read_bytes()).hexdigest()
-              hashes[name]=h
+              hashes[name]=hashlib.sha256((base/name).read_bytes()).hexdigest()
           dependency_archives={}
           for p in sorted(pathlib.Path('../upstream/build').glob('*.tar*')):
-              h=hashlib.sha256(p.read_bytes()).hexdigest()
-              dependency_archives[p.name]=h
+              dependency_archives[p.name]=hashlib.sha256(p.read_bytes()).hexdigest()
           provenance={
               'schema': 1,
               'generated_by': '.github/workflows/rebuild-libav.yml',
@@ -137,6 +133,18 @@ jobs:
         working-directory: app
         run: |
           set -euxo pipefail
+          # Documentation and unrelated PR commits may land while this long
+          # build is running. Rebase the generated-files commit on the current
+          # branch head, but never rebase stale artifacts over a changed build
+          # configuration.
+          cp tools/libav/config.json /tmp/built-config.json
+          git fetch origin fix/reproducible-libav
+          git show origin/fix/reproducible-libav:tools/libav/config.json > /tmp/current-config.json
+          cmp /tmp/built-config.json /tmp/current-config.json || {
+            echo 'Build config changed while libav was compiling; refusing to publish stale artifacts.' >&2
+            exit 1
+          }
+
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add src/libav tools/libav/config.json
@@ -145,4 +153,5 @@ jobs:
             exit 0
           fi
           git commit -m 'build: regenerate libav from pinned upstream source'
+          git rebase origin/fix/reproducible-libav
           git push origin HEAD:fix/reproducible-libav
