@@ -183,9 +183,6 @@ def main():
         "--headless=new",
         f"--remote-debugging-port={cdp_port}",
         f"--user-data-dir={PROFILE}",
-        # Deterministic automation: runner/browser images can ship built-in or
-        # policy-installed extensions. Explicitly allow only the exact artifact
-        # under test so source-only files can never make an E2E pass accidentally.
         f"--disable-extensions-except={EXTENSION_ROOT}",
         f"--load-extension={EXTENSION_ROOT}",
         "--enable-logging=stderr",
@@ -257,12 +254,24 @@ def main():
         e2e_env = dict(env)
         e2e_env["CDP_PORT"] = str(cdp_port)
         e2e_env["MEDIA_SNIPER_EXTENSION_ID"] = ext_id
-        result = subprocess.run(
+
+        general = subprocess.run(
             [sys.executable, os.path.join(REPO_ROOT, "scripts", "e2e_download_test.py"), str(fixture_port)],
             env=e2e_env,
             timeout=180,
         )
-        ok = result.returncode == 0
+        if general.returncode != 0:
+            return False
+
+        # Media-engine gate: use the exact packaged libav runtime to decrypt an
+        # AES-128 HLS fixture, stream-copy/remux it to MP4 and finish a real
+        # Chromium download. Compilation alone is not sufficient acceptance.
+        libav = subprocess.run(
+            [sys.executable, os.path.join(REPO_ROOT, "scripts", "verify_aes.py"), str(fixture_port)],
+            env=e2e_env,
+            timeout=240,
+        )
+        ok = libav.returncode == 0
         return ok
     finally:
         if KEEP:
