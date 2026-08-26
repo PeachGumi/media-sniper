@@ -191,6 +191,14 @@ function startOne(entry) {
     fallbackDownload(entry);
     return;
   }
+  // googlevideo (YouTube) rejects bare downloads with 403 + a text/plain
+  // error body, which Brave then labels "<title>.txt" (0 bytes,
+  // SERVER_BAD_CONTENT). The adapter's URLs only work with the player's
+  // cookie/header context, so always take the offscreen fetch path for them.
+  if (entry.item.via === 'youtube') {
+    fallbackDownload(entry);
+    return;
+  }
   startDirect(entry);
 }
 
@@ -246,7 +254,9 @@ chrome.downloads.onChanged.addListener(function (delta) {
     // CDN refused the bare download (403 / auth / hotlink protection):
     // retry through a SW fetch that carries the browser's cookies plus the
     // headers we captured from the player's own requests (VDH sent_headers).
-    const retriable = /FORBIDDEN|UNAUTHORIZED|ACCESS_DENIED|NETWORK_FAILED/i.test(errCode);
+    // SERVER_BAD_CONTENT: server refused the body (googlevideo answers its
+    // 403 page as text/plain → Brave surfaces exactly this code).
+    const retriable = /FORBIDDEN|UNAUTHORIZED|ACCESS_DENIED|NETWORK_FAILED|SERVER_BAD_CONTENT|SERVER_FORBIDDEN/i.test(errCode);
     if (retriable && !entry.triedFallback && entry.item && entry.item.url.indexOf('blob:') !== 0) {
       entry.triedFallback = true;
       state.downloadToItem.delete(delta.id);

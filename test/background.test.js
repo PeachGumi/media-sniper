@@ -844,6 +844,43 @@ async function run() {
   ok(twoHdrs && typeof twoHdrs === 'object', 'two-source job has headers object');
   ctxRef.fetch = origFetch;
 
+  // Regression (v0.11.0 field report): a YouTube progressive item saved via
+  // the popup went through startDirect; googlevideo answered 403 with a
+  // text/plain body, Brave labeled it "<title>.txt" (0 bytes) and interrupted
+  // with SERVER_BAD_CONTENT. YouTube items must use the offscreen fetch path,
+  // and SERVER_* refusals must trigger the fallback retry.
+  {
+    const c1 = makeChrome();
+    const ctx1 = makeContext(c1);
+    vm.runInContext(logicSrc, ctx1);
+    vm.runInContext(bgSrc, ctx1);
+    await send(c1, { type: 'ms-download', item: {
+      url: 'https://rr4---sn-x.googlevideo.com/videoplayback?expire=1&itag=18',
+      kind: 'video', ext: 'mp4', title: 'e2e_yt_direct', via: 'youtube', pageUrl: 'https://www.youtube.com/watch?v=x',
+    } }, { tab: { id: 7 } });
+    await flush();
+    eq(c1.downloads.__downloads.length, 0, 'youtube item avoids bare chrome.downloads');
+    ok('youtube item fetched via offscreen blob path',
+       c1.__swFetchLog.some(function (u) { return u.indexOf('googlevideo') >= 0; }));
+
+    const c2 = makeChrome();
+    const ctx2 = makeContext(c2);
+    vm.runInContext(logicSrc, ctx2);
+    vm.runInContext(bgSrc, ctx2);
+    await send(c2, { type: 'ms-download', item: {
+      url: 'https://cdn.example.com/clip.mp4', kind: 'video', ext: 'mp4', title: 'e2e_retry',
+    } }, { tab: { id: 7 } });
+    await flush();
+    const dlRetry = c2.downloads.__downloads[0];
+    ok('direct download attempted for non-youtube item', !!dlRetry);
+    c2.__listeners.onChanged.forEach(function (fn) {
+      fn({ id: dlRetry.id, state: { current: 'interrupted' }, error: { current: 'SERVER_BAD_CONTENT' } });
+    });
+    await flush(); await flush();
+    ok('SERVER_BAD_CONTENT triggers fallback retry',
+       c2.__swFetchLog.some(function (u) { return u.indexOf('clip.mp4') >= 0; }));
+  }
+
   report('background');
 }
 
