@@ -43,14 +43,22 @@
     try {
       await chrome.scripting.executeScript({
         target: { tabId: tab.id, allFrames: true },
-        files: ['src/logic.js', 'src/content.js'],
+        // content.js does not use the isolated-world MediaSniperLogic; it injects
+        // logic.js+bridge into MAIN itself. Injecting only content.js here avoids
+        // redeclaring MediaSniperLogic when the persistent script already ran
+        // (same rationale as navigation-refresh.js).
+        files: ['src/content.js'],
       });
       injected = true;
     } catch (_) {
       try {
         await chrome.scripting.executeScript({
           target: { tabId: tab.id, frameIds: [0] },
-          files: ['src/logic.js', 'src/content.js'],
+          // content.js does not use the isolated-world MediaSniperLogic; it injects
+        // logic.js+bridge into MAIN itself. Injecting only content.js here avoids
+        // redeclaring MediaSniperLogic when the persistent script already ran
+        // (same rationale as navigation-refresh.js).
+        files: ['src/content.js'],
         });
         injected = true;
       } catch (_) {}
