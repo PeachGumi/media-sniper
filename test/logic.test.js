@@ -114,3 +114,23 @@ const best = L.pickBestVariant(pm.variants);
 eq(best.url, 'https://cdn.example.com/abs/v1080/index.m3u8', 'best variant = highest bandwidth');
 
 report('logic');
+
+
+// Re-execution safety: the popup's executeScript and the persistent dynamic
+// content script can both inject logic.js into the same realm. The second run
+// must not throw "Identifier 'MediaSniperLogic' has already been declared"
+// (regression: top-level const). Run the source twice in one VM context.
+(function () {
+  const vm2 = require('vm');
+  const ctx = { console: console, module: { exports: {} } };
+  ctx.globalThis = ctx;
+  try {
+    vm2.runInContext(logicSrc, ctx, { filename: 'logic.js' });
+    vm2.runInContext(logicSrc, ctx, { filename: 'logic.js (again)' });
+    eq('double-injection does not throw', true, true);
+    ok('second run keeps a working API', !!ctx.MediaSniperLogic && typeof ctx.MediaSniperLogic.parseM3u8 === 'function');
+    ok('identity preserved across runs', ctx.MediaSniperLogic === vm2.runInContext('globalThis.MediaSniperLogic', ctx));
+  } catch (e) {
+    ok('double-injection does not throw', false, e.message);
+  }
+})();

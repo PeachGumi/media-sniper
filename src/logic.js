@@ -1,7 +1,13 @@
 /* Media Sniper - pure logic shared by background, content, bridge and popup.
  * No chrome.* APIs here. Works in Node (tests), service worker, page and popup.
+ *
+ * Re-execution safe: this file can be injected into the same JS realm more
+ * than once (persistent dynamic content script + popup executeScript overlap
+ * on an already-granted tab). A top-level `const` here would throw
+ * "Identifier 'MediaSniperLogic' has already been declared" on the second run,
+ * so declare with var and reuse an existing copy instead of rebuilding.
  */
-const MediaSniperLogic = (function () {
+var MediaSniperLogic = globalThis.MediaSniperLogic || (function () {
   'use strict';
 
   const EXT_KIND = {
