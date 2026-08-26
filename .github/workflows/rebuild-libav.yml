@@ -138,6 +138,13 @@ jobs:
           branch="$GITHUB_REF_NAME"
           test -n "$branch"
 
+          # When triggered by a tag push (paths filters don't apply to tags),
+          # $branch is a tag name and `git fetch origin <tag>` only populates
+          # FETCH_HEAD — no origin/<tag> remote-tracking ref exists. Fetch the
+          # commit into a local ref so the config comparison below works for
+          # both branches and tags.
+          git fetch --force origin "$GITHUB_REF:refs/remotes/origin/$branch"
+
           # A long compile may overlap with documentation or review commits on
           # the same feature branch. Rebase the generated-files commit onto the
           # current branch head, but never publish artifacts built from a stale
