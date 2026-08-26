@@ -362,6 +362,24 @@ async function run() {
   eq(r.items[0].title, 'Cool Video Page', 'page title attached');
   eq(r.items[0].size, 5000000, 'content-length from headers');
 
+  // Instagram/Meta's media request is often only an fMP4 byte fragment. Its
+  // body starts with moof and is not playable alone; the same signed URL with
+  // bytestart/byteend removed returns the complete ftyp/moov MP4.
+  wr({
+    statusCode: 200,
+    url: 'https://scontent.example/o1/video.mp4?sig=a%2Fb&bytestart=927166&byteend=2193211&ccb=17-1',
+    tabId: 7, initiator: 'https://www.instagram.com/', type: 'media',
+    responseHeaders: [
+      { name: 'Content-Type', value: 'video/mp4' },
+      { name: 'Content-Length', value: '1266046' },
+    ],
+  });
+  await flush();
+  r = await send(chrome, { type: 'ms-get-items', tabId: 7 });
+  const ig = r.items.find(function (i) { return i.url.indexOf('scontent.example') >= 0; });
+  ok(!!ig, 'Instagram byte-range media detected');
+  eq(ig.url, 'https://scontent.example/o1/video.mp4?sig=a%2Fb&ccb=17-1', 'Instagram item points at complete MP4 URL');
+
   // tiny media (< 500KB) is filtered as noise (VDH rule)
   wr({
     statusCode: 200, url: 'https://cdn.example.com/ad.mp4', tabId: 7,

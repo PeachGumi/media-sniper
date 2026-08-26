@@ -24,6 +24,25 @@ eq(L.isSegmentUrl('https://a/chunk_1_0_a.aac'), true, '.aac ADTS chunk is a segm
 eq(L.isSegmentUrl('https://a/chunk_1_0_a.aac?sig=x'), true, '.aac chunk with query');
 eq(L.isSegmentUrl('https://a/song.aac'), true, '.aac treated as segment anywhere');
 
+// Instagram/Meta byte-range fMP4 URLs are playback fragments even though the
+// path ends in .mp4. Strip only bytestart/byteend so saving fetches the full
+// signed object; preserve all other query bytes and fragments verbatim.
+eq(
+  L.fullMediaUrlFromByteRange('https://scontent.example/o1/video.mp4?sig=a%2Fb&bytestart=927166&byteend=2193211&ccb=17-1#x'),
+  'https://scontent.example/o1/video.mp4?sig=a%2Fb&ccb=17-1#x',
+  'Meta byte-range params stripped without reserializing signed query'
+);
+eq(
+  L.fullMediaUrlFromByteRange('https://cdn.example/video.mp4?sig=x&bytestart=0'),
+  'https://cdn.example/video.mp4?sig=x&bytestart=0',
+  'one range parameter alone is left untouched'
+);
+eq(
+  L.fullMediaUrlFromByteRange('https://cdn.example/video.mp4?sig=x'),
+  'https://cdn.example/video.mp4?sig=x',
+  'normal MP4 URL remains unchanged'
+);
+
 // --- subtitle playlist detection ----------------------------------------------
 const subs = ['#EXTM3U', '#EXTINF:10,', 'subs.vtt', '#EXTINF:10,', 'subs2.srt'].join('\n');
 eq(L.isSubtitlePlaylist(subs), true, 'all-vtt/srt playlist = subtitles');

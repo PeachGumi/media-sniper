@@ -304,6 +304,36 @@ var MediaSniperLogic = globalThis.MediaSniperLogic || (function () {
     return null;
   }
 
+  function fullMediaUrlFromByteRange(url) {
+    // Instagram/Meta serves fMP4 playback chunks through an otherwise normal
+    // looking *.mp4 URL with bytestart/byteend in the query. Saving that URL
+    // produces a file beginning with `moof` (no ftyp/moov), so it is not a
+    // playable MP4. The same signed CDN URL without only those two parameters
+    // returns the complete file. Preserve every other query byte verbatim —
+    // reserializing a signed query can invalidate it.
+    const raw = String(url || '');
+    const hashAt = raw.indexOf('#');
+    const hash = hashAt >= 0 ? raw.slice(hashAt) : '';
+    const noHash = hashAt >= 0 ? raw.slice(0, hashAt) : raw;
+    const queryAt = noHash.indexOf('?');
+    if (queryAt < 0) return raw;
+    const base = noHash.slice(0, queryAt);
+    const parts = noHash.slice(queryAt + 1).split('&');
+    let hasStart = false;
+    let hasEnd = false;
+    for (const part of parts) {
+      const key = part.split('=', 1)[0].toLowerCase();
+      if (key === 'bytestart') hasStart = true;
+      if (key === 'byteend') hasEnd = true;
+    }
+    if (!hasStart || !hasEnd) return raw;
+    const kept = parts.filter(function (part) {
+      const key = part.split('=', 1)[0].toLowerCase();
+      return key !== 'bytestart' && key !== 'byteend';
+    });
+    return base + (kept.length ? '?' + kept.join('&') : '') + hash;
+  }
+
   function isSegmentUrl(url) {
     // .aac = ADTS HLS chunks (X Spaces replays: chunk_..._a.aac)
     try {
@@ -610,6 +640,7 @@ var MediaSniperLogic = globalThis.MediaSniperLogic || (function () {
     pickBestVariant: pickBestVariant,
     hostOf: hostOf,
     extFromContentType: extFromContentType,
+    fullMediaUrlFromByteRange: fullMediaUrlFromByteRange,
     isSegmentUrl: isSegmentUrl,
     isAudioOnlyPlaylist: isAudioOnlyPlaylist,
     isSubtitlePlaylist: isSubtitlePlaylist,

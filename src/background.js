@@ -838,13 +838,18 @@ function pickAudioUrl(parsed, variant) {
 function onResponseStarted(details) {
   try {
     if (details.statusCode < 200 || details.statusCode > 299) return;
-    const url = details.url;
-    if (!url || url.indexOf('data:') === 0) return;
-    if (url.indexOf('chrome-extension:') === 0) return;
+    const observedUrl = details.url;
+    if (!observedUrl || observedUrl.indexOf('data:') === 0) return;
+    if (observedUrl.indexOf('chrome-extension:') === 0) return;
     if (details.initiator && details.initiator.indexOf('chrome-extension:') === 0) return;
     if (details.tabId == null || details.tabId < 0) return;
     // segments are never user-facing media
-    if (L.isSegmentUrl(url)) return;
+    if (L.isSegmentUrl(observedUrl)) return;
+    // Meta/Instagram appends bytestart+byteend to an otherwise valid signed
+    // *.mp4 URL for fMP4 playback chunks. The observed response starts with
+    // `moof`, not ftyp/moov, and cannot play by itself. Removing only those
+    // two query parameters asks the same CDN for the complete MP4.
+    const url = L.fullMediaUrlFromByteRange(observedUrl);
     // dedicated-site adapters handle their own sites; the generic detector
     // only produces noise there (VDH's yS exclusion set, same idea)
     if (L.isDedicatedSite(url) || L.isDedicatedSite(details.initiator || '')) return;
