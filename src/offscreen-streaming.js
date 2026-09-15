@@ -197,6 +197,7 @@
             playlistUrl: msg.playlistUrl,
             done,
             total: urls.length,
+            bytes: state.bytes,
           });
         } catch (_) {}
       }
@@ -224,7 +225,9 @@
       writable = await temp.handle.createWritable();
       const state = { bytes: 0 };
       for (const url of urls) {
+        const before = state.bytes;
         await appendUrl(writable, url, headers, MAX_DISK_ASSEMBLY_BYTES, state);
+        progress.bytes += state.bytes - before;
         progress.done++;
         try {
           chrome.runtime.sendMessage({
@@ -232,6 +235,7 @@
             playlistUrl,
             done: progress.done,
             total: progress.total,
+            bytes: progress.bytes,
           });
         } catch (_) {}
       }
@@ -248,7 +252,7 @@
   async function buildDash(msg, originalListener, sender, sendResponse) {
     const videoCount = msg.video ? (msg.video.segments || []).length + (msg.video.initUrl ? 1 : 0) : 0;
     const audioCount = msg.audio ? (msg.audio.segments || []).length + (msg.audio.initUrl ? 1 : 0) : 0;
-    const progress = { done: 0, total: videoCount + audioCount };
+    const progress = { done: 0, total: videoCount + audioCount, bytes: 0 };
     let video = null;
     let audio = null;
     const singleTrack = !!msg.video !== !!msg.audio;

@@ -56,6 +56,22 @@ function makeChrome() {
         if (cb) cb(id);
         return Promise.resolve(id);
       },
+      search: function (query, cb) {
+        const d = downloads.find(function (entry) { return entry.id === query.id; });
+        const result = d ? [{
+          id: d.id,
+          state: d.done ? 'complete' : 'in_progress',
+          bytesReceived: d.receivedBytes || 0,
+          totalBytes: d.totalBytes || 0,
+        }] : [];
+        if (d && d.delaySearch) {
+          return new Promise(function (resolve) {
+            setTimeout(function () { if (cb) cb(result); resolve(result); }, 5);
+          });
+        }
+        if (cb) cb(result);
+        return Promise.resolve(result);
+      },
       __downloads: downloads,
     },
     runtime: {
@@ -314,10 +330,19 @@ async function run() {
   eq(chrome.downloads.__downloads.length, 1, 'one download started');
   eq(chrome.downloads.__downloads[0].opts.filename, 'a.mp4', 'flat filename passed');
   const d1 = chrome.downloads.__downloads[0].id;
+  chrome.downloads.__downloads[0].receivedBytes = 4500000;
+  chrome.downloads.__downloads[0].totalBytes = 9000000;
+  let qs = await send(chrome, { type: 'ms-queue-status', tabId: 1 });
+  eq(qs.queue[0].receivedBytes, 4500000, 'queue status reports browser bytes received');
+  eq(qs.queue[0].totalBytes, 9000000, 'queue status reports browser total bytes');
+  const activeDirectState = await send(chrome, { type: 'ms-get-items', tabId: 1 });
+  ok(activeDirectState.activeDownloads.some(function (download) {
+    return download.id === qs.queue[0].id && download.sourceUrl === 'https://cdn.example.com/a.mp4';
+  }), 'get-items exposes active direct downloads so a reopened popup can reconnect');
   chrome.__listeners.onChanged.forEach(function (fn) { fn({ id: d1, state: { current: 'complete' } }); });
   chrome.downloads.__downloads[0].done = true;
   await flush();
-  let qs = await send(chrome, { type: 'ms-queue-status', tabId: 1 });
+  qs = await send(chrome, { type: 'ms-queue-status', tabId: 1 });
   eq(qs.queue[0].status, 'complete', 'complete recorded');
 
   // --- 3. concurrency: 3 active max ------------------------------------------
@@ -326,6 +351,9 @@ async function run() {
   }
   const running = chrome.downloads.__downloads.filter(function (d) { return !d.done; });
   eq(running.length, 3, 'concurrency capped at 3');
+  const reopenedQueueState = await send(chrome, { type: 'ms-get-items', tabId: 1 });
+  ok(reopenedQueueState.activeDownloads.length <= 3, 'popup reconnect exposes only bounded active downloads');
+  ok(reopenedQueueState.activeDownloads.every(function (download) { return download.status !== 'queued'; }), 'queued Save All backlog does not create popup polling timers');
   // finish one -> next pumps
   chrome.__listeners.onChanged.forEach(function (fn) { fn({ id: running[0].id, state: { current: 'complete' } }); });
   running[0].done = true;
@@ -558,13 +586,17 @@ async function run() {
   chrome.__holdFfmpegVod = true;
   let hlsResp = null;
   chrome.__listeners.onMessage[0](
-    { type: 'ms-hls-download', url: 'https://cdn.example.com/live/master.m3u8', title: 'HLS Test Video', pageUrl: 'https://site.example.com/watch/9' },
+    { type: 'ms-hls-download', url: 'https://cdn.example.com/live/master.m3u8', itemKey: 'stable-hls-key', title: 'HLS Test Video', pageUrl: 'https://site.example.com/watch/9' },
     { tab: { id: 7 } },
     function (response) { hlsResp = response; }
   );
   for (let i = 0; i < 12; i++) await flush();
   ok(hlsResp && hlsResp.started, 'HLS start is acknowledged before ffmpeg finishes so closing the popup cannot cancel the job');
   ok(typeof chrome.__ffmpegVodResolve === 'function', 'HLS ffmpeg remains active after the start acknowledgement');
+  const activeItemState = await send(chrome, { type: 'ms-get-items', tabId: 7 });
+  ok(activeItemState.activeJobs.some(function (job) {
+    return job.jobKey === hlsResp.jobKey && job.itemKey === 'stable-hls-key' && job.sourceUrl === 'https://cdn.example.com/live/master.m3u8';
+  }), 'get-items exposes active jobs so a reopened popup can reconnect');
   chrome.__holdFfmpegVod = false;
   chrome.__ffmpegDone = { jobId: 'https://cdn.example.com/live/master.m3u8', url: 'blob:chrome-extension://testextensionid/ffmpeg-remux', size: 5000, ext: 'mp4', partial: false };
   chrome.__ffmpegVodResolve({ url: chrome.__ffmpegDone.url, size: chrome.__ffmpegDone.size, partial: false });
@@ -588,9 +620,28 @@ async function run() {
   const hlsQ = qs.queue.filter(function (q) { return q.filename.indexOf('HLS Test Video') >= 0; });
   eq(hlsQ.length, 1, 'hls output named by title');
   ok(hlsQ[0].filename.endsWith('.mp4'), 'mp4 container after remux');
-  // duplicate start while running is rejected (job already downloading -> reruns, but alreadyRunning only for fetching/combining)
-  const dup = await send(chrome, { type: 'ms-hls-download', url: 'https://cdn.example.com/live/master.m3u8', title: 'x' }, { tab: { id: 7 } });
-  ok(dup, 'duplicate hls request responds');
+  // Retrying the same media leaves the old queue row behind. Status must bind
+  // to the newest active handoff, never the first stale completed row.
+  const oldHlsDownload = chrome.downloads.__downloads.find(function (d) { return d.opts.filename.indexOf('HLS Test Video') >= 0; });
+  oldHlsDownload.receivedBytes = 5000;
+  oldHlsDownload.totalBytes = 5000;
+  chrome.__listeners.onChanged.forEach(function (fn) { fn({ id: oldHlsDownload.id, state: { current: 'complete' } }); });
+  oldHlsDownload.done = true;
+  await flush();
+  const dup = await send(chrome, { type: 'ms-hls-download', url: 'https://cdn.example.com/live/master.m3u8', title: 'HLS Test Video retry' }, { tab: { id: 7 } });
+  ok(dup && dup.started, 'completed HLS can be retried');
+  for (let i = 0; i < 12; i++) await flush();
+  const retryHlsDownload = chrome.downloads.__downloads.filter(function (d) { return d.opts.filename.indexOf('HLS Test Video retry') >= 0; }).slice(-1)[0];
+  ok(!!retryHlsDownload, 'retry creates a distinct browser download handoff');
+  retryHlsDownload.receivedBytes = 0;
+  retryHlsDownload.totalBytes = 128;
+  const retryProgress = await send(chrome, { type: 'ms-hls-status', url: 'https://cdn.example.com/live/master.m3u8' });
+  eq(retryProgress.receivedBytes, 0, 'retry progress ignores stale completed queue bytes');
+  eq(retryProgress.totalBytes, 128, 'retry progress uses newest active queue total');
+  oldHlsDownload.delaySearch = true;
+  await send(chrome, { type: 'ms-queue-status' });
+  const jobBytesAfterStaleRefresh = vm.runInContext("state.hlsJobs.get('https://cdn.example.com/live/master.m3u8').receivedBytes", ctx);
+  eq(jobBytesAfterStaleRefresh, 0, 'stale queue refresh cannot overwrite replacement HLS job progress');
 
   // --- 9. AES-128 encrypted HLS: now SUPPORTED (ffmpeg decrypts via jsfetch) ----
   const ctxRef = ctx;

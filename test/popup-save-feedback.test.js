@@ -23,6 +23,7 @@ function makeElement(tag, id) {
     addEventListener: function (type, fn) { listeners[type] = fn; },
     dispatch: function (type) { if (listeners[type]) listeners[type]({ target: el, preventDefault: function () {} }); },
     setAttribute: function (name, value) { el[name] = String(value); },
+    removeAttribute: function (name) { delete el[name]; },
     getAttribute: function (name) { return el[name]; },
     __listeners: listeners,
   };
@@ -101,8 +102,11 @@ function flush() { return new Promise(function (resolve) { setImmediate(resolve)
   const row = elements.list.children[0];
   const info = row.children[1];
   const action = info.children.find(function (child) { return child.className === 'action-status'; });
+  const actionProgress = info.children.find(function (child) { return child.className === 'action-progress'; });
   const save = row.children[3];
   ok(!!action, 'each media card has an inline action status');
+  ok(!!actionProgress, 'each media card has an inline progress bar');
+  eq(actionProgress.hidden, true, 'progress bar is hidden before saving');
 
   save.dispatch('click');
   eq(save.disabled, true, 'save disables immediately to prevent duplicate starts');
@@ -124,10 +128,12 @@ function flush() { return new Promise(function (resolve) { setImmediate(resolve)
   eq(save.textContent, 'saving', 'started browser download says saving');
   eq(action.textContent, 'downloadInProgress', 'card shows started download as active');
 
-  queueState = { id: 'queue-1', status: 'downloading', filename: 'Direct video.mp4' };
+  queueState = { id: 'queue-1', status: 'downloading', filename: 'Direct video.mp4', receivedBytes: 450000, totalBytes: 900000 };
   intervals[0]();
-  eq(save.textContent, 'saving', 'active browser download says saving');
-  eq(action.textContent, 'downloadInProgress', 'card shows active download state');
+  eq(save.textContent, '50%', 'active browser download shows a real percentage');
+  eq(action.textContent, 'downloadProgress:50|439.5 KB|878.9 KB', 'card shows received and total browser bytes');
+  eq(actionProgress.value, 450000, 'browser progress bar reflects received bytes');
+  eq(actionProgress.max, 900000, 'browser progress bar reflects total bytes');
 
   queueState = { id: 'queue-1', status: 'failed', filename: 'Direct video.mp4', error: 'NETWORK_FAILED' };
   intervals[0]();
@@ -172,6 +178,24 @@ function flush() { return new Promise(function (resolve) { setImmediate(resolve)
   hlsCallback({ queued: true, jobKey: 'hls-job' });
   eq(hlsSave.textContent, 'fetching', 'HLS acknowledgement changes to fetching');
   eq(hlsAction.textContent, 'hlsFetching', 'HLS card shows segment-fetch state');
+
+  hlsState = { status: 'fetching', done: 3, total: 10, bytes: 3145728, elapsedSeconds: 12 };
+  intervals[4]();
+  eq(hlsSave.textContent, '30%', 'HLS fetch shows segment percentage');
+  eq(hlsAction.textContent, 'segmentProgressDetail:3|10|3.0 MB|12s', 'HLS fetch proves activity with segments, bytes, and elapsed time');
+
+  hlsState = { status: 'combining', mode: 'ffmpeg', seconds: 30, bytes: 2097152, elapsedSeconds: 42 };
+  intervals[4]();
+  eq(hlsSave.textContent, '2.0 MB', 'ffmpeg phase shows produced bytes on the button');
+  eq(hlsAction.textContent, 'ffmpegProgress:30s|2.0 MB|42s', 'ffmpeg phase shows media time, produced bytes, and elapsed time');
+
+  hlsState = { status: 'combining', mode: 'concat', done: 3, total: 10, bytes: 3145728, elapsedSeconds: 12 };
+  intervals[4]();
+  eq(hlsSave.textContent, '30%', 'OPFS segment fetch shows percentage while combining');
+  eq(hlsAction.textContent, 'segmentProgressDetail:3|10|3.0 MB|12s', 'OPFS segment fetch keeps byte and elapsed detail');
+  hlsState = { status: 'combining', mode: 'concat', done: 10, total: 10, bytes: 10485760, elapsedSeconds: 18 };
+  intervals[4]();
+  eq(hlsSave.textContent, 'processing', 'completed segment fetch does not claim 100% while muxing still runs');
 
   hlsState = { status: 'recording', seconds: 3, bytes: 1024 };
   intervals[4]();
@@ -274,6 +298,26 @@ function flush() { return new Promise(function (resolve) { setImmediate(resolve)
   await flush();
   eq(elements.list.children.length, 1, 'deferred render replaces stale media rows after completion');
   eq(elements.list.children[0].className, 'empty', 'deferred render shows the updated empty state');
+
+  ctx.testHlsItem = hlsItem;
+  vm.runInContext("items = [Object.assign({}, testHlsItem, {url:'https://cdn.example/refreshed.m3u8'})]; activeJobs = [{jobKey:'resumed-job',itemKey:testHlsItem.key,sourceUrl:testHlsItem.url,status:'fetching'}]; render()", ctx);
+  const resumedSave = elements.list.children[0].children[3];
+  eq(resumedSave.dataset.jobKey, 'resumed-job', 'reopened popup reconnects to the active media job');
+  eq(resumedSave.disabled, true, 'reopened popup keeps the active job from being started twice');
+  eq(resumedSave.textContent, 'fetching', 'reopened popup immediately shows the active phase');
+  ctx.testDashItems = [
+    { key: 'dash-video', url: 'https://cdn.example/manifest.mpd', kind: 'dash', dashEntry: 0 },
+    { key: 'dash-audio', url: 'https://cdn.example/manifest.mpd', kind: 'dash', dashEntry: 1 },
+  ];
+  vm.runInContext("activeSaveCount = 0; renderPending = false; items = testDashItems; activeJobs = [{jobKey:'dash-job-video',itemKey:'dash-video',sourceUrl:testDashItems[0].url,status:'fetching'},{jobKey:'dash-job-audio',itemKey:'dash-audio',sourceUrl:testDashItems[1].url,status:'fetching'}]; render()", ctx);
+  eq(elements.list.children[0].children[3].dataset.jobKey, 'dash-job-video', 'DASH video reconnects to its own entry-qualified job');
+  eq(elements.list.children[1].children[3].dataset.jobKey, 'dash-job-audio', 'DASH audio reconnects to its own entry-qualified job');
+  hlsState = { status: 'complete', filename: 'Resumed.mp4' };
+  ctx.testDirectItem = item;
+  vm.runInContext("activeSaveCount = 0; renderPending = false; items = [testDirectItem]; activeJobs = []; activeDownloads = [{id:'resumed-direct',itemKey:testDirectItem.key,status:'started'}]; render()", ctx);
+  const resumedDirectSave = elements.list.children[0].children[3];
+  eq(resumedDirectSave.disabled, true, 'reopened popup reconnects to an active direct download');
+  eq(resumedDirectSave.textContent, 'saving', 'reopened popup immediately shows direct download activity');
 
   report('popup-save-feedback');
 })().catch(function (error) {

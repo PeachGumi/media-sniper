@@ -275,8 +275,11 @@ function failDownloadEntry(entry, error) {
   if (entry.downloadId != null) state.downloadToItem.delete(entry.downloadId);
   if (entry.hlsUrl) {
     const j = state.hlsJobs.get(entry.hlsUrl);
-    if (j) { j.status = 'failed'; j.error = entry.error; }
-    advanceChainByJob(entry.hlsUrl);
+    if (j && (!j.queueEntryId || j.queueEntryId === entry.id)) {
+      j.status = 'failed';
+      j.error = entry.error;
+      advanceChainByJob(entry.hlsUrl);
+    }
   }
   pump();
 }
@@ -319,6 +322,43 @@ function requestChromeDownload(entry, opts) {
   }
 }
 
+function refreshDownloadProgress(entry) {
+  if (!entry || entry.downloadId == null || !chrome.downloads || typeof chrome.downloads.search !== 'function') {
+    return Promise.resolve(entry);
+  }
+  return new Promise(function (resolve) {
+    let settled = false;
+    const done = function (items) {
+      if (settled) return;
+      settled = true;
+      const item = Array.isArray(items) ? items[0] : null;
+      if (item) {
+        entry.receivedBytes = Number(item.bytesReceived) || 0;
+        entry.totalBytes = Number(item.totalBytes) || 0;
+        if (entry.hlsUrl) {
+          const job = state.hlsJobs.get(entry.hlsUrl);
+          if (job && job.queueEntryId === entry.id) {
+            job.receivedBytes = entry.receivedBytes;
+            job.totalBytes = entry.totalBytes;
+          }
+        }
+      }
+      resolve(entry);
+    };
+    try {
+      const result = chrome.downloads.search({ id: entry.downloadId }, done);
+      if (result && typeof result.then === 'function') result.then(done).catch(function () { done([]); });
+    } catch (e) { done([]); }
+  });
+}
+
+function publicQueueEntry(q) {
+  return {
+    id: q.id, status: q.status, filename: q.filename, error: q.error,
+    receivedBytes: q.receivedBytes || 0, totalBytes: q.totalBytes || 0,
+  };
+}
+
 function startDirect(entry) {
   const url = entry.item.url;
   const opts = { url: url };
@@ -340,8 +380,10 @@ chrome.downloads.onChanged.addListener(function (delta) {
     state.active.delete(entry.id);
     if (entry.hlsUrl) {
       const j = state.hlsJobs.get(entry.hlsUrl);
-      if (j) j.status = 'complete';
-      advanceChainByJob(entry.hlsUrl);
+      if (j && (!j.queueEntryId || j.queueEntryId === entry.id)) {
+        j.status = 'complete';
+        advanceChainByJob(entry.hlsUrl);
+      }
     }
     pump();
   } else if (s === 'interrupted') {
@@ -705,6 +747,7 @@ function finishMediaJob(playlistUrl, made, ext, kind) {
   // link the queue entry back to the job so completion/failure of the blob
   // download updates the job state the popup is polling
   job.filename = entry.filename;
+  job.queueEntryId = entry.id;
   return { queued: true };
 }
 
@@ -830,7 +873,7 @@ function isMediaJobRunning(job) {
     job.status === 'recording' || job.status === 'downloading');
 }
 
-function startHls(tabId, jobKey, url, title, pageUrl, dashEntry, dashType, audioUrl, itemRef, requestedKind, variantUrl, variantKey) {
+function startHls(tabId, jobKey, url, title, pageUrl, dashEntry, dashType, audioUrl, itemRef, requestedKind, variantUrl, variantKey, itemKey) {
   const ref = itemRef || null;
   const existing = state.hlsJobs.get(jobKey);
   if (isMediaJobRunning(existing)) {
@@ -839,12 +882,14 @@ function startHls(tabId, jobKey, url, title, pageUrl, dashEntry, dashType, audio
   state.hlsJobs.set(jobKey, {
     status: 'fetching', tabId: tabId, done: 0, total: 0, error: null, live: false,
     title: title || null, pageUrl: pageUrl || null, blobUrl: null, size: 0,
-    seconds: 0, bytes: 0, startedAt: 0, mode: null, ext: null,
+    seconds: 0, bytes: 0, startedAt: Date.now(), mode: null, ext: null,
     dashEntry: dashEntry != null ? dashEntry : null,
     dashType: dashType || null,
     audioUrl: audioUrl || null,
     variantUrl: variantUrl || null,
     variantKey: variantKey || null,
+    sourceUrl: url,
+    itemKey: itemKey || (ref && ref.key) || null,
   });
   let runner = null;
   if (ref && ref.via === 'youtube' && ref.audioUrl) {
@@ -909,7 +954,7 @@ function pumpMediaChain(tabId) {
     chain.current = jobKey;
     startHls(tabId, jobKey, item.url, item.title, item.pageUrl || null,
       item.dashEntry != null ? item.dashEntry : null, item.dashType || null, request.audioUrl,
-      isYtMux ? item : null, item.kind, request.variantUrl, request.variantKey)
+      isYtMux ? item : null, item.kind, request.variantUrl, request.variantKey, item.key || null)
       .then(function (resp) {
         // {queued:true}: the blob DOWNLOAD is now in flight. The chain must
         // NOT advance here — the runner resolving only means "queued". The
@@ -1303,7 +1348,24 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
     case 'ms-get-items': {
       restorePromise.then(function () {
         const items = state.itemsByTab.get(tabId) || [];
-        sendResponse({ items: L.sortItems(items) });
+        const activeJobs = [];
+        state.hlsJobs.forEach(function (job, jobKey) {
+          if (job.tabId !== tabId || !isMediaJobRunning(job)) return;
+          activeJobs.push({
+            jobKey: jobKey, status: job.status, sourceUrl: job.sourceUrl || null,
+            itemKey: job.itemKey || null, live: !!job.live,
+          });
+        });
+        const activeDownloads = state.queue.filter(function (entry) {
+          return entry.item && entry.item.tabId === tabId && entry.status !== 'queued' &&
+            entry.status !== 'complete' && entry.status !== 'failed';
+        }).map(function (entry) {
+          return {
+            id: entry.id, status: entry.status, itemKey: entry.item.key || null,
+            sourceUrl: entry.item.url || null,
+          };
+        });
+        sendResponse({ items: L.sortItems(items), activeJobs: activeJobs, activeDownloads: activeDownloads });
       });
       return true;
     }
@@ -1401,6 +1463,7 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
         status: 'fetching', tabId: tabId, done: 0, total: 2, error: null, live: false,
         title: item.title || null, pageUrl: item.pageUrl || null, blobUrl: null, size: 0,
         seconds: 0, bytes: 0, startedAt: Date.now(), mode: 'mux', ext: 'mp4',
+        sourceUrl: item.url, itemKey: item.key || null,
       });
       runWithMediaJobLease(function () { return runYtMuxJob(jobKey, item); }).catch(function (err) {
         const j = state.hlsJobs.get(jobKey);
@@ -1443,7 +1506,7 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
       }
       startHls(tabId, jobKey, msg.url, msg.title, msg.pageUrl, msg.dashEntry != null ? msg.dashEntry : null,
         msg.dashType || null, msg.audioUrl || null, null, msg.kind || null,
-        msg.variantUrl || null, msg.variantKey || null);
+        msg.variantUrl || null, msg.variantKey || null, msg.itemKey || null);
       // Acknowledge before playlist fetch/ffmpeg completes. The popup is an
       // ephemeral view and may close on tab switch; job ownership stays here.
       sendResponse({ started: true, jobKey: jobKey });
@@ -1457,12 +1520,18 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
       // jobKey form is used by yt-mux jobs (their key is not the media URL)
       const jobKey = msg.jobKey || buildMediaJobKey(msg.url, msg.dashEntry, msg.variantKey || null);
       const job = state.hlsJobs.get(jobKey) || state.hlsJobs.get(msg.url);
-      sendResponse(job ? {
+      const linkedEntry = job && job.queueEntryId
+        ? state.queue.find(function (entry) { return entry.id === job.queueEntryId; })
+        : null;
+      const progressReady = linkedEntry ? refreshDownloadProgress(linkedEntry) : Promise.resolve();
+      progressReady.then(function () { sendResponse(job ? {
         status: job.status, done: job.done, total: job.total, error: job.error,
         live: job.live, filename: job.filename || null, mode: job.mode,
         seconds: job.seconds || 0, bytes: job.bytes || 0, ext: job.ext || null,
-      } : null);
-      return false;
+        elapsedSeconds: job.startedAt ? Math.max(0, Math.floor((Date.now() - job.startedAt) / 1000)) : 0,
+        receivedBytes: job.receivedBytes || 0, totalBytes: job.totalBytes || 0,
+      } : null); });
+      return true;
     }
     case 'ms-offscreen-progress': {
       const job = state.hlsJobs.get(msg.jobId);
@@ -1470,14 +1539,20 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
       return false;
     }
     case 'ms-hls-progress': {
-      // counters only (structured-clone safe): offscreen never sends bytes
+      // Structured-clone-safe counters only; media bytes never cross messaging.
       const job = state.hlsJobs.get(msg.playlistUrl);
-      if (job) { job.done = msg.done || 0; if (msg.total) job.total = msg.total; }
+      if (job) {
+        job.done = msg.done || 0;
+        if (msg.total) job.total = msg.total;
+        if (msg.bytes != null) job.bytes = Number(msg.bytes) || 0;
+      }
       return false;
     }
     case 'ms-queue-status': {
-      sendResponse({ queue: state.queue.map(function (q) { return { id: q.id, status: q.status, filename: q.filename, error: q.error }; }) });
-      return false;
+      Promise.all(state.queue.map(refreshDownloadProgress)).then(function () {
+        sendResponse({ queue: state.queue.map(publicQueueEntry) });
+      });
+      return true;
     }
     default:
       return false;

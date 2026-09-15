@@ -11,6 +11,22 @@ TOKEN = "Bearer media-sniper-e2e"
 class Handler(SimpleHTTPRequestHandler):
     def do_GET(self):
         path = self.path.split("?", 1)[0]
+        if path == "/hls/slow-direct.mp4":
+            source = os.path.join(os.getcwd(), "hls", "clip.mp4")
+            size = os.path.getsize(source)
+            self.send_response(200)
+            self.send_header("Content-Type", "video/mp4")
+            self.send_header("Content-Length", str(size))
+            self.end_headers()
+            with open(source, "rb") as stream:
+                while True:
+                    chunk = stream.read(512)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    self.wfile.flush()
+                    time.sleep(.3)
+            return
         if path in ("/hls/slowmanifest.m3u8", "/hls/slowaudio.aac"):
             # Keep the offscreen job alive beyond MV3's ordinary idle window.
             # The popup is closed immediately after starting this fixture.

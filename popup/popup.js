@@ -6,6 +6,8 @@ const t = (key, subs) => MediaSniperI18n.t(key, subs);
 let tabId = null;
 let pageUrl = null;
 let items = [];
+let activeJobs = [];
+let activeDownloads = [];
 const hlsTimers = new Map();
 let saveOperationSequence = 0;
 let activeSaveCount = 0;
@@ -101,6 +103,7 @@ function resetSaveButton(btn) {
   btn.dataset.jobKey = '';
   btn.dataset.operation = '';
   btn.dataset.stopAttempt = '';
+  setActionProgress(btn, 0, 0, false);
   btn.textContent = t('save');
 }
 
@@ -110,6 +113,23 @@ function setActionStatus(btn, text, isErr) {
   el.textContent = text || '';
   if (isErr) el.classList.add('err');
   else el.classList.remove('err');
+}
+
+function setActionProgress(btn, value, max, active) {
+  const el = btn && btn._actionProgressEl;
+  if (!el) return;
+  el.hidden = !active;
+  if (!active) {
+    el.value = 0;
+    el.max = 1;
+    return;
+  }
+  if (Number(max) > 0) {
+    el.max = Number(max);
+    el.value = Math.max(0, Math.min(Number(value) || 0, el.max));
+  } else {
+    el.removeAttribute('value');
+  }
 }
 
 function beginSave(btn) {
@@ -125,12 +145,44 @@ function beginSave(btn) {
   btn.dataset.stopping = '';
   btn.dataset.jobKey = '';
   setActionStatus(btn, t('startingDownload'));
+  setActionProgress(btn, 0, 0, true);
   setStatus(t('startingDownload'));
   return operation;
 }
 
 function isCurrentSave(btn, operation) {
   return btn.dataset.operation === operation;
+}
+
+function reconnectActiveJob(item, btn) {
+  const job = activeJobs.find(function (candidate) {
+    return candidate && (candidate.itemKey ? candidate.itemKey === item.key : candidate.sourceUrl === item.url);
+  });
+  if (!job) {
+    const download = activeDownloads.find(function (candidate) {
+      return candidate && (candidate.itemKey ? candidate.itemKey === item.key : candidate.sourceUrl === item.url);
+    });
+    if (!download) return;
+    const operation = beginSave(btn);
+    btn.textContent = t('saving');
+    setActionStatus(btn, t('downloadInProgress'));
+    watchQueueEntry(download.id, btn, item.via === 'youtube', operation);
+    return;
+  }
+  const operation = beginSave(btn);
+  btn.dataset.jobKey = job.jobKey;
+  if (job.status === 'recording') {
+    btn.dataset.recording = '1';
+    btn.disabled = false;
+    btn.textContent = t('stop');
+  } else if (job.status === 'fetching') {
+    btn.textContent = t('fetching');
+    setActionStatus(btn, item.kind === 'dash' ? t('dashFetching') : t('hlsFetching'));
+  } else {
+    btn.textContent = t('processing');
+    setActionStatus(btn, t('ffmpegStatus', ['']));
+  }
+  pollHls(Object.assign({}, item, { jobKey: job.jobKey }), btn, operation);
 }
 
 function flushDeferredRender() {
@@ -187,10 +239,18 @@ function render() {
     action.setAttribute('aria-live', 'polite');
     info.appendChild(action);
 
+    const actionProgress = document.createElement('progress');
+    actionProgress.className = 'action-progress';
+    actionProgress.hidden = true;
+    actionProgress.max = 1;
+    actionProgress.value = 0;
+    info.appendChild(actionProgress);
+
     const dl = document.createElement('button');
     dl.className = 'dl';
     dl.textContent = t('save');
     dl._actionStatusEl = action;
+    dl._actionProgressEl = actionProgress;
     dl.addEventListener('click', () => save(item, dl));
 
     const copy = document.createElement('button');
@@ -211,6 +271,7 @@ function render() {
     row.appendChild(copy);
     row.appendChild(dl);
     list.appendChild(row);
+    reconnectActiveJob(item, dl);
   }
 }
 
@@ -248,7 +309,7 @@ function save(item, btn) {
     const variant = selectedQuality(item);
     chrome.runtime.sendMessage(
       {
-        type: 'ms-hls-download', url: item.url, kind: item.kind, tabId: tabId, title: item.title, pageUrl: pageUrl,
+        type: 'ms-hls-download', url: item.url, kind: item.kind, itemKey: item.key || null, tabId: tabId, title: item.title, pageUrl: pageUrl,
         dashEntry: item.dashEntry != null ? item.dashEntry : null, dashType: item.dashType || null,
         variantUrl: variant ? variant.url : null,
         variantKey: variant ? L().hlsVariantKey(variant) : null,
@@ -395,9 +456,21 @@ function watchQueueEntry(entryId, btn, isYoutube, operation) {
         setStatus(t('cdnRetry'));
         setActionStatus(btn, t('cdnRetry'));
       } else if (e.status === 'started' || e.status === 'downloading') {
-        btn.textContent = t('saving');
-        setStatus(t('downloadInProgress'));
-        setActionStatus(btn, t('downloadInProgress'));
+        const received = Number(e.receivedBytes) || 0;
+        const total = Number(e.totalBytes) || 0;
+        if (total > 0) {
+          const percent = Math.max(0, Math.min(100, Math.round((received / total) * 100)));
+          const progress = t('downloadProgress', [String(percent), formatBytes(received), formatBytes(total)]);
+          btn.textContent = percent + '%';
+          setStatus(progress);
+          setActionStatus(btn, progress);
+          setActionProgress(btn, received, total, true);
+        } else {
+          btn.textContent = t('saving');
+          setStatus(t('downloadInProgress'));
+          setActionStatus(btn, t('downloadInProgress'));
+          setActionProgress(btn, 0, 0, true);
+        }
       } else if (Date.now() - started > 30000) {
         btn.textContent = t('saving');
         setStatus(t('downloadInProgress'));
@@ -443,20 +516,57 @@ function pollHls(item, btn, operation) {
       btn.dataset.stopping = '';
       btn.disabled = true;
       btn.setAttribute('aria-busy', 'true');
-      if (job.status === 'combining' && job.total) {
-        btn.textContent = Math.round((job.done / job.total) * 100) + '%';
-        const progress = t('segmentProgress', [String(job.done), String(job.total)]);
+      if (job.status === 'fetching' && job.total) {
+        const percent = Math.max(0, Math.min(100, Math.round((job.done / job.total) * 100)));
+        btn.textContent = percent + '%';
+        const progress = t('segmentProgressDetail', [String(job.done), String(job.total), formatBytes(job.bytes || 0), fmtDuration(job.elapsedSeconds || 0)]);
         setStatus(progress);
         setActionStatus(btn, progress);
+        setActionProgress(btn, job.done, job.total, true);
+      } else if (job.status === 'fetching') {
+        btn.textContent = t('fetching');
+        const progress = t('fetchingElapsed', [fmtDuration(job.elapsedSeconds || 0)]);
+        setStatus(progress);
+        setActionStatus(btn, progress);
+        setActionProgress(btn, 0, 0, true);
+      } else if (job.status === 'combining' && job.total && job.done < job.total) {
+        btn.textContent = Math.round((job.done / job.total) * 100) + '%';
+        const progress = t('segmentProgressDetail', [String(job.done), String(job.total), formatBytes(job.bytes || 0), fmtDuration(job.elapsedSeconds || 0)]);
+        setStatus(progress);
+        setActionStatus(btn, progress);
+        setActionProgress(btn, job.done, job.total, true);
       } else if (job.status === 'combining' && job.mode === 'ffmpeg') {
         btn.textContent = job.bytes ? formatBytes(job.bytes) : t('processing');
-        const processing = t('ffmpegStatus', [job.seconds ? fmtDuration(job.seconds) : '']);
+        const processing = t('ffmpegProgress', [
+          job.seconds ? fmtDuration(job.seconds) : '0s',
+          formatBytes(job.bytes || 0),
+          fmtDuration(job.elapsedSeconds || 0),
+        ]);
         setStatus(processing);
         setActionStatus(btn, processing);
+        setActionProgress(btn, 0, 0, true);
+      } else if (job.status === 'combining') {
+        btn.textContent = t('processing');
+        const processing = t('finalizingProgress', [formatBytes(job.bytes || 0), fmtDuration(job.elapsedSeconds || 0)]);
+        setStatus(processing);
+        setActionStatus(btn, processing);
+        setActionProgress(btn, 0, 0, true);
       } else if (job.status === 'downloading') {
-        btn.textContent = t('saving');
-        setStatus(t('combinedSaving'));
-        setActionStatus(btn, t('combinedSaving'));
+        const received = Number(job.receivedBytes) || 0;
+        const total = Number(job.totalBytes) || 0;
+        if (total > 0) {
+          const percent = Math.max(0, Math.min(100, Math.round((received / total) * 100)));
+          const progress = t('downloadProgress', [String(percent), formatBytes(received), formatBytes(total)]);
+          btn.textContent = percent + '%';
+          setStatus(progress);
+          setActionStatus(btn, progress);
+          setActionProgress(btn, received, total, true);
+        } else {
+          btn.textContent = t('saving');
+          setStatus(t('combinedSaving'));
+          setActionStatus(btn, t('combinedSaving'));
+          setActionProgress(btn, 0, 0, true);
+        }
       } else if (job.status === 'complete') {
         clearInterval(timer);
         resetSaveButton(btn);
@@ -518,6 +628,8 @@ function load() {
         return;
       }
       items = resp.items || [];
+      activeJobs = resp.activeJobs || [];
+      activeDownloads = resp.activeDownloads || [];
       render();
     });
   });

@@ -276,6 +276,31 @@ async def main():
         "chrome.runtime.sendMessage({type:'ms-queue-status'}).then(r=>JSON.stringify(r))"))
     step("queue status available", isinstance(queue, dict) and isinstance(queue.get("queue"), list), queue)
 
+    slow_direct = decode(await evaluate(popup_ws, f"""
+        chrome.runtime.sendMessage({{type:'ms-download',tabId:tabId,item:{{
+          key:'e2e-slow-direct',url:'http://127.0.0.1:{FIXTURE_PORT}/hls/slow-direct.mp4',
+          kind:'video',title:'E2E direct progress',pageUrl:'{FIXTURE_URL}'
+        }}}}).then(r=>JSON.stringify(r))
+    """))
+    step("slow direct download started", isinstance(slow_direct, dict) and bool(slow_direct.get("id")), repr(slow_direct))
+    if not isinstance(slow_direct, dict):
+        raise RuntimeError("slow direct response missing")
+    direct_progress = None
+    deadline = time.time() + 6
+    while time.time() < deadline:
+        status = decode(await evaluate(popup_ws,
+            "chrome.runtime.sendMessage({type:'ms-queue-status'}).then(r=>JSON.stringify(r))")) or {}
+        direct_progress = next((entry for entry in status.get("queue", [])
+            if entry.get("id") == slow_direct.get("id")), None)
+        if (direct_progress and direct_progress.get("totalBytes", 0) > 0
+                and 0 < direct_progress.get("receivedBytes", 0) < direct_progress.get("totalBytes", 0)):
+            break
+        await asyncio.sleep(.2)
+    step("direct download exposes live byte progress",
+         bool(direct_progress and direct_progress.get("totalBytes", 0) > 0
+              and 0 < direct_progress.get("receivedBytes", 0) < direct_progress.get("totalBytes", 0)),
+         repr(direct_progress))
+
     await evaluate(popup_ws,
         "chrome.runtime.sendMessage({type:'ms-set-settings',settings:{rootFolder:'',minSizeKb:500,blacklist:''}})")
 
@@ -289,7 +314,7 @@ async def main():
           chrome.runtime.sendMessage({{
             type:'ms-hls-download',
             url:'http://127.0.0.1:{FIXTURE_PORT}/hls/slowmanifest.m3u8',
-            kind:'hls', tabId:{fixture_tab_id},
+            kind:'hls', itemKey:'e2e-slow-job', tabId:{fixture_tab_id},
             title:'E2E popup closed', pageUrl:'{FIXTURE_URL}'
           }}, () => void chrome.runtime.lastError);
           return 'dispatched';
@@ -297,6 +322,48 @@ async def main():
     """)
     step("slow HLS dispatched without awaiting completion", dispatched == "dispatched", dispatched)
     close_target(popup["id"] if popup else "")
+    open_tab("about:blank")
+
+    # Reopen the popup while the delayed manifest is still in flight. It must
+    # reconnect to the background-owned job and show live progress rather than
+    # presenting a second Save button.
+    await asyncio.sleep(3)
+    open_tab(popup_url)
+    await asyncio.sleep(1)
+    resumed_popup = target("page", "popup/popup.html")
+    step("popup reopened during active download", resumed_popup is not None, repr(resumed_popup and resumed_popup.get("url")))
+    if resumed_popup is None:
+        raise RuntimeError("resumed popup target missing")
+    resumed = decode(await evaluate(resumed_popup["webSocketDebuggerUrl"], f"""
+        chrome.tabs.query({{url:'http://127.0.0.1:{FIXTURE_PORT}/*'}}).then(tabs => {{
+          const fixture = tabs[0];
+          return chrome.runtime.sendMessage({{type:'ms-get-items',tabId:fixture.id}}).then(resp => {{
+            tabId = fixture.id; pageUrl = fixture.url;
+            items = (resp && resp.items) || [];
+            items.push({{key:'e2e-slow-job',url:'http://127.0.0.1:{FIXTURE_PORT}/hls/slowmanifest.m3u8',kind:'hls',title:'E2E popup closed'}});
+            activeJobs = (resp && resp.activeJobs) || [];
+            activeDownloads = (resp && resp.activeDownloads) || [];
+            render();
+            const button = Array.from(document.querySelectorAll('button.dl'))
+              .find(el => el.dataset.jobKey);
+            const row = button && button.closest('.item');
+            const progress = row && row.querySelector('.action-progress');
+            return JSON.stringify(button ? {{
+              jobKey: button.dataset.jobKey,
+              disabled: button.disabled,
+              label: button.textContent,
+              action: (row.querySelector('.action-status') || {{}}).textContent || '',
+              progressVisible: !!progress && !progress.hidden
+            }} : null);
+          }});
+        }})
+    """))
+    step("reopened popup reconnects and shows active progress",
+         isinstance(resumed, dict) and bool(resumed.get("jobKey"))
+         and resumed.get("disabled") is True and bool(resumed.get("action"))
+         and resumed.get("progressVisible") is True,
+         repr(resumed))
+    close_target(resumed_popup["id"])
     open_tab("about:blank")
 
     switched_download = None

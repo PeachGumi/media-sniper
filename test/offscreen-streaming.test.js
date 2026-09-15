@@ -166,6 +166,7 @@ function dispatch(msg) {
   eq(hls.response.size, 5, 'HLS concat size');
   eq(originalCalls.length, 0, 'streamable HLS bypasses legacy full-buffer handler');
   eq(progress.filter((m) => m.type === 'ms-hls-progress').length, 2, 'HLS progress emitted per segment');
+  eq(progress.filter((m) => m.type === 'ms-hls-progress').slice(-1)[0].bytes, 5, 'HLS progress reports bytes fetched so far');
   ok(keepaliveMessages.length > 0, 'OPFS HLS keeps the service worker alive while the popup is closed');
   await new Promise(function (resolve) { setImmediate(resolve); });
   eq(keepaliveDisconnects, 1, 'OPFS HLS releases its keepalive after completion');
@@ -190,6 +191,7 @@ function dispatch(msg) {
   eq(originalCalls[0].type, 'ms-offscreen-mux-local', 'synthetic operation is local mux');
   ok(/^blob:opfs\//.test(originalCalls[0].videoUrl), 'video mux input is OPFS File URL');
   ok(/^blob:opfs\//.test(originalCalls[0].audioUrl), 'audio mux input is OPFS File URL');
+  eq(progress.filter((m) => m.playlistUrl === 'https://x/main.mpd').slice(-1)[0].bytes, 5, 'DASH progress reports cumulative bytes across both tracks');
   eq(policy.ownedTempCount(), 0, 'temporary DASH track files released after mux response');
 
   const beforeSingleDashObjects = createdObjects.length;

@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.12.3 (2026-09-15)
+
+### Changed
+
+- Media cards now show live progress: browser download bytes and percentage,
+  HLS/DASH segment counts and bytes, FFmpeg output, and elapsed time.
+- Reopening the popup reconnects to active direct, HLS, DASH, and mux jobs
+  instead of showing an idle Save button while work continues in the background.
+
 ## v0.12.2 (2026-09-15)
 
 ### Fixed
