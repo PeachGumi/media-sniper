@@ -14,6 +14,10 @@
   header h1 span { color: #ff7a45; }
   .count { font-size: 11px; color: #9a9aa2; }
   .toolbar { display: flex; gap: 6px; margin-bottom: 8px; }
+  .view-tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin-bottom: 8px; }
+  .view-tabs button { color: #9a9aa2; }
+  .view-tabs button.active { background: #32353d; border-color: #565a65; color: #f2f2f3; }
+  .tab-count { margin-left: 4px; color: #ff9a72; }
   button {
     background: #2a2c33; border: 1px solid #3a3d46; color: #e8e8ea; border-radius: 6px;
     padding: 5px 10px; font-size: 12px; cursor: pointer;
@@ -34,7 +38,7 @@
   #accessStatus.err { color: #ff6b6b; }
   #status { font-size: 11px; color: #9a9aa2; margin-bottom: 6px; min-height: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   #status.err { color: #ff6b6b; white-space: normal; }
-  #list { max-height: 390px; overflow-y: auto; display: flex; flex-direction: column; gap: 5px; }
+  #list, #jobsList { max-height: 390px; overflow-y: auto; display: flex; flex-direction: column; gap: 5px; }
   .item { display: flex; align-items: center; gap: 8px; padding: 7px 8px; background: #1f2127; border: 1px solid #2a2c33; border-radius: 8px; }
   .badge { flex: 0 0 auto; font-size: 10px; font-weight: 700; text-transform: uppercase; padding: 2px 6px; border-radius: 4px; background: #333; color: #ccc; }
   .badge.video { background: #1d3a5f; color: #7cc4ff; }
@@ -56,6 +60,10 @@
   .item button { flex: 0 0 auto; padding: 4px 9px; font-size: 11px; }
   .item button.dl { background: #ff7a45; border-color: #ff7a45; color: #17181c; font-weight: 700; }
   .item button.busy { opacity: .8; cursor: default; }
+  .job { padding: 8px; background: #1f2127; border: 1px solid #2a2c33; border-radius: 8px; }
+  .job-head { display: flex; align-items: center; gap: 7px; }
+  .job-head .info { min-width: 0; }
+  .job-state { font-size: 10px; color: #c7c7cd; margin-top: 4px; }
   .empty { color: #77777f; font-size: 12px; text-align: center; padding: 24px 8px; }
   footer { margin-top: 8px; font-size: 10px; color: #5b5b63; display: flex; justify-content: space-between; }
   a { color: #7cc4ff; text-decoration: none; }
@@ -66,24 +74,33 @@
     <h1>Media<span>Sniper</span></h1>
     <span class="count" id="count" aria-live="polite"></span>
   </header>
-  <div class="toolbar" role="toolbar">
-    <button id="rescan" data-i18n="rescan">Rescan</button>
-    <button id="saveall" class="primary" data-i18n="saveAll">Save all</button>
-    <button id="clear" data-i18n="clear">Clear</button>
-    <button id="ytdlp" data-i18n="ytDlpCommand">yt-dlp command</button>
-    <a id="options" href="#" data-i18n-title="settings" data-i18n-aria-label="settings">⚙</a>
-  </div>
-  <section class="access" aria-labelledby="accessTitle">
-    <div class="access-title" id="accessTitle" data-i18n="accessTitle">Site access</div>
-    <div class="access-actions">
-      <button id="accessSite" data-i18n="accessSite">Always this site</button>
-      <button id="accessAll" data-i18n="accessAll">Always all sites</button>
-      <button id="accessClick" data-i18n="accessClick">Click only</button>
-    </div>
-    <div id="accessStatus" role="status" aria-live="polite"></div>
-  </section>
+  <nav class="view-tabs" aria-label="View">
+    <button id="mediaTab" class="active" data-i18n="mediaList">Media</button>
+    <button id="jobsTab"><span data-i18n="jobs">Jobs</span><span class="tab-count" id="jobsCount"></span></button>
+  </nav>
   <div id="status" role="status" aria-live="polite" aria-atomic="true"></div>
-  <div id="list"></div>
+  <section id="mediaPanel">
+    <div class="toolbar" role="toolbar">
+      <button id="rescan" data-i18n="rescan">Rescan</button>
+      <button id="saveall" class="primary" data-i18n="saveAll">Save all</button>
+      <button id="clear" data-i18n="clear">Clear</button>
+      <button id="ytdlp" data-i18n="ytDlpCommand">yt-dlp command</button>
+      <a id="options" href="#" data-i18n-title="settings" data-i18n-aria-label="settings">⚙</a>
+    </div>
+    <section class="access" aria-labelledby="accessTitle">
+      <div class="access-title" id="accessTitle" data-i18n="accessTitle">Site access</div>
+      <div class="access-actions">
+        <button id="accessSite" data-i18n="accessSite">Always this site</button>
+        <button id="accessAll" data-i18n="accessAll">Always all sites</button>
+        <button id="accessClick" data-i18n="accessClick">Click only</button>
+      </div>
+      <div id="accessStatus" role="status" aria-live="polite"></div>
+    </section>
+    <div id="list"></div>
+  </section>
+  <section id="jobsPanel" hidden>
+    <div id="jobsList"></div>
+  </section>
   <footer>
     <span id="destHint" data-i18n="destRoot">Destination: ~/Downloads/</span>
     <span id="version" data-i18n-aria-label="version"></span>

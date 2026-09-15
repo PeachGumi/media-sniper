@@ -23,7 +23,7 @@ const MediaSniperSecurity = (function () {
 
   const CONTENT_TYPES = new Set(['ms-page-meta', 'ms-report']);
   const UI_TYPES = new Set([
-    'ms-get-items', 'ms-get-settings', 'ms-set-settings', 'ms-download-all',
+    'ms-get-items', 'ms-get-jobs', 'ms-get-settings', 'ms-set-settings', 'ms-download-all',
     'ms-yt-mux-download', 'ms-clear', 'ms-download', 'ms-download-blob',
     'ms-hls-download', 'ms-hls-stop', 'ms-hls-status', 'ms-queue-status', 'ms-select-quality',
   ]);

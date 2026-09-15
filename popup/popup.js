@@ -8,6 +8,8 @@ let pageUrl = null;
 let items = [];
 let activeJobs = [];
 let activeDownloads = [];
+let jobs = [];
+let jobsRequestSequence = 0;
 const hlsTimers = new Map();
 let saveOperationSequence = 0;
 let activeSaveCount = 0;
@@ -39,6 +41,130 @@ function fmtDuration(sec) {
   if (m < 60) return r ? m + 'm' + r + 's' : m + 'm';
   const h = Math.floor(m / 60);
   return h + 'h' + (m % 60) + 'm';
+}
+
+function switchView(view) {
+  const showJobs = view === 'jobs';
+  $('#mediaPanel').hidden = showJobs;
+  $('#jobsPanel').hidden = !showJobs;
+  $('#mediaTab').classList[showJobs ? 'remove' : 'add']('active');
+  $('#jobsTab').classList[showJobs ? 'add' : 'remove']('active');
+  if (showJobs) loadJobs();
+}
+
+function ffmpegPhaseText(elapsedSeconds, job) {
+  const elapsed = fmtDuration(elapsedSeconds || 0);
+  // Bytes are the muxer output actually written to disk. Before the first
+  // write, ffmpeg is still fetching/parsing segments: report those requests so
+  // a long job never looks frozen at "0 B".
+  if (job.bytes > 0) return t('ffmpegProgress', [formatBytes(job.bytes), elapsed]);
+  if (job.fetches > 0) return t('mediaFetchingProgress', [String(job.fetches), formatBytes(job.fetchedBytes || 0), elapsed]);
+  return t('fetchingElapsed', [elapsed]);
+}
+
+function jobProgress(job) {
+  const elapsed = job.startedAt ? fmtDuration((Date.now() - job.startedAt) / 1000) : '0s';
+  if (job.status === 'failed') {
+    return { text: t('failedPrefix', [job.error || 'unknown error']), value: 0, max: 0 };
+  }
+  if (job.status === 'complete') {
+    return { text: t('savedFile', [job.filename || job.title || 'Media']), value: 1, max: 1 };
+  }
+  if (job.status === 'recording') {
+    return { text: t('recordingStatus', [fmtDuration(job.seconds || 0), formatBytes(job.bytes || 0)]), value: 0, max: 0 };
+  }
+  if (job.status === 'combining' && job.mode === 'ffmpeg') {
+    return { text: ffmpegPhaseText(job.startedAt ? (Date.now() - job.startedAt) / 1000 : 0, job), value: 0, max: 0 };
+  }
+  if (job.status === 'fetching' || (job.status === 'combining' && job.total && job.done < job.total)) {
+    if (job.total) return {
+      text: t('segmentProgressDetail', [String(job.done || 0), String(job.total), formatBytes(job.bytes || 0), elapsed]),
+      value: job.done || 0, max: job.total,
+    };
+    return { text: t('fetchingElapsed', [elapsed]), value: 0, max: 0 };
+  }
+  if (job.status === 'combining') {
+    return { text: t('finalizingProgress', [formatBytes(job.bytes || 0), elapsed]), value: 0, max: 0 };
+  }
+  if (job.status === 'started' || job.status === 'downloading' || job.status === 'fallback') {
+    if (job.totalBytes) {
+      const percent = Math.max(0, Math.min(100, Math.round(((job.receivedBytes || 0) / job.totalBytes) * 100)));
+      return { text: t('downloadProgress', [String(percent), formatBytes(job.receivedBytes || 0), formatBytes(job.totalBytes)]), value: job.receivedBytes || 0, max: job.totalBytes };
+    }
+    return { text: t('downloadInProgress'), value: 0, max: 0 };
+  }
+  return { text: t('queuedStatus'), value: 0, max: 0 };
+}
+
+function renderJobs() {
+  const list = $('#jobsList');
+  list.textContent = '';
+  $('#jobsCount').textContent = jobs.length ? String(jobs.length) : '';
+  if (!jobs.length) {
+    const empty = document.createElement('div');
+    empty.className = 'empty';
+    empty.textContent = t('emptyJobs');
+    list.appendChild(empty);
+    return;
+  }
+  for (const job of jobs) {
+    const row = document.createElement('div');
+    row.className = 'job';
+    row.dataset.jobId = job.id;
+    const head = document.createElement('div');
+    head.className = 'job-head';
+    const badge = document.createElement('span');
+    badge.className = 'badge ' + (job.type === 'media' ? 'hls' : 'video');
+    badge.textContent = job.type === 'media' ? 'JOB' : 'DL';
+    const info = document.createElement('div');
+    info.className = 'info';
+    const name = document.createElement('div');
+    name.className = 'name';
+    name.textContent = job.title || job.filename || 'Media';
+    const meta = document.createElement('div');
+    meta.className = 'meta';
+    meta.textContent = t('jobTab', [String(job.tabId == null ? '?' : job.tabId)]);
+    info.appendChild(name);
+    info.appendChild(meta);
+    head.appendChild(badge);
+    head.appendChild(info);
+    if (job.live) {
+      const stop = document.createElement('button');
+      stop.textContent = t('stop');
+      stop.addEventListener('click', function () {
+        stop.disabled = true;
+        chrome.runtime.sendMessage({ type: 'ms-hls-stop', jobKey: job.jobKey }, function () { loadJobs(); });
+      });
+      head.appendChild(stop);
+    }
+    const state = document.createElement('div');
+    state.className = 'job-state';
+    const progressState = jobProgress(job);
+    state.textContent = progressState.text;
+    const progress = document.createElement('progress');
+    progress.className = 'action-progress';
+    setActionProgress({ _actionProgressEl: progress }, progressState.value, progressState.max, true);
+    row.appendChild(head);
+    row.appendChild(state);
+    row.appendChild(progress);
+    list.appendChild(row);
+  }
+}
+
+function loadJobs() {
+  const sequence = ++jobsRequestSequence;
+  chrome.runtime.sendMessage({ type: 'ms-get-jobs' }, function (resp) {
+    if (sequence !== jobsRequestSequence || chrome.runtime.lastError || !resp) return;
+    jobs = resp.jobs || [];
+    renderJobs();
+  });
+}
+
+function scheduleJobRefresh() {
+  setTimeout(function refresh() {
+    loadJobs();
+    scheduleJobRefresh();
+  }, 700);
 }
 
 function labelFor(item) {
@@ -175,6 +301,9 @@ function reconnectActiveJob(item, btn) {
     btn.dataset.recording = '1';
     btn.disabled = false;
     btn.textContent = t('stop');
+  } else if (job.status === 'queued') {
+    btn.textContent = t('saving');
+    setActionStatus(btn, t('mediaQueued'));
   } else if (job.status === 'fetching') {
     btn.textContent = t('fetching');
     setActionStatus(btn, item.kind === 'dash' ? t('dashFetching') : t('hlsFetching'));
@@ -516,7 +645,13 @@ function pollHls(item, btn, operation) {
       btn.dataset.stopping = '';
       btn.disabled = true;
       btn.setAttribute('aria-busy', 'true');
-      if (job.status === 'fetching' && job.total) {
+      if (job.status === 'queued') {
+        btn.textContent = t('saving');
+        const waiting = t('mediaQueued') + ' ' + fmtDuration(job.elapsedSeconds || 0);
+        setStatus(waiting);
+        setActionStatus(btn, waiting);
+        setActionProgress(btn, 0, 0, true);
+      } else if (job.status === 'fetching' && job.total) {
         const percent = Math.max(0, Math.min(100, Math.round((job.done / job.total) * 100)));
         btn.textContent = percent + '%';
         const progress = t('segmentProgressDetail', [String(job.done), String(job.total), formatBytes(job.bytes || 0), fmtDuration(job.elapsedSeconds || 0)]);
@@ -536,12 +671,8 @@ function pollHls(item, btn, operation) {
         setActionStatus(btn, progress);
         setActionProgress(btn, job.done, job.total, true);
       } else if (job.status === 'combining' && job.mode === 'ffmpeg') {
+        const processing = ffmpegPhaseText(job.elapsedSeconds, job);
         btn.textContent = job.bytes ? formatBytes(job.bytes) : t('processing');
-        const processing = t('ffmpegProgress', [
-          job.seconds ? fmtDuration(job.seconds) : '0s',
-          formatBytes(job.bytes || 0),
-          fmtDuration(job.elapsedSeconds || 0),
-        ]);
         setStatus(processing);
         setActionStatus(btn, processing);
         setActionProgress(btn, 0, 0, true);
@@ -635,6 +766,9 @@ function load() {
   });
 }
 
+$('#mediaTab').addEventListener('click', () => switchView('media'));
+$('#jobsTab').addEventListener('click', () => switchView('jobs'));
+
 $('#rescan').addEventListener('click', () => {
   if (tabId == null) return;
   chrome.tabs.sendMessage(tabId, { type: 'ms-scan' }, () => { void chrome.runtime.lastError; });
@@ -702,5 +836,11 @@ $('#options').addEventListener('click', (e) => {
   chrome.runtime.openOptionsPage();
 });
 
-document.addEventListener('DOMContentLoaded', () => loadSettings(load));
-if (document.readyState !== 'loading') loadSettings(load);
+function initialize() {
+  loadSettings(load);
+  loadJobs();
+  scheduleJobRefresh();
+}
+
+document.addEventListener('DOMContentLoaded', initialize);
+if (document.readyState !== 'loading') initialize();

@@ -26,6 +26,28 @@ import LibAVFactory from './libav/libav-6.5.7.1-h264-aac-mp3.wasm.mjs';
 let activeHeaders = {}; // {name: value} for the currently running ffmpeg job
 const nativeFetch = typeof globalThis.fetch === 'function' ? globalThis.fetch.bind(globalThis) : null;
 let activeFetchContext = null;
+// Network activity of the running job. ffmpeg's jsfetch protocol routes every
+// segment request through FetchWithRetry, so these counters tell the popup
+// that a job is fetching even while it has not written output yet.
+const fetchStats = { count: 0, bytes: 0 };
+
+function resetFetchStats() {
+  fetchStats.count = 0;
+  fetchStats.bytes = 0;
+}
+
+function sendOffscreenProgress(state) {
+  try {
+    chrome.runtime.sendMessage({
+      type: 'ms-offscreen-progress',
+      jobId: state.jobId,
+      seconds: state.seconds || 0,
+      bytes: state.bytes || 0,
+      fetches: state.fetches || 0,
+      fetchedBytes: state.fetchedBytes || 0,
+    });
+  } catch (e) { /* service worker asleep: progress is cosmetic */ }
+}
 
 function requestOrigin(input) {
   try {
@@ -158,6 +180,9 @@ globalThis.FetchWithRetry = async function (url, headers, attempts, fetchTimeout
       const r = await fetch(url, { headers: merged, cache: bypassCache ? 'reload' : 'default', credentials: 'include', signal: combined.signal });
       clearTimeout(timer);
       if (r.ok) {
+        fetchStats.count++;
+        const declared = Number(r.headers && typeof r.headers.get === 'function' ? r.headers.get('content-length') : NaN);
+        if (Number.isFinite(declared) && declared > 0) fetchStats.bytes += declared;
         // Return the LIVE response to jsfetch (exactly what VDH does). The
         // demuxer reads it via body.getReader(); each .read() is a genuine
         // async op that yields to the event loop, which the emscripten fiber
@@ -257,8 +282,11 @@ async function runFfmpegJob(msg, sendResponse) {
   current = { libav: null, jobId: jobId, chunks: null, abortRequested: false };
   activeHeaders = msg.headers || {};
   lastDone = null;
-  const chunks = [];
+  resetFetchStats();
+  const chunks = []; // legacy in-memory assembly, used only without OPFS
+  let sink = null;
   let libav = null;
+  const startedAt = Date.now();
   const releaseKeepalive = beginMediaJobKeepalive();
   try {
     // wasmurl is mandatory: the module otherwise resolves the wasm against
@@ -277,14 +305,29 @@ async function runFfmpegJob(msg, sendResponse) {
     }
 
     const OUT = 'out.' + (msg.ext || 'mp4');
+    // Stream the muxer output straight into an OPFS file when the disk-backed
+    // sink is available. The legacy path had to keep every write in memory and
+    // assemble the artifact at the end, so peak RAM scaled with the finished
+    // file — the 768 MiB guard exists precisely because of that, and large
+    // items failed there after minutes of successful conversion.
+    const sinkApi = globalThis.MediaSniperStreamingPolicy;
+    if (sinkApi && typeof sinkApi.createOutputSink === 'function') {
+      try { sink = await sinkApi.createOutputSink(msg.ext || 'mp4'); } catch (e) { sink = null; }
+    }
+    current.sink = sink;
     await libav.mkwriterdev(OUT);
     if (current.abortRequested) {
+      if (sink) await sink.abort();
       sendResponse({ error: 'recording stopped during ffmpeg writer setup' });
       return;
     }
-    libav.onwrite = function (name, pos, data) {
-      chunks.push({ pos: pos, data: new Uint8Array(data) });
-    };
+    if (sink) {
+      libav.onwrite = function (name, position, data) { sink.write(name, position, data); };
+    } else {
+      libav.onwrite = function (name, position, data) {
+        chunks.push({ pos: position, data: new Uint8Array(data) });
+      };
+    }
 
     // NOTE: DASH no longer goes through this function — see
     // handleDashBuild below (jsfetch + dash demuxer deadlocks on
@@ -318,19 +361,17 @@ async function runFfmpegJob(msg, sendResponse) {
     }
     args.push(OUT);
 
-    // progress: ffmpeg's own counters, forwarded as plain messages
-    current.timer = setInterval(async function () {
+    // Progress: bytes actually written to the artifact, plus the segment
+    // fetches ffmpeg's jsfetch protocol performed. The bundled libav build
+    // exposes no ffmpeg_get_out_time_ms/ffmpeg_get_total_size_bytes, so the
+    // previous timer reported 0s/0B for the whole job.
+    current.timer = setInterval(function () {
       if (!current || current.libav !== libav) return;
-      try {
-        const ms = await libav.ffmpeg_get_out_time_ms();
-        const bytes = await libav.ffmpeg_get_total_size_bytes();
-        current.seconds = Math.floor(ms / 1000);
-        current.bytes = bytes || 0;
-        chrome.runtime.sendMessage({
-          type: 'ms-offscreen-progress',
-          jobId: jobId, seconds: current.seconds, bytes: current.bytes,
-        });
-      } catch (e) { /* instance torn down */ }
+      current.seconds = msg.live ? Math.floor((Date.now() - startedAt) / 1000) : 0;
+      current.bytes = sink ? sink.bytes() : current.bytes || 0;
+      current.fetches = fetchStats.count;
+      current.fetchedBytes = fetchStats.bytes;
+      sendOffscreenProgress(current);
     }, 1000);
 
     let rc = 0;
@@ -345,10 +386,28 @@ async function runFfmpegJob(msg, sendResponse) {
     const aborted = !!(libav.abortController && libav.abortController.signal.aborted);
 
     if (rc !== 0 && !msg.live) {
+      if (sink) await sink.abort();
       sendResponse({ error: 'ffmpeg failed (rc=' + rc + ')' });
       return;
     }
 
+    if (sink) {
+      const written = sink.bytes();
+      if (!written) {
+        await sink.abort();
+        sendResponse({ error: 'ffmpeg produced no output' + (rc ? ' (rc=' + rc + ')' : '') });
+        return;
+      }
+      // Wait for the queued file-system writes, close the file and hand the
+      // disk-backed File to the caller: nothing is read back into the heap.
+      const made = await sink.finish();
+      sink = null;
+      lastDone = { jobId: jobId, url: made.url, size: made.size, ext: msg.ext || 'mp4', partial: !!(rc !== 0 && (aborted || msg.live)) };
+      sendResponse({ url: made.url, size: made.size, partial: lastDone.partial });
+      return;
+    }
+
+    // ----- legacy assembly (OPFS unavailable) -----
     // assemble written chunks positionally (frag output may rewrite offsets)
     let total = 0;
     for (const c of chunks) total = Math.max(total, c.pos + c.data.length);
@@ -364,6 +423,7 @@ async function runFfmpegJob(msg, sendResponse) {
     lastDone = { jobId: jobId, url: blobUrl, size: total, ext: msg.ext || 'mp4', partial: !!(rc !== 0 && (aborted || msg.live)) };
     sendResponse({ url: blobUrl, size: total, partial: lastDone.partial });
   } catch (e) {
+    if (sink) { try { await sink.abort(); } catch (err) { /* best effort */ } }
     sendResponse({ error: String(e && e.message || e) });
   } finally {
     if (current && current.timer) clearInterval(current.timer);
@@ -589,6 +649,8 @@ async function handleMuxLocal(msg, sendResponse) {
   const jobId = msg.jobId || 'mux-local';
   current = { libav: null, jobId: jobId, chunks: null };
   let libav = null;
+  let sink = null;
+  const chunks = []; // legacy in-memory assembly, used only without OPFS
   try {
     const vBuf = new Uint8Array(await (await fetch(msg.videoUrl)).arrayBuffer());
     const aBuf = new Uint8Array(await (await fetch(msg.audioUrl)).arrayBuffer());
@@ -601,18 +663,41 @@ async function handleMuxLocal(msg, sendResponse) {
     });
     current.libav = libav;
 
-    const chunks = [];
+    // Same disk-backed output as the HLS path: a muxed artifact can be large
+    // too, and it used to hit the same 768 MiB in-memory guard.
+    const sinkApi = globalThis.MediaSniperStreamingPolicy;
+    if (sinkApi && typeof sinkApi.createOutputSink === 'function') {
+      try { sink = await sinkApi.createOutputSink(msg.ext || 'mp4'); } catch (e) { sink = null; }
+    }
+    current.sink = sink;
     await libav.mkwriterdev('out.mp4');
-    libav.onwrite = function (name, pos, data) {
-      chunks.push({ pos: pos, data: new Uint8Array(data) });
-    };
+    if (sink) {
+      libav.onwrite = function (name, position, data) { sink.write(name, position, data); };
+    } else {
+      libav.onwrite = function (name, position, data) {
+        chunks.push({ pos: position, data: new Uint8Array(data) });
+      };
+    }
 
     await libav.writeFile('/v.mp4', vBuf);
     await libav.writeFile('/a.m4a', aBuf);
     const rc = await libav.ffmpeg(['-y', '-nostdin', '-i', '/v.mp4', '-i', '/a.m4a', '-c', 'copy', '-map', '0:v:0', '-map', '1:a:0?', '-avoid_negative_ts', 'make_zero', '-f', 'mp4', 'out.mp4']);
 
     if (rc !== 0) {
+      if (sink) await sink.abort();
       sendResponse({ error: 'muxに失敗しました (rc=' + rc + ')' });
+      return;
+    }
+
+    if (sink) {
+      if (!sink.bytes()) {
+        await sink.abort();
+        sendResponse({ error: 'mux出力が空です' + (rc ? ' (rc=' + rc + ')' : '') });
+        return;
+      }
+      const made = await sink.finish();
+      sink = null;
+      sendResponse({ url: made.url, size: made.size });
       return;
     }
 
@@ -626,6 +711,7 @@ async function handleMuxLocal(msg, sendResponse) {
     for (const c of chunks) buf.set(c.data, c.pos);
     sendResponse({ url: URL.createObjectURL(new Blob([buf], { type: 'video/mp4' })), size: total });
   } catch (e) {
+    if (sink) { try { await sink.abort(); } catch (err) { /* best effort */ } }
     sendResponse({ error: String(e && e.message || e) });
   } finally {
     if (current && current.timer) clearInterval(current.timer);
@@ -680,6 +766,8 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
         jobId: current ? current.jobId : null,
         seconds: current ? (current.seconds || 0) : 0,
         bytes: current ? (current.bytes || 0) : 0,
+        fetches: current ? (current.fetches || 0) : 0,
+        fetchedBytes: current ? (current.fetchedBytes || 0) : 0,
         done: lastDone,
       });
       return false;

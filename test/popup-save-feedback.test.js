@@ -35,9 +35,10 @@ function makeElement(tag, id) {
 }
 
 function flush() { return new Promise(function (resolve) { setImmediate(resolve); }); }
+function allText(el) { return (el.textContent || '') + (el.children || []).map(allText).join(''); }
 
 (async function () {
-  const ids = ['status', 'count', 'list', 'rescan', 'saveall', 'clear', 'ytdlp', 'options', 'destHint', 'accessSite', 'accessAll', 'accessClick', 'accessStatus'];
+  const ids = ['status', 'count', 'list', 'mediaTab', 'jobsTab', 'mediaPanel', 'jobsPanel', 'jobsList', 'jobsCount', 'rescan', 'saveall', 'clear', 'ytdlp', 'options', 'destHint', 'accessSite', 'accessAll', 'accessClick', 'accessStatus'];
   const elements = {};
   ids.forEach(function (id) { elements[id] = makeElement('div', id); });
   const item = { key: 'direct-1', url: 'https://cdn.example/video.mp4', kind: 'video', title: 'Direct video', size: 900000 };
@@ -53,6 +54,9 @@ function flush() { return new Promise(function (resolve) { setImmediate(resolve)
   let holdHlsStatus = false;
   const pendingHlsStatus = [];
   let queueState = { id: 'queue-1', status: 'queued', filename: 'Direct video.mp4' };
+  let jobsState = [{ id: 'foreign-job', type: 'download', status: 'started', tabId: 77, title: 'Other tab video', receivedBytes: 1024, totalBytes: 4096 }];
+  let holdJobs = false;
+  const jobCallbacks = [];
 
   const chrome = {
     runtime: {
@@ -60,6 +64,10 @@ function flush() { return new Promise(function (resolve) { setImmediate(resolve)
       sendMessage: function (message, callback) {
         if (message.type === 'ms-get-settings') callback({ rootFolder: '', minSizeKb: 500, blacklist: '' });
         else if (message.type === 'ms-get-items') callback({ items: [item, hlsItem, ytItem] });
+        else if (message.type === 'ms-get-jobs') {
+          if (holdJobs) jobCallbacks.push(callback);
+          else callback({ jobs: jobsState });
+        }
         else if (message.type === 'ms-download') downloadCallback = callback;
         else if (message.type === 'ms-hls-download') hlsCallback = callback;
         else if (message.type === 'ms-yt-mux-download') ytCallback = callback;
@@ -98,6 +106,50 @@ function flush() { return new Promise(function (resolve) { setImmediate(resolve)
   vm.createContext(ctx);
   vm.runInContext(popupSrc, ctx);
   await flush();
+
+  eq(elements.jobsList.children.length, 1, 'global jobs render separately from detected media');
+  ok(allText(elements.jobsList.children[0]).indexOf('Other tab video') >= 0, 'job from another page tab is visible');
+  ok(allText(elements.jobsList.children[0]).indexOf('downloadProgress:25|1.0 KB|4.0 KB') >= 0, 'global job card shows live progress');
+  elements.jobsTab.dispatch('click');
+  eq(elements.mediaPanel.hidden, true, 'Jobs tab hides the detected-video panel');
+  eq(elements.jobsPanel.hidden, false, 'Jobs tab shows the global job panel');
+  elements.mediaTab.dispatch('click');
+
+  holdJobs = true;
+  ctx.loadJobs();
+  ctx.loadJobs();
+  jobCallbacks[1]({ jobs: [{ id: 'new-progress', type: 'download', status: 'downloading', title: 'Newest progress', receivedBytes: 3072, totalBytes: 4096 }] });
+  jobCallbacks[0]({ jobs: [{ id: 'old-progress', type: 'download', status: 'downloading', title: 'Stale progress', receivedBytes: 1024, totalBytes: 4096 }] });
+  ok(allText(elements.jobsList).indexOf('Newest progress') >= 0 && allText(elements.jobsList).indexOf('Stale progress') < 0,
+    'late global-job response cannot overwrite newer progress');
+  holdJobs = false;
+
+  jobsState = [{ id: 'ffmpeg-job', type: 'media', status: 'combining', mode: 'ffmpeg', tabId: 77,
+    title: 'Converting video', seconds: 12, bytes: 2048, startedAt: 1000 }];
+  elements.jobsTab.dispatch('click');
+  ok(allText(elements.jobsList.children[0]).indexOf('ffmpegProgress:2.0 KB|0s') >= 0,
+    'media card and global job use the same FFmpeg conversion status');
+
+  // Before the muxer writes its first byte the job is still fetching segments:
+  // the card must show that activity instead of a frozen 0 B.
+  jobsState = [{ id: 'ffmpeg-fetching-job', type: 'media', status: 'combining', mode: 'ffmpeg', tabId: 77,
+    title: 'Fetching video', bytes: 0, fetches: 9, fetchedBytes: 4194304, startedAt: 1000 }];
+  elements.jobsTab.dispatch('click');
+  ok(allText(elements.jobsList.children[0]).indexOf('mediaFetchingProgress:9|4.0 MB|0s') >= 0,
+    'ffmpeg job without output yet reports the segment fetches it performed');
+
+  jobsState = [{ id: 'failed-job', type: 'media', status: 'failed', tabId: 77,
+    title: 'Failed video', error: 'conversion stopped' }];
+  elements.jobsTab.dispatch('click');
+  ok(allText(elements.jobsList.children[0]).indexOf('failedPrefix:conversion stopped') >= 0,
+    'failed jobs remain visible with their final error');
+
+  jobsState = [{ id: 'fallback-job', type: 'download', status: 'fallback', tabId: 77,
+    title: 'Authenticated retry' }];
+  elements.jobsTab.dispatch('click');
+  ok(allText(elements.jobsList.children[0]).indexOf('downloadInProgress') >= 0,
+    'authenticated fallback is shown as active instead of waiting in queue');
+  elements.mediaTab.dispatch('click');
 
   const row = elements.list.children[0];
   const info = row.children[1];
@@ -184,10 +236,26 @@ function flush() { return new Promise(function (resolve) { setImmediate(resolve)
   eq(hlsSave.textContent, '30%', 'HLS fetch shows segment percentage');
   eq(hlsAction.textContent, 'segmentProgressDetail:3|10|3.0 MB|12s', 'HLS fetch proves activity with segments, bytes, and elapsed time');
 
+  hlsState = { status: 'queued', elapsedSeconds: 7 };
+  intervals[4]();
+  eq(hlsAction.textContent, 'mediaQueued 7s', 'a job waiting for the converter shows the wait, not a conversion');
+
   hlsState = { status: 'combining', mode: 'ffmpeg', seconds: 30, bytes: 2097152, elapsedSeconds: 42 };
   intervals[4]();
   eq(hlsSave.textContent, '2.0 MB', 'ffmpeg phase shows produced bytes on the button');
-  eq(hlsAction.textContent, 'ffmpegProgress:30s|2.0 MB|42s', 'ffmpeg phase shows media time, produced bytes, and elapsed time');
+  eq(hlsAction.textContent, 'ffmpegProgress:2.0 MB|42s', 'ffmpeg phase shows produced bytes and elapsed time');
+
+  // The bundled libav build has no ffmpeg out-time API, so "media 0s" was a
+  // permanent lie. While the muxer has written nothing, the honest report is
+  // the segment fetching ffmpeg already performed.
+  hlsState = { status: 'combining', mode: 'ffmpeg', bytes: 0, fetches: 12, fetchedBytes: 5242880, elapsedSeconds: 20 };
+  intervals[4]();
+  eq(hlsAction.textContent, 'mediaFetchingProgress:12|5.0 MB|20s', 'ffmpeg phase without output reports fetches and bytes fetched');
+  eq(hlsSave.textContent, 'processing', 'no produced bytes yet keeps the generic processing label');
+
+  hlsState = { status: 'combining', mode: 'ffmpeg', bytes: 0, fetches: 0, fetchedBytes: 0, elapsedSeconds: 8 };
+  intervals[4]();
+  eq(hlsAction.textContent, 'fetchingElapsed:8s', 'ffmpeg startup still proves elapsed time');
 
   hlsState = { status: 'combining', mode: 'concat', done: 3, total: 10, bytes: 3145728, elapsedSeconds: 12 };
   intervals[4]();

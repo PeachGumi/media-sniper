@@ -363,6 +363,72 @@ async def main():
          and resumed.get("disabled") is True and bool(resumed.get("action"))
          and resumed.get("progressVisible") is True,
          repr(resumed))
+    global_job = decode(await evaluate(resumed_popup["webSocketDebuggerUrl"], """
+        chrome.runtime.sendMessage({type:'ms-get-jobs'}).then(resp => {
+          jobs = (resp && resp.jobs) || [];
+          renderJobs();
+          switchView('jobs');
+          const row = document.querySelector('.job');
+          return JSON.stringify(row ? {
+            count: jobs.length,
+            title: (row.querySelector('.name') || {}).textContent || '',
+            state: (row.querySelector('.job-state') || {}).textContent || '',
+            jobsVisible: !document.querySelector('#jobsPanel').hidden,
+            mediaHidden: document.querySelector('#mediaPanel').hidden
+          } : null);
+        })
+    """))
+    step("global Jobs view keeps the other-tab HLS job visible",
+         isinstance(global_job, dict) and global_job.get("count", 0) > 0
+         and "E2E popup closed" in global_job.get("title", "")
+         and bool(global_job.get("state"))
+         and global_job.get("jobsVisible") is True
+         and global_job.get("mediaHidden") is True,
+         repr(global_job))
+
+    # Force the MV3 worker away while FFmpeg still owns the job in the
+    # offscreen document. The replacement worker must restore the job from
+    # session storage, reconnect to offscreen progress, and finish handoff.
+    combining = None
+    deadline = time.time() + 55
+    while time.time() < deadline:
+        combining = decode(await evaluate(resumed_popup["webSocketDebuggerUrl"], """
+            chrome.runtime.sendMessage({type:'ms-hls-status',jobKey:'http://127.0.0.1:%d/hls/slowmanifest.m3u8'})
+              .then(x => JSON.stringify(x))
+        """ % FIXTURE_PORT)) or {}
+        if isinstance(combining, dict) and combining.get("status") == "combining":
+            break
+        await asyncio.sleep(.5)
+    step("slow HLS reached offscreen conversion before worker restart",
+         isinstance(combining, dict) and combining.get("status") == "combining", repr(combining))
+    old_sw = target("service_worker", EXT_ID)
+    step("service worker available for forced restart", old_sw is not None, repr(old_sw and old_sw.get("id")))
+    if old_sw:
+        close_target(old_sw["id"])
+    replacement_sw = None
+    deadline = time.time() + 12
+    while time.time() < deadline:
+        replacement_sw = target("service_worker", EXT_ID)
+        if replacement_sw and (not old_sw or replacement_sw.get("id") != old_sw.get("id")):
+            break
+        await asyncio.sleep(.25)
+    step("service worker restarted", replacement_sw is not None and
+         (not old_sw or replacement_sw.get("id") != old_sw.get("id")),
+         repr(replacement_sw and replacement_sw.get("id")))
+    restored_job = decode(await evaluate(resumed_popup["webSocketDebuggerUrl"], """
+        chrome.runtime.sendMessage({type:'ms-get-jobs'}).then(r => JSON.stringify(
+          ((r && r.jobs) || []).find(j => j.title === 'E2E popup closed') || null))
+    """))
+    step("job remains visible after service-worker restart",
+         isinstance(restored_job, dict) and restored_job.get("status") in
+         ("combining", "downloading", "complete"), repr(restored_job))
+    fixture_page = target("page", f"127.0.0.1:{FIXTURE_PORT}/hls/")
+    recaptured = await evaluate(fixture_page["webSocketDebuggerUrl"], f"""
+        fetch('http://127.0.0.1:{FIXTURE_PORT}/hls/auth.m3u8', {{
+          headers: {{Authorization: 'Bearer media-sniper-e2e'}}
+        }}).then(r => r.status)
+    """) if fixture_page else None
+    step("page request context recaptured after worker restart", recaptured == 200, repr(recaptured))
     close_target(resumed_popup["id"])
     open_tab("about:blank")
 

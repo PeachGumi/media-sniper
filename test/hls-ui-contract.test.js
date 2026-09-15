@@ -220,7 +220,7 @@ async function runPopupContract() {
       { url: 'https://cdn.example.test/hls/video/1080.m3u8?auth=parent', bandwidth: 6000000, resolution: '1920x1080', audioUrl: 'https://cdn.example.test/hls/audio/main.m3u8?auth=parent' },
     ],
   };
-  const ids = ['status', 'count', 'list', 'rescan', 'saveall', 'clear', 'ytdlp', 'options', 'destHint', 'accessSite', 'accessAll', 'accessClick', 'accessStatus'];
+  const ids = ['status', 'count', 'list', 'mediaTab', 'jobsTab', 'mediaPanel', 'jobsPanel', 'jobsList', 'jobsCount', 'rescan', 'saveall', 'clear', 'ytdlp', 'options', 'destHint', 'accessSite', 'accessAll', 'accessClick', 'accessStatus'];
   const elements = {};
   ids.forEach(function (id) { elements[id] = makeElement('div', id); });
   const messages = [];
@@ -231,6 +231,7 @@ async function runPopupContract() {
         messages.push(message);
         if (message.type === 'ms-get-settings') callback({ rootFolder: '', minSizeKb: 500, blacklist: '' });
         else if (message.type === 'ms-get-items') callback({ items: [item] });
+        else if (message.type === 'ms-get-jobs') callback({ jobs: [] });
         else callback({ ok: true, queued: 0, deferred: 1 });
       },
       openOptionsPage: function () {},
@@ -247,7 +248,7 @@ async function runPopupContract() {
     addEventListener: function () {},
   };
   const ctx = {
-    chrome, document, console, URL, Promise, Date, Math, setTimeout,
+    chrome, document, console, URL, Promise, Date, Math, setTimeout: function () {},
     navigator: { clipboard: { writeText: function () { return Promise.resolve(); } } },
     MediaSniperI18n: { t: function (key) { return key; } },
     MediaSniperLogic: L,

@@ -17,6 +17,9 @@ let resolveFactory = null;
 let delayWriter = false;
 let resolveWriter = null;
 let ffmpegCalls = 0;
+let sinkJob = false;
+const sinkWrites = [];
+let sinkAborted = false;
 let offscreenGlobal = null;
 const libav = {
   onwrite: null,
@@ -26,6 +29,14 @@ const libav = {
   },
   async ffmpeg() {
     ffmpegCalls++;
+    if (sinkJob) {
+      this.onwrite('out.mp4', 0, new Uint8Array([1, 2, 3, 4]));
+      this.onwrite('out.mp4', 1000, new Uint8Array([5, 6]));
+      // Fire the running job's progress timer the way the browser would.
+      const timer = intervals[intervals.length - 1];
+      if (typeof timer === 'function') timer();
+      return 0;
+    }
     if (fetchProbe) {
       const response = await offscreenGlobal.fetch('https://page.example/segment.ts');
       if (!response || !response.ok) throw new Error('nested fetch failed');
@@ -40,11 +51,14 @@ const libav = {
   ffmpeg_interrupt() {},
   exit() { exited++; },
 };
+const sentMessages = [];
+const intervals = [];
+let objectUrlsCreated = 0;
 const fakeChrome = {
   runtime: {
     getURL(path) { return 'chrome-extension://test/' + path; },
     onMessage: { addListener(fn) { listener = fn; } },
-    sendMessage() { return Promise.resolve(); },
+    sendMessage(message) { sentMessages.push(message); return Promise.resolve(); },
     connect() {
       return {
         postMessage(message) { keepaliveMessages.push(message); },
@@ -54,7 +68,7 @@ const fakeChrome = {
   },
 };
 const URLCtor = URL;
-URLCtor.createObjectURL = function (blob) { return 'blob:test/' + blob.size; };
+URLCtor.createObjectURL = function (blob) { objectUrlsCreated++; return 'blob:test/' + blob.size; };
 const context = vm.createContext({
   console,
   chrome: fakeChrome,
@@ -72,7 +86,7 @@ const context = vm.createContext({
   Uint8Array,
   ArrayBuffer,
   Promise,
-  setInterval() { return 1; },
+  setInterval(fn) { intervals.push(fn); return intervals.length; },
   clearInterval() {},
   setTimeout,
   clearTimeout,
@@ -183,6 +197,75 @@ ok(typeof listener === 'function', 'offscreen message listener installed');
   listener({ type: 'ms-offscreen-keepalive-release', leaseId: 'manifest-job' }, {}, function (response) { released = response; });
   ok(released && released.ok, 'service worker can release its keepalive lease');
   eq(keepaliveDisconnects, disconnectsBeforeLease + 1, 'released lease disconnects its keepalive port');
+
+  // ------------------------------------------------------------------
+  // Disk-backed output: when the OPFS sink is available, the artifact is
+  // written as ffmpeg produces it. Nothing is assembled in memory, and the
+  // progress message reports written bytes instead of the (nonexistent)
+  // ffmpeg out-time API that used to report 0s/0B for the whole job.
+  // ------------------------------------------------------------------
+  context.MediaSniperStreamingPolicy = {
+    createOutputSink: async function () {
+      return {
+        name: 'media-sniper-test.mp4',
+        write: function (name, position, data) { sinkWrites.push({ position: position, length: data.byteLength }); },
+        bytes: function () { return sinkWrites.reduce(function (max, w) { return Math.max(max, w.position + w.length); }, 0); },
+        writes: function () { return sinkWrites.length; },
+        finish: async function () { return { url: 'blob:opfs/finished.mp4', size: 1002, name: 'media-sniper-test.mp4', file: { size: 1002 } }; },
+        abort: async function () { sinkAborted = true; return true; },
+      };
+    },
+  };
+  sinkJob = true;
+  const urlsBeforeSinkJob = objectUrlsCreated;
+  const progressBefore = sentMessages.length;
+  const sinkResult = await new Promise(function (resolve) {
+    listener({
+      type: 'ms-offscreen-ffmpeg-run',
+      jobId: 'disk-backed-job',
+      url: 'https://cdn.example/big.m3u8',
+      ext: 'mp4',
+      live: false,
+      headers: {},
+    }, {}, resolve);
+  });
+  eq(sinkResult && sinkResult.url, 'blob:opfs/finished.mp4', 'disk-backed output is handed back as the sink URL');
+  eq(sinkResult && sinkResult.size, 1002, 'disk-backed output reports the artifact size');
+  eq(sinkAborted, false, 'a successful job does not discard its artifact');
+  eq(objectUrlsCreated, urlsBeforeSinkJob, 'no in-memory Blob URL is created for the artifact');
+  eq(sinkWrites.length, 2, 'both muxer writes reached the sink');
+  eq(sinkWrites[0].position + ',' + sinkWrites[1].position, '0,1000', 'muxer offsets are preserved for the file writer');
+  const progressAfter = sentMessages.slice(progressBefore).filter(function (m) { return m && m.type === 'ms-offscreen-progress'; });
+  eq(progressAfter.length, 1, 'progress is reported while the job runs');
+  eq(progressAfter[0] && progressAfter[0].jobId, 'disk-backed-job', 'progress is attributed to the running job');
+  eq(progressAfter[0] && progressAfter[0].bytes, 1002, 'progress reports the bytes written to disk, not the removed out-time API');
+  eq(progressAfter[0] && progressAfter[0].fetches, 0, 'progress reports the job-scoped fetch counter');
+
+  // Stopping a job that already opened its disk-backed artifact must discard
+  // the partial file instead of leaving it in OPFS.
+  sinkAborted = false;
+  delayWriter = true;
+  let stoppedSinkRun = null;
+  listener({
+    type: 'ms-offscreen-ffmpeg-run',
+    jobId: 'disk-backed-stop',
+    url: 'https://cdn.example/live.m3u8',
+    ext: 'mp4',
+    live: true,
+    headers: {},
+  }, {}, function (response) { stoppedSinkRun = response; });
+  for (let i = 0; i < 4; i++) await Promise.resolve();
+  let sinkStopAck = null;
+  listener({ type: 'ms-offscreen-ffmpeg-abort', jobId: 'disk-backed-stop' }, {}, function (response) {
+    sinkStopAck = response;
+  });
+  ok(sinkStopAck && sinkStopAck.ok, 'Stop during a disk-backed writer setup is acknowledged');
+  delayWriter = false;
+  resolveWriter();
+  for (let i = 0; i < 6; i++) await Promise.resolve();
+  await new Promise(function (resolve) { setImmediate(resolve); });
+  ok(stoppedSinkRun && stoppedSinkRun.error, 'stopped disk-backed job reports an error instead of a URL');
+  ok(sinkAborted, 'stopped disk-backed job discards its partial artifact');
   report('offscreen-regressions');
 })().catch(function (error) {
   console.error(error);

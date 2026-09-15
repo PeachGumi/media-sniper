@@ -21,6 +21,9 @@
   const MiB = 1024 * 1024;
   const MAX_DISK_ASSEMBLY_BYTES = 768 * MiB;
   const MAX_MUX_INPUT_BYTES = 384 * MiB;
+  // Attaching a MIME type to a disk-backed artifact costs a full heap copy.
+  // Above this the artifact is handed to Downloads as the OPFS File itself.
+  const MAX_TYPED_BLOB_BYTES = 256 * MiB;
   const TEMP_PREFIX = 'media-sniper-';
 
   const nativeAddListener = chrome.runtime.onMessage.addListener.bind(chrome.runtime.onMessage);
@@ -136,17 +139,20 @@
       throw new RangeError('media exceeds supported assembly limit');
     }
     // Two distinct consumers need two distinct URL kinds:
-    // - chrome.downloads CANNOT save a blob: URL whose backing is an OPFS
-    //   file (or a Blob wrapping one): the transfer dies instantly with
-    //   USER_CANCELED ("check your internet connection" in the popup).
-    //   Final user-facing artifacts therefore must be plain in-memory Blobs,
-    //   typed so the saved filename keeps the right extension (an untyped
-    //   body gets sniffed — ADTS/AAC's ID3 header reads as text/plain and
-    //   silently renamed the file to .txt). Size is already capped by the
-    //   assembly budget, matching the legacy full-buffer peak.
-    // - DASH mux inputs are fetched back in-page by the ffmpeg wasm runtime,
-    //   never downloaded, so they keep the zero-copy OPFS File URL.
-    if (typed) {
+    // - Downloads artifacts: an OPFS-backed File URL is streamed straight from
+    //   disk by chrome.downloads.download (verified in real Brave with a
+    //   900 MiB file: state=complete, exact bytes, ~1.5 s). Small artifacts are
+    //   additionally wrapped in a typed in-memory Blob so the saved filename
+    //   keeps the intended extension (an untyped body can be sniffed — ADTS's
+    //   ID3 header reads as text/plain and silently renamed a file to .txt).
+    // - DASH mux inputs are read back in-page by the ffmpeg wasm runtime, never
+    //   downloaded, so they keep the zero-copy OPFS File URL.
+    //
+    // Typing costs a full heap copy of the artifact, so it is applied only up
+    // to MAX_TYPED_BLOB_BYTES. Bigger assemblies stay disk-backed: reading
+    // hundreds of megabytes back into the heap to attach a MIME type is what
+    // the ffmpeg output sink exists to avoid.
+    if (typed && file.size <= MAX_TYPED_BLOB_BYTES) {
       const mime_ = mime || 'application/octet-stream';
       const data = new Uint8Array(await file.arrayBuffer());
       const url = URL.createObjectURL(new Blob([data], { type: mime_ }));
@@ -304,6 +310,80 @@
     return result;
   };
 
+  // -------------------------------------------------------------------------
+  // ffmpeg output sink: stream muxer writes straight into an OPFS file.
+  //
+  // The legacy path collected every muxer write in an array and assembled the
+  // artifact with `new Uint8Array(total)` + Blob, so peak memory scaled with
+  // the finished file — that is what produced
+  // "media output exceeds in-memory safety limit (768 MiB)" on large items
+  // after minutes of successful conversion.
+  //
+  // ffmpeg's writer device reports every write as (name, position, bytes), so
+  // the same writes can be handed to the file system as they are produced.
+  // Peak memory stays at one chunk, the artifact never has to be materialized,
+  // and the resulting File URL is a disk-backed object that
+  // chrome.downloads.download streams without reading it back into the heap
+  // (verified in real Brave with a 900 MiB OPFS file).
+  // -------------------------------------------------------------------------
+  async function createOutputSink(ext) {
+    if (!hasOpfs()) return null;
+    const temp = await createTemp(ext);
+    const writable = await temp.handle.createWritable();
+    const state = { highest: 0, writes: 0, pending: 0, maxPending: 0, error: null, closed: false };
+    let chain = Promise.resolve();
+    let aborted = false;
+
+    async function abort() {
+      if (aborted) return true;
+      aborted = true;
+      state.closed = true;
+      try { await writable.abort(); } catch (_) { /* stream already gone */ }
+      await removeTemp(temp.name);
+      return true;
+    }
+
+    return {
+      name: temp.name,
+      write: function (name, position, data) {
+        if (state.closed || state.error) return;
+        // Detach from the emscripten heap: libav reuses that memory as soon as
+        // the callback returns, and the file-system write is asynchronous.
+        const copy = new Uint8Array(data);
+        const at = Number(position) || 0;
+        if (at + copy.byteLength > state.highest) state.highest = at + copy.byteLength;
+        state.writes++;
+        state.pending++;
+        if (state.pending > state.maxPending) state.maxPending = state.pending;
+        chain = chain.then(function () {
+          return writable.write({ type: 'write', position: at, data: copy });
+        }).catch(function (err) {
+          if (!state.error) state.error = err;
+        }).then(function () {
+          state.pending--;
+        });
+      },
+      bytes: function () { return state.highest; },
+      writes: function () { return state.writes; },
+      maxPending: function () { return state.maxPending; },
+      finish: async function () {
+        await chain;
+        if (state.error) {
+          const err = state.error;
+          await abort();
+          throw err;
+        }
+        state.closed = true;
+        await writable.close();
+        const file = await temp.handle.getFile();
+        const url = URL.createObjectURL(file);
+        filesByUrl.set(url, temp.name);
+        return { url: url, file: file, size: file.size, name: temp.name };
+      },
+      abort: abort,
+    };
+  }
+
   // offscreen.js registers one listener after this script. Wrap that listener
   // and route disk-assemblable operations here; every other message keeps the
   // original implementation unchanged.
@@ -342,6 +422,7 @@
     hasOpfs,
     ownedTempCount: function () { return filesByUrl.size; },
     streamResponseInto,
+    createOutputSink,
   };
 
   if (typeof globalThis.addEventListener === 'function') {

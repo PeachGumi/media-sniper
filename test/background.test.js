@@ -12,11 +12,11 @@ function flush() {
 }
 
 // ---- fake chrome -------------------------------------------------------------
-function makeChrome() {
-  const storageData = {};
+function makeChrome(sharedStorage, sharedDownloads) {
+  const storageData = sharedStorage || {};
   const listeners = { onDeterminingFilename: [], onChanged: [], onMessage: [], onRemoved: [], onActivated: [], onWebResponseStarted: [], onSendHeaders: [] };
-  const downloads = [];
-  let downloadSeq = 1;
+  const downloads = sharedDownloads || [];
+  let downloadSeq = downloads.reduce(function (max, item) { return Math.max(max, item.id || 0); }, 0) + 1;
   const suggestCalls = [];
   const swFetchLog = [];
   const swFetchOpts = [];
@@ -60,7 +60,8 @@ function makeChrome() {
         const d = downloads.find(function (entry) { return entry.id === query.id; });
         const result = d ? [{
           id: d.id,
-          state: d.done ? 'complete' : 'in_progress',
+          state: d.state || (d.done ? 'complete' : 'in_progress'),
+          error: d.error || null,
           bytesReceived: d.receivedBytes || 0,
           totalBytes: d.totalBytes || 0,
         }] : [];
@@ -272,6 +273,10 @@ function makeContext(chrome) {
     globalThis: null,
   };
   ctx.globalThis = ctx;
+  // Deterministic timers: recovery polling must not hold the test process open.
+  ctx.__timers = [];
+  ctx.setTimeout = function (fn) { ctx.__timers.push(fn); return ctx.__timers.length; };
+  ctx.clearTimeout = function () {};
   vm.createContext(ctx);
   // let the fake chrome.runtime.sendMessage (offscreen emulator) reach the
   // same fake fetch the SW sees — the real offscreen document has its own
@@ -339,6 +344,10 @@ async function run() {
   ok(activeDirectState.activeDownloads.some(function (download) {
     return download.id === qs.queue[0].id && download.sourceUrl === 'https://cdn.example.com/a.mp4';
   }), 'get-items exposes active direct downloads so a reopened popup can reconnect');
+  const jobsFromAnotherTab = await send(chrome, { type: 'ms-get-jobs', tabId: 99 });
+  ok(jobsFromAnotherTab.jobs.some(function (job) {
+    return job.id === qs.queue[0].id && job.tabId === 1 && job.status === 'started';
+  }), 'global jobs are visible after switching to another page tab');
   chrome.__listeners.onChanged.forEach(function (fn) { fn({ id: d1, state: { current: 'complete' } }); });
   chrome.downloads.__downloads[0].done = true;
   await flush();
@@ -597,6 +606,19 @@ async function run() {
   ok(activeItemState.activeJobs.some(function (job) {
     return job.jobKey === hlsResp.jobKey && job.itemKey === 'stable-hls-key' && job.sourceUrl === 'https://cdn.example.com/live/master.m3u8';
   }), 'get-items exposes active jobs so a reopened popup can reconnect');
+  ok(Array.isArray(chrome.__storageData.msActiveJobs) && chrome.__storageData.msActiveJobs.some(function (saved) {
+    return saved.key === hlsResp.jobKey && saved.job.status === 'combining';
+  }), 'active media job is persisted before a service-worker restart');
+  const globalMediaJobs = await send(chrome, { type: 'ms-get-jobs', tabId: 999 });
+  ok(globalMediaJobs.jobs.some(function (job) {
+    return job.title === 'HLS Test Video' && job.tabId === 7 && job.type === 'media';
+  }), 'active HLS job stays visible globally after switching page tabs');
+  const rotatedDuplicate = await send(chrome, {
+    type: 'ms-hls-download', url: 'https://cdn.example.com/live/master.m3u8?token=rotated',
+    itemKey: 'stable-hls-key', title: 'HLS duplicate'
+  }, { tab: { id: 7 } });
+  ok(rotatedDuplicate && rotatedDuplicate.alreadyRunning && rotatedDuplicate.jobKey === hlsResp.jobKey,
+    'rotating a signed URL cannot duplicate the same stable media item');
   chrome.__holdFfmpegVod = false;
   chrome.__ffmpegDone = { jobId: 'https://cdn.example.com/live/master.m3u8', url: 'blob:chrome-extension://testextensionid/ffmpeg-remux', size: 5000, ext: 'mp4', partial: false };
   chrome.__ffmpegVodResolve({ url: chrome.__ffmpegDone.url, size: chrome.__ffmpegDone.size, partial: false });
@@ -615,11 +637,36 @@ async function run() {
   const hlsStatus = await send(chrome, { type: 'ms-hls-status', url: 'https://cdn.example.com/live/master.m3u8' }, {});
   eq(hlsStatus.status, 'downloading', 'job reached downloading');
   eq(hlsStatus.mode, 'ffmpeg', 'job ran via ffmpeg');
+  // Offscreen progress drives the popup's "converting" line. The previous
+  // implementation polled libav APIs that do not exist in the bundled build,
+  // so a job that ran for minutes displayed "media 0s · output 0B" throughout.
+  chrome.__listeners.onMessage.forEach(function (fn) {
+    fn({
+      type: 'ms-offscreen-progress',
+      jobId: hlsResp.jobKey,
+      seconds: 0,
+      bytes: 943718400,
+      fetches: 42,
+      fetchedBytes: 8388608,
+    }, {}, function () {});
+  });
+  const hlsProgress = await send(chrome, { type: 'ms-hls-status', url: 'https://cdn.example.com/live/master.m3u8' }, {});
+  eq(hlsProgress.bytes, 943718400, 'written bytes past the old 768 MiB ceiling reach the popup');
+  eq(hlsProgress.fetches, 42, 'segment fetch count reaches the popup');
+  eq(hlsProgress.fetchedBytes, 8388608, 'fetched bytes reach the popup');
+  const jobsProgress = await send(chrome, { type: 'ms-get-jobs' });
+  const progressJob = jobsProgress.jobs.find(function (job) { return job.type === 'media' && job.title === 'HLS Test Video'; });
+  ok(!!progressJob, 'converting job is listed for other tabs');
+  eq(progressJob && progressJob.bytes, 943718400, 'global jobs list reports the same artifact size');
+  eq(progressJob && progressJob.fetches, 42, 'global jobs list reports the same fetch activity');
   // queued download is the blob, with title-based filename
   qs = await send(chrome, { type: 'ms-queue-status' });
   const hlsQ = qs.queue.filter(function (q) { return q.filename.indexOf('HLS Test Video') >= 0; });
   eq(hlsQ.length, 1, 'hls output named by title');
   ok(hlsQ[0].filename.endsWith('.mp4'), 'mp4 container after remux');
+  ok(Array.isArray(chrome.__storageData.msActiveQueue) && chrome.__storageData.msActiveQueue.some(function (saved) {
+    return saved.hlsUrl === hlsResp.jobKey && Number.isFinite(saved.downloadId);
+  }), 'browser handoff is persisted before a service-worker restart');
   // Retrying the same media leaves the old queue row behind. Status must bind
   // to the newest active handoff, never the first stale completed row.
   const oldHlsDownload = chrome.downloads.__downloads.find(function (d) { return d.opts.filename.indexOf('HLS Test Video') >= 0; });
@@ -842,6 +889,16 @@ async function run() {
   const liveRun = chrome.__ffmpegRuns.find(function (r) { return r.url.indexOf('live.m3u8') >= 0; });
   ok(!!liveRun, 'live playlist handed to ffmpeg');
   ok(liveRun && liveRun.live === true, 'ffmpeg job flagged live');
+  const queuedBehindLive = await send(chrome, {
+    type: 'ms-hls-download', url: 'https://cdn.example.com/live/master.m3u8?after-live=1', title: 'After Live'
+  }, { tab: { id: 8 } });
+  ok(queuedBehindLive && queuedBehindLive.started, 'VOD behind a live recording is accepted');
+  await settle();
+  eq(chrome.__ffmpegRuns.filter(function (r) { return /after-live/.test(r.url); }).length, 0,
+    'global media serializer waits for live FFmpeg to stop');
+  const queuedLiveJobs = await send(chrome, { type: 'ms-get-jobs' });
+  const queuedAfterLive = queuedLiveJobs.jobs.find(function (job) { return job.title === 'After Live'; });
+  eq(queuedAfterLive && queuedAfterLive.status, 'queued', 'VOD behind live remains visibly queued');
   // duplicate start while recording is rejected
   const liveDup = await send(chrome, { type: 'ms-hls-download', url: 'https://cdn.example.com/live.m3u8', title: 'x' }, { tab: { id: 7 } });
   ok(liveDup && liveDup.alreadyRunning, 'live duplicate rejected');
@@ -849,8 +906,13 @@ async function run() {
   const stopResp = await send(chrome, { type: 'ms-hls-stop', url: 'https://cdn.example.com/live.m3u8' });
   ok(stopResp && stopResp.ok, 'stop acknowledged');
   await settle();
+  ok(chrome.__ffmpegRuns.some(function (r) { return /after-live/.test(r.url); }),
+    'queued VOD starts after live FFmpeg stops');
   liveStatus = await send(chrome, { type: 'ms-hls-status', url: 'https://cdn.example.com/live.m3u8' });
   eq(liveStatus.status, 'downloading', 'live job downloading after stop');
+  const stoppedGlobal = await send(chrome, { type: 'ms-get-jobs' });
+  const stoppedJob = stoppedGlobal.jobs.find(function (job) { return /Live Show/.test(job.title); });
+  eq(stoppedJob && stoppedJob.live, false, 'stopped live job no longer offers a second Stop action');
   const liveQ = await send(chrome, { type: 'ms-queue-status' });
   ok(liveQ.queue.some(function (q) { return q.filename.indexOf('Live Show') >= 0 && q.filename.endsWith('.mp4'); }), 'live recording saved as mp4');
   ctxRef.fetch = origFetch;
@@ -1133,6 +1195,250 @@ async function run() {
     await settle();
     ok(chrome.__dashBuilds.length > dashBuildCount, 'extensionless DASH save reached dash builder');
     ctxRef.fetch = origFetch;
+  }
+
+  // --- service-worker restart: active jobs remain visible -------------------
+  {
+    const shared = {
+      msActiveJobs: [{ key: 'restored-job', job: {
+        status: 'combining', tabId: 44, title: 'Restored conversion',
+        sourceUrl: 'https://cdn.example.com/restored.m3u8', mode: 'ffmpeg',
+        ext: 'mp4', outputKind: 'video', startedAt: Date.now(),
+      } }],
+    };
+    const restartedChrome = makeChrome(shared);
+    restartedChrome.__ffmpegDone = {
+      jobId: 'restored-job', url: 'blob:chrome-extension://testextensionid/restored-output',
+      size: 4321, ext: 'mp4', partial: false,
+    };
+    const restartedCtx = makeContext(restartedChrome);
+    vm.runInContext(logicSrc, restartedCtx);
+    vm.runInContext(bgSrc, restartedCtx);
+    for (let i = 0; i < 12; i++) await flush();
+    const restoredJobs = await send(restartedChrome, { type: 'ms-get-jobs', tabId: 999 });
+    ok(restoredJobs.jobs.some(function (job) {
+      return job.title === 'Restored conversion' && job.tabId === 44;
+    }), 'active conversion remains visible after a service-worker restart');
+    ok(restartedChrome.downloads.__downloads.some(function (download) {
+      return download.opts.url === restartedChrome.__ffmpegDone.url && /Restored conversion/.test(download.opts.filename);
+    }), 'service-worker restart hands a completed offscreen conversion to Downloads');
+  }
+
+  {
+    const blob = 'blob:chrome-extension://testextensionid/in-progress';
+    const sharedDownloads = [{
+      id: 77, opts: { url: blob, filename: 'Restored handoff.mp4' }, done: false,
+      receivedBytes: 1024, totalBytes: 4096,
+    }];
+    const shared = {
+      msActiveJobs: [{ key: 'handoff-job', job: {
+        status: 'downloading', tabId: 55, title: 'Restored handoff',
+        sourceUrl: 'https://cdn.example.com/handoff.m3u8', mode: 'ffmpeg',
+        ext: 'mp4', outputKind: 'video', queueEntryId: 'restored-q', startedAt: Date.now(),
+      } }],
+      msActiveQueue: [{
+        id: 'restored-q', item: { url: blob, kind: 'video', title: 'Restored handoff', tabId: 55 },
+        filename: 'Restored handoff.mp4', status: 'started', hlsUrl: 'handoff-job',
+        downloadId: 77, startedAt: Date.now(),
+      }],
+    };
+    const restartedChrome = makeChrome(shared, sharedDownloads);
+    const restartedCtx = makeContext(restartedChrome);
+    vm.runInContext(logicSrc, restartedCtx);
+    vm.runInContext(bgSrc, restartedCtx);
+    for (let i = 0; i < 8; i++) await flush();
+    const restoredJobs = await send(restartedChrome, { type: 'ms-get-jobs', tabId: 999 });
+    const restored = restoredJobs.jobs.find(function (job) { return job.title === 'Restored handoff'; });
+    ok(!!restored, 'browser download handoff remains visible after a service-worker restart');
+    eq(restored && restored.receivedBytes, 1024, 'restored browser handoff resumes byte progress');
+    sharedDownloads[0].done = true;
+    const completedAfterRestore = await send(restartedChrome, { type: 'ms-get-jobs' });
+    const completedRestored = completedAfterRestore.jobs.find(function (job) { return job.title === 'Restored handoff'; });
+    eq(completedRestored && completedRestored.status, 'complete', 'restored handoff observes completion even if onChanged was missed');
+  }
+
+  {
+    const blob = 'blob:chrome-extension://testextensionid/already-complete';
+    const sharedDownloads = [{ id: 78, opts: { url: blob }, done: true, receivedBytes: 4096, totalBytes: 4096 }];
+    const shared = {
+      msActiveJobs: [{ key: 'complete-race-job', job: {
+        status: 'downloading', tabId: 55, title: 'Completed during restart', mode: 'ffmpeg',
+        sourceUrl: 'https://cdn.example.com/complete.m3u8', queueEntryId: 'complete-race-q', startedAt: Date.now(),
+      } }],
+      msActiveQueue: [{ id: 'complete-race-q', item: { url: blob, kind: 'video', title: 'Completed during restart', tabId: 55 },
+        filename: 'Completed during restart.mp4', status: 'started', hlsUrl: 'complete-race-job', downloadId: 78 }],
+    };
+    const restartedChrome = makeChrome(shared, sharedDownloads);
+    const restartedCtx = makeContext(restartedChrome);
+    vm.runInContext(logicSrc, restartedCtx); vm.runInContext(bgSrc, restartedCtx);
+    for (let i = 0; i < 8; i++) await flush();
+    const completedJobs = await send(restartedChrome, { type: 'ms-get-jobs' });
+    const completed = completedJobs.jobs.find(function (job) { return job.title === 'Completed during restart'; });
+    eq(completed && completed.status, 'complete', 'download completed during worker restart becomes terminal instead of remaining active');
+  }
+
+  {
+    const shared = { msActiveJobs: [{ key: 'lost-preflight', job: {
+      status: 'fetching', tabId: 66, title: 'Interrupted conversion',
+      sourceUrl: 'https://cdn.example.com/lost.m3u8', startedAt: Date.now(),
+    } }] };
+    const restartedChrome = makeChrome(shared);
+    const restartedCtx = makeContext(restartedChrome);
+    vm.runInContext(logicSrc, restartedCtx);
+    vm.runInContext(bgSrc, restartedCtx);
+    for (let i = 0; i < 8; i++) await flush();
+    const failedJobs = await send(restartedChrome, { type: 'ms-get-jobs', tabId: 999 });
+    const failed = failedJobs.jobs.find(function (job) { return job.title === 'Interrupted conversion'; });
+    ok(failed && failed.status === 'failed' && failed.error, 'unrecoverable restarted job stays visible with an error instead of disappearing');
+  }
+
+  {
+    const parallelChrome = makeChrome();
+    parallelChrome.__holdFfmpegVod = true;
+    const parallelCtx = makeContext(parallelChrome);
+    vm.runInContext(logicSrc, parallelCtx);
+    vm.runInContext(bgSrc, parallelCtx);
+    parallelChrome.__listeners.onMessage[0](
+      { type: 'ms-hls-download', url: 'https://cdn.example.com/live/master.m3u8?tab=1', title: 'Tab one' },
+      { tab: { id: 1 } }, function () {});
+    parallelChrome.__listeners.onMessage[0](
+      { type: 'ms-hls-download', url: 'https://cdn.example.com/live/master.m3u8?tab=2', title: 'Tab two' },
+      { tab: { id: 2 } }, function () {});
+    for (let i = 0; i < 16; i++) await flush();
+    eq(parallelChrome.__ffmpegRuns.length, 1, 'media jobs from different tabs are globally serialized for the single offscreen engine');
+    const parallelJobs = await send(parallelChrome, { type: 'ms-get-jobs' });
+    const waiting = parallelJobs.jobs.find(function (job) { return job.title === 'Tab two'; });
+    eq(waiting && waiting.status, 'queued', 'second cross-tab media job stays visibly queued instead of failing busy');
+  }
+
+  {
+    const chainChrome = makeChrome();
+    chainChrome.__holdFfmpegVod = true;
+    const chainCtx = makeContext(chainChrome);
+    vm.runInContext(logicSrc, chainCtx);
+    vm.runInContext(bgSrc, chainCtx);
+    vm.runInContext("startMediaChain(71, [" +
+      "{url:'https://cdn.example.com/live/master.m3u8?chain=1',kind:'hls',title:'Chain one',tabId:71}," +
+      "{url:'https://cdn.example.com/live/master.m3u8?chain=2',kind:'hls',title:'Chain two',tabId:71}" +
+      "])", chainCtx);
+    for (let i = 0; i < 16; i++) await flush();
+    const savedChain = chainChrome.__storageData.msActiveJobs || [];
+    eq(savedChain.length, 2, 'Save All persists every deferred media job before the first conversion finishes');
+    chainChrome.__listeners.onRemoved.forEach(function (fn) { fn(71); });
+    const afterClose = await send(chainChrome, { type: 'ms-get-jobs' });
+    ok(afterClose.jobs.some(function (job) { return job.title === 'Chain two' && job.status === 'queued'; }),
+      'closing the source tab does not discard deferred media work');
+  }
+
+  {
+    const secureChrome = makeChrome();
+    const secureCtx = makeContext(secureChrome);
+    vm.runInContext(logicSrc, secureCtx);
+    vm.runInContext(bgSrc, secureCtx);
+    const signed = 'https://cdn.example.com/secure.m3u8?token=super-secret';
+    vm.runInContext("state.hlsJobs.set(" + JSON.stringify(signed) + ", {" +
+      "status:'failed',title:'Secure failure',tabId:1,error:'Authorization: Bearer secret-value at https://cdn.example.com/x?sig=hidden'" +
+      "})", secureCtx);
+    const exposed = await send(secureChrome, { type: 'ms-get-jobs' });
+    const secureJob = exposed.jobs.find(function (job) { return job.title === 'Secure failure'; });
+    const publicJson = JSON.stringify(secureJob);
+    ok(publicJson.indexOf('super-secret') < 0 && publicJson.indexOf('secret-value') < 0 && publicJson.indexOf('sig=hidden') < 0,
+      'global Jobs never exposes signed job keys or multi-part Authorization values');
+  }
+
+  {
+    const resumedUrl = 'https://cdn.example.com/live/master.m3u8';
+    const shared = { msActiveJobs: [{ key: resumedUrl, job: {
+      status: 'queued', tabId: 61, title: 'Resumed queued job', mode: null,
+      sourceUrl: resumedUrl, startedAt: Date.now(), itemKey: 'resume-key', ext: 'mp4',
+    } }] };
+    const restartedChrome = makeChrome(shared);
+    const restartedCtx = makeContext(restartedChrome);
+    vm.runInContext(logicSrc, restartedCtx);
+    vm.runInContext(bgSrc, restartedCtx);
+    for (let i = 0; i < 16; i++) await flush();
+    const resumedJobs = await send(restartedChrome, { type: 'ms-get-jobs' });
+    const resumed = resumedJobs.jobs.find(function (job) { return job.title === 'Resumed queued job'; });
+    eq(resumed && resumed.status, 'downloading', 'queued media job resumes after a worker restart instead of failing');
+    ok(restartedChrome.__ffmpegRuns.some(function (r) { return /media\.m3u8/.test(r.url); }),
+      'resumed job re-runs its conversion');
+  }
+
+  {
+    const hotlink = 'https://cdn.example.com/hotlink.mp4';
+    const sharedDownloads = [{ id: 99, opts: { url: hotlink, filename: 'Auth clip.mp4' }, state: 'interrupted', error: 'SERVER_FORBIDDEN' }];
+    const shared = { msActiveQueue: [{
+      id: 'auth-q', item: { url: hotlink, kind: 'video', title: 'Auth clip', tabId: 62 },
+      filename: 'Auth clip.mp4', status: 'started', downloadId: 99, startedAt: Date.now(),
+    }] };
+    const restartedChrome = makeChrome(shared, sharedDownloads);
+    const restartedCtx = makeContext(restartedChrome);
+    vm.runInContext(logicSrc, restartedCtx);
+    vm.runInContext(bgSrc, restartedCtx);
+    for (let i = 0; i < 16; i++) await flush();
+    const restoredQueue = await send(restartedChrome, { type: 'ms-queue-status' });
+    const authEntry = restoredQueue.queue.find(function (q) { return q.filename === 'Auth clip.mp4'; });
+    ok(authEntry && authEntry.status !== 'failed', 'restored interrupted download retries instead of failing immediately');
+    ok(restartedChrome.downloads.__downloads.some(function (d) {
+      return String(d.opts.url).indexOf('blob:chrome-extension://') === 0 && /Auth clip/.test(d.opts.filename);
+    }), 'authenticated retry hands the service-worker-fetched blob to Downloads');
+  }
+
+  {
+    const dashUrl = 'https://cdn.example.com/v4/manifest.mpd';
+    const dashMpd =
+      '<MPD><Period><AdaptationSet contentType="video">' +
+      '<Representation id="0" mimeType="video/mp4" codecs="avc1.42c00c" bandwidth="1000" width="320" height="240">' +
+      '<SegmentTemplate timescale="15360" startNumber="1" initialization="vinit-$RepresentationID$.m4s" media="vchunk-$RepresentationID$-$Number%05d$.m4s">' +
+      '<SegmentTimeline><S t="0" d="46080"/><S d="46080"/></SegmentTimeline>' +
+      '</SegmentTemplate></Representation></AdaptationSet></Period></MPD>';
+    const shared = { msActiveJobs: [{ key: dashUrl + '#dash-entry=0', job: {
+      status: 'queued', tabId: 65, title: 'Resumed DASH', mode: null, sourceUrl: dashUrl,
+      dashEntry: 0, dashType: 'video', startedAt: Date.now(), ext: 'mp4', outputKind: 'video',
+    } }] };
+    const restartedChrome = makeChrome(shared);
+    const restartedCtx = makeContext(restartedChrome);
+    vm.runInContext(logicSrc, restartedCtx);
+    vm.runInContext(bgSrc, restartedCtx);
+    restartedCtx.fetch = function (url) {
+      if (String(url).indexOf('manifest.mpd') >= 0) {
+        return Promise.resolve({ ok: true, text: function () { return Promise.resolve(dashMpd); } });
+      }
+      if (String(url).indexOf('.m4s') >= 0) {
+        return Promise.resolve({ ok: true, arrayBuffer: function () { return Promise.resolve(new ArrayBuffer(500)); } });
+      }
+      return Promise.resolve({ ok: false, text: function () { return Promise.resolve(''); } });
+    };
+    for (let i = 0; i < 16; i++) await flush();
+    const dashJobs = await send(restartedChrome, { type: 'ms-get-jobs' });
+    const resumedDash = dashJobs.jobs.find(function (job) { return job.title === 'Resumed DASH'; });
+    eq(resumedDash && resumedDash.status, 'downloading', 'queued DASH job resumes through the offscreen builder after a restart');
+    eq(restartedChrome.__dashBuilds.length, 1, 'resumed DASH job rebuilds its segments');
+  }
+
+  {
+    const liveUrl = 'https://cdn.example.com/live/master.m3u8?recovered-live=1';
+    const shared = { msActiveJobs: [{ key: liveUrl, job: {
+      status: 'recording', tabId: 63, title: 'Recovered live', mode: 'ffmpeg', live: true,
+      ext: 'mp4', outputKind: 'video', sourceUrl: liveUrl, startedAt: Date.now(),
+    } }] };
+    const restartedChrome = makeChrome(shared);
+    restartedChrome.__ffmpegLiveJobId = liveUrl;
+    restartedChrome.__ffmpegLiveResolve = function () {};
+    const restartedCtx = makeContext(restartedChrome);
+    vm.runInContext(logicSrc, restartedCtx);
+    vm.runInContext(bgSrc, restartedCtx);
+    for (let i = 0; i < 10; i++) await flush();
+    const newSave = await send(restartedChrome, {
+      type: 'ms-hls-download', url: 'https://cdn.example.com/live/master.m3u8?behind-live=1', title: 'Behind live'
+    }, { tab: { id: 64 } });
+    ok(newSave && newSave.started, 'save behind a recovered recording is accepted');
+    for (let i = 0; i < 16; i++) await flush();
+    eq(restartedChrome.__ffmpegRuns.filter(function (r) { return /behind-live/.test(r.url); }).length, 0,
+      'conversion waits for the recovered recording to release the offscreen engine');
+    const behindJobs = await send(restartedChrome, { type: 'ms-get-jobs' });
+    const behind = behindJobs.jobs.find(function (job) { return job.title === 'Behind live'; });
+    eq(behind && behind.status, 'queued', 'save behind a recovered recording stays queued instead of failing busy');
   }
 
   report('background');

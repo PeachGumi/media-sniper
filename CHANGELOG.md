@@ -1,5 +1,56 @@
 # Changelog
 
+## v0.12.5 (2026-09-16)
+
+### Fixed
+
+- Large items no longer die at the end of a conversion with "media output
+  exceeds in-memory safety limit (768 MiB)". FFmpeg's output is written
+  straight into an OPFS file as the muxer produces it, and the finished
+  artifact is handed to Downloads as that disk-backed file, so nothing is
+  assembled in memory and artifact size is bounded by storage, not by heap.
+- The "converting" line no longer reports "media 0s · output 0B" for the whole
+  job. The bundled libav build has no `ffmpeg_get_out_time_ms` /
+  `ffmpeg_get_total_size_bytes`, so the previous progress timer threw once per
+  second and was swallowed; progress now reports the bytes actually written to
+  the artifact, and the segment fetches FFmpeg already performed while it still
+  has nothing to write ("取得中… N件 · X B · 経過 T").
+- An in-memory artifact is now capped at 768 MiB only when the disk-backed path
+  is unavailable; OPFS Files are exempt because the storage quota, not the JS
+  heap, governs them.
+
+### Changed
+
+- DASH video+audio muxing writes its result through the same disk-backed sink.
+- Segment assembly keeps an in-memory (typed) artifact only up to 256 MiB;
+  larger assemblies stay disk-backed instead of being read back into the heap.
+
+## v0.12.4 (2026-09-15)
+
+### Changed
+
+- The popup now separates current-tab detected media from a global Jobs view.
+- Active direct, HLS, DASH, mux, and recording jobs remain visible with live
+  progress after switching to a different page tab.
+- Media cards and the Jobs view now share one status vocabulary (waiting,
+  fetching, converting, saving, done, failed) instead of two different labels.
+
+### Fixed
+
+- Saving no longer depends on the service worker staying alive: active media
+  jobs, their conversion input, and pending browser handoffs are written to
+  session storage and restored after a worker restart, so a job can no longer
+  vanish mid-conversion.
+- A conversion that survives a worker restart is reconnected, and a job that
+  has not reached the converter yet is re-run instead of failing.
+- The single offscreen converter now takes jobs from one global queue, so two
+  tabs saving at once queue up instead of failing with a busy error.
+- Downloads interrupted by a restart retry through the authenticated fetch path
+  instead of being marked failed, and completion observed later still lands in
+  the final state.
+- Failed and finished jobs stay listed with their error message instead of
+  disappearing, and job errors/ids are redacted before reaching the popup.
+
 ## v0.12.3 (2026-09-15)
 
 ### Changed

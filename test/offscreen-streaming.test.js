@@ -15,20 +15,38 @@ class FakeFile {
 }
 
 class FakeHandle {
-  constructor(name) { this.name = name; this.bytes = []; this.closed = false; }
+  constructor(name) { this.name = name; this.bytes = []; this.closed = false; this.writes = []; this.size = 0; }
   async createWritable() {
     const self = this;
     return {
       async write(chunk) {
+        if (chunk && chunk.type === 'write') {
+          self.writes.push({ position: chunk.position, data: Uint8Array.from(chunk.data) });
+          const end = Number(chunk.position) + chunk.data.byteLength;
+          self.size = Math.max(self.size, end);
+          if (sparseWrites) return;
+          for (let i = self.bytes.length; i < end; i++) self.bytes.push(0);
+          for (let i = 0; i < chunk.data.byteLength; i++) self.bytes[chunk.position + i] = chunk.data[i];
+          return;
+        }
         const arr = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
         for (const b of arr) self.bytes.push(b);
+        self.size = Math.max(self.size, self.bytes.length);
       },
       async close() { self.closed = true; },
-      async abort() { self.bytes = []; self.closed = true; },
+      async abort() { self.bytes = []; self.size = 0; self.closed = true; },
     };
   }
-  async getFile() { return new FakeFile(this.bytes); }
+  async getFile() {
+    const file = new FakeFile(this.bytes);
+    if (this.size > file.size) file.size = this.size;
+    return file;
+  }
 }
+
+// A "big" artifact is only counted, never materialized: sparse mode keeps the
+// fake browser process from allocating the equivalent of the real file.
+let sparseWrites = false;
 
 const files = new Map();
 const removed = [];
@@ -222,6 +240,60 @@ function dispatch(msg) {
     streamThrew = e && e.name === 'RangeError';
   }
   ok(streamThrew, 'unknown-size stream stops at runtime byte budget');
+
+  // ---------------------------------------------------------------------
+  // ffmpeg output sink: the artifact is written to disk as the muxer produces
+  // it, so a large item no longer has to be assembled in memory (the failure
+  // behind "media output exceeds in-memory safety limit (768 MiB)").
+  // ---------------------------------------------------------------------
+  const filesBeforeSink = files.size;
+  const tempsBeforeSink = policy.ownedTempCount();
+  const blobsBeforeSink = createdObjects.filter(function (o) { return o instanceof Blob }).length;
+  const sink = await policy.createOutputSink('mp4');
+  ok(!!sink, 'ffmpeg output sink is created from OPFS');
+  eq(files.size, filesBeforeSink + 1, 'sink owns exactly one temporary OPFS file');
+  ok(/^media-sniper-/.test(sink.name) && /\.mp4$/.test(sink.name), 'temp artifact keeps the requested extension');
+
+  const sinkHandle = files.get(sink.name);
+  eq(sink.bytes(), 0, 'sink starts empty');
+  sink.write('out.mp4', 0, new Uint8Array([1, 2, 3, 4]));
+  sink.write('out.mp4', 4000000, new Uint8Array([9, 9, 9, 9, 9, 9, 9, 9]));
+  sink.write('out.mp4', 100, new Uint8Array([7, 7]));
+  eq(sink.writes(), 3, 'every muxer write is accounted for');
+  eq(sink.bytes(), 4000008, 'sink reports the highest written offset, not a chunk sum');
+  const finished = await sink.finish();
+  eq(sinkHandle.writes.length, 3, 'all queued writes reached the file system stream');
+  eq(sinkHandle.writes.map(function (w) { return w.position }).join(','), '0,4000000,100',
+    'writes keep their muxer offsets (mp4 rewrites its header in place)');
+  eq(sinkHandle.closed, true, 'finishing closes the file system stream');
+  eq(finished.size, 4000008, 'finished artifact reports its final size');
+  ok(/^blob:opfs\//.test(finished.url), 'finished artifact is handed back as a disk-backed File URL');
+  eq(createdObjects.filter(function (o) { return o instanceof Blob }).length, blobsBeforeSink,
+    'no in-memory Blob is built for the artifact');
+  eq(policy.ownedTempCount(), tempsBeforeSink + 1, 'finished artifact owns its temporary file until the download completes');
+  context.URL.revokeObjectURL(finished.url);
+  eq(policy.ownedTempCount(), tempsBeforeSink, 'download completion releases the temporary artifact');
+  await new Promise(function (resolve) { setImmediate(resolve); });
+  ok(removed.indexOf(finished.name) >= 0, 'released artifact file is deleted from OPFS');
+
+  const abortedSink = await policy.createOutputSink('mp4');
+  abortedSink.write('out.mp4', 0, new Uint8Array([1, 2]));
+  eq(await abortedSink.abort(), true, 'abort acknowledges the thrown-away artifact');
+  ok(removed.indexOf(abortedSink.name) >= 0, 'aborted artifact file is deleted from OPFS');
+  eq(policy.ownedTempCount(), tempsBeforeSink, 'aborted artifact keeps no ownership');
+
+  // Artifacts far beyond the in-memory guard stream through untouched. Only
+  // offsets are tracked, so this asserts the accounting without allocating.
+  sparseWrites = true;
+  const bigSink = await policy.createOutputSink('mp4');
+  const chunk = new Uint8Array(1024 * 1024);
+  for (let i = 0; i < 900; i++) bigSink.write('out.mp4', i * chunk.byteLength, chunk);
+  eq(bigSink.bytes(), 900 * 1024 * 1024, 'sink tracks a 900 MiB artifact');
+  ok(bigSink.bytes() > 768 * 1024 * 1024, 'artifact size passes the old in-memory ceiling');
+  const bigFinished = await bigSink.finish();
+  eq(bigFinished.size, 900 * 1024 * 1024, 'oversized artifact is finalized from disk, not from a Blob');
+  sparseWrites = false;
+  context.URL.revokeObjectURL(bigFinished.url);
 
   report('offscreen-streaming');
 })().catch(function (e) {

@@ -238,6 +238,14 @@ def browser_run(browser, root, functional=False, fixture_root=None):
         if libav.returncode!=0:
             log.flush(); print_log_tail(log_path)
             return False
+        # Opt-in: a ~900 MiB artifact through the real ffmpeg path. Slow (the
+        # fixture is generated with the host ffmpeg), so it is not part of the
+        # default gate; MEDIA_SNIPER_E2E_LARGE=1 turns it on.
+        if os.environ.get("MEDIA_SNIPER_E2E_LARGE") == "1":
+            large=subprocess.run([sys.executable,os.path.join(REPO_ROOT,"scripts","e2e_large_output_test.py")],env=os.environ.copy())
+            if large.returncode!=0:
+                log.flush(); print_log_tail(log_path)
+                return False
         return True
     finally:
         teardown()

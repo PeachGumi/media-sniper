@@ -15,6 +15,15 @@ class FakeBlob {
   }
 }
 
+// OPFS/File handles are disk-backed: the file system quota governs them, not
+// the in-memory budget that stops before the renderer runs out of heap.
+class FakeFile extends FakeBlob {
+  constructor(size) {
+    super([]);
+    this.size = size;
+  }
+}
+
 let nextUrl = 1;
 const revoked = [];
 let pagehide = null;
@@ -33,6 +42,7 @@ const context = vm.createContext({
   console,
   chrome: fakeChrome,
   Blob: FakeBlob,
+  File: FakeFile,
   ArrayBuffer,
   Uint8Array,
   TextEncoder,
@@ -69,6 +79,32 @@ eq(runtimeListeners.length, 1, 'policy installs explicit revoke listener');
   let threw = false;
   try { new context.Blob([huge]); } catch (e) { threw = e && e.name === 'RangeError'; }
   ok(threw, 'oversize Blob rejected before construction');
+}
+
+// A large ffmpeg artifact is streamed to OPFS and handed to Downloads as a
+// File, so the in-memory ceiling must not describe it as an error.
+{
+  const overCap = new FakeFile(policy.MAX_OUTPUT_BYTES * 3);
+  let url = null;
+  let threw = false;
+  try { url = context.URL.createObjectURL(overCap); } catch (e) { threw = true; }
+  ok(!threw && typeof url === 'string', 'disk-backed artifact above the in-memory cap gets a URL');
+  eq(policy.ownsUrl(url), true, 'disk-backed artifact URL is tracked for cleanup');
+  context.URL.revokeObjectURL(url);
+
+  let blobThrew = false;
+  try { new context.Blob([new FakeFile(policy.MAX_OUTPUT_BYTES * 3)]); } catch (e) { blobThrew = e && e.name === 'RangeError'; }
+  ok(!blobThrew, 'a File part is not counted as resident heap bytes');
+
+  const resident = new FakeBlob([]);
+  resident.size = policy.MAX_OUTPUT_BYTES * 3;
+  let inMemoryThrew = false;
+  try { new context.Blob([resident]); } catch (e) { inMemoryThrew = e && e.name === 'RangeError'; }
+  ok(inMemoryThrew, 'in-memory parts still hit the ceiling');
+
+  let residentUrlThrew = false;
+  try { context.URL.createObjectURL(resident); } catch (e) { residentUrlThrew = e && e.name === 'RangeError'; }
+  ok(residentUrlThrew, 'in-memory Blob above the ceiling gets no URL');
 }
 
 {

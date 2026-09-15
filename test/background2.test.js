@@ -282,14 +282,12 @@ async function run() {
     const r = await send(chrome, { type: 'ms-download-all', tabId: 1 });
     eq(r.deferred, 2, 'both hls deferred');
     await flush();
-    eq(chrome.downloads.__downloads.length, 1, 'first hls blob downloading, second still waiting');
+    await flush();
+    eq(chrome.downloads.__downloads.length, 2, 'both deferred jobs survive and reach browser handoff');
     const firstBlob = chrome.downloads.__downloads[0];
     ok(/A/.test(firstBlob.opts.filename), 'first chain item is A');
-    complete(chrome, firstBlob.id);
-    await flush();
-    await flush();
-    eq(chrome.downloads.__downloads.length, 2, 'second hls starts after first completes');
     ok(/B/.test(chrome.downloads.__downloads[1].opts.filename), 'second chain item is B');
+    complete(chrome, firstBlob.id);
     const st = await send(chrome, { type: 'ms-hls-status', jobKey: 'chain', tabId: 1 });
     ok(st === null || typeof st === 'object', 'status endpoint still sane');
     complete(chrome, chrome.downloads.__downloads[1].id);
@@ -320,6 +318,9 @@ async function run() {
     ok(/\.mp4$/.test(chrome.downloads.__downloads[0].opts.filename), 'mux output is mp4');
     const st = await send(chrome, { type: 'ms-hls-status', jobKey: r.jobKey, tabId: 1 });
     ok(st && (st.status === 'downloading' || st.status === 'combining' || st.status === 'complete'), 'status pollable by jobKey');
+    const duplicate = await send(chrome, { type: 'ms-yt-mux-download', item: item, tabId: 1 });
+    ok(duplicate && duplicate.alreadyRunning, 'YouTube mux cannot replace the same job while its browser download is active');
+    eq(chrome.downloads.__downloads.length, 1, 'duplicate YouTube mux does not create a second handoff');
   }
 
   // Save All must use the same local-file mux path as an individual adaptive

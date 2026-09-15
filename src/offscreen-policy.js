@@ -22,10 +22,17 @@
   function partSize(part) {
     if (part == null) return 0;
     if (typeof part === 'string') return new TextEncoder().encode(part).byteLength;
+    // A File is a disk-backed handle, not resident bytes: OPFS artifacts are
+    // counted by the storage quota, never by this in-memory budget.
+    if (typeof File !== 'undefined' && part instanceof File) return 0;
     if (NativeBlob && part instanceof NativeBlob) return part.size;
     if (part instanceof ArrayBuffer) return part.byteLength;
     if (ArrayBuffer.isView(part)) return part.byteLength;
     return 0;
+  }
+
+  function isDiskBacked(blob) {
+    return typeof File !== 'undefined' && blob instanceof File;
   }
 
   function isTrustedOffscreenSender(sender, extensionId) {
@@ -43,7 +50,7 @@
         if (total > MAX_OUTPUT_BYTES) {
           throw new RangeError(
             'media output exceeds in-memory safety limit (' +
-            Math.round(MAX_OUTPUT_BYTES / MiB) + ' MiB); use a smaller item or a future streaming build'
+            Math.round(MAX_OUTPUT_BYTES / MiB) + ' MiB): disk-backed streaming is unavailable for this job'
           );
         }
       }
@@ -64,7 +71,10 @@
   }
 
   URL.createObjectURL = function (blob) {
-    if (blob && typeof blob.size === 'number' && blob.size > MAX_OUTPUT_BYTES) {
+    // Disk-backed artifacts (OPFS Files handed to Downloads after streaming a
+    // large ffmpeg job) never live in the JS heap, so the in-memory budget does
+    // not apply; the browser storage quota governs them instead.
+    if (!isDiskBacked(blob) && blob && typeof blob.size === 'number' && blob.size > MAX_OUTPUT_BYTES) {
       throw new RangeError('media output exceeds in-memory safety limit');
     }
     const url = nativeCreateObjectURL(blob);
