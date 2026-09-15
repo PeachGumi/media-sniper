@@ -158,26 +158,102 @@ async def main():
     step("popup context opened", popup is not None, popup and popup.get("url"))
     popup_ws = popup["webSocketDebuggerUrl"]
 
-    trigger = (
-        "chrome.runtime.sendMessage({type:'ms-download',item:{url:'"
-        f"http://127.0.0.1:{FIXTURE_PORT}/hls/clip.mp4"
-        "',kind:'video',ext:'mp4',title:'e2e-headless-test'}})"
-        ".then(r=>JSON.stringify(r)).catch(e=>JSON.stringify({err:String(e)}))"
+    # popup.html is opened as a normal tab in this harness, so it is itself the
+    # active tab. Hydrate it from the fixture tab explicitly; this drives the
+    # same background message and render path as the real toolbar popup.
+    hydrated = await evaluate(popup_ws, f"""
+        chrome.tabs.query({{url:'http://127.0.0.1:{FIXTURE_PORT}/*'}}).then(tabs => {{
+          if (!tabs.length) return 0;
+          const fixture = tabs[0];
+          return chrome.runtime.sendMessage({{type:'ms-get-items',tabId:fixture.id}}).then(resp => {{
+            tabId = fixture.id;
+            pageUrl = fixture.url;
+            items = (resp && resp.items) || [];
+            render();
+            return items.length;
+          }});
+        }})
+    """)
+    step("popup hydrated from fixture tab", isinstance(hydrated, int) and hydrated > 0, repr(hydrated))
+
+    feedback = decode(await evaluate(popup_ws, """
+        JSON.stringify((() => {
+          const row = Array.from(document.querySelectorAll('.item'))
+            .find(el => el.querySelector('.badge.video'));
+          const button = row && row.querySelector('button.dl');
+          if (!button) return {
+            error: 'direct save button not found',
+            rows: Array.from(document.querySelectorAll('.item')).map(el => ({
+              badge: (el.querySelector('.badge') || {}).className || '',
+              title: (el.querySelector('.name') || {}).title || ''
+            })),
+            status: (document.querySelector('#status') || {}).textContent || ''
+          };
+          button.click();
+          return {
+            disabled: button.disabled,
+            button: button.textContent,
+            action: (row.querySelector('.action-status') || {}).textContent || '',
+            idleLabel: chrome.i18n.getMessage('save')
+          };
+        })())
+    """))
+    step(
+        "save click acknowledged immediately",
+        isinstance(feedback, dict)
+        and feedback.get("disabled") is True
+        and feedback.get("button") != feedback.get("idleLabel")
+        and bool(feedback.get("action")),
+        repr(feedback),
     )
-    response = decode(await evaluate(popup_ws, trigger))
-    step("direct download queued", isinstance(response, dict) and response.get("queued") is True, response)
+
+    queued = None
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        queued = decode(await evaluate(popup_ws,
+            "chrome.runtime.sendMessage({type:'ms-queue-status'}).then(r=>JSON.stringify(r))"))
+        entries = queued.get("queue", []) if isinstance(queued, dict) else []
+        if any((entry.get("filename") or '').endswith('.mp4') for entry in entries):
+            break
+        await asyncio.sleep(.2)
+    step("direct download queued", isinstance(queued, dict) and bool(queued.get("queue")), repr(queued))
 
     final = None
     deadline = time.time() + 35
     while time.time() < deadline:
         dls = decode(await evaluate(sw_ws, "chrome.downloads.search({}).then(x=>JSON.stringify(x))")) or []
         for d in dls:
-            if (d.get("url") or "").endswith("clip.mp4") and f":{FIXTURE_PORT}/" in (d.get("url") or ""):
+            if "/hls/clip.mp4" in (d.get("url") or "") and f":{FIXTURE_PORT}/" in (d.get("url") or ""):
                 final = d
                 if d.get("state") in ("complete", "interrupted"): break
         if final and final.get("state") in ("complete", "interrupted"): break
         await asyncio.sleep(1)
     step("direct download completed", bool(final and final.get("state") == "complete"), final)
+
+    completed_feedback = decode(await evaluate(popup_ws, """
+        JSON.stringify((() => {
+          const row = Array.from(document.querySelectorAll('.item'))
+            .find(el => el.querySelector('.badge.video'));
+          const button = row && row.querySelector('button.dl');
+          const action = row && row.querySelector('.action-status');
+          return button && action ? {
+            disabled: button.disabled,
+            button: button.textContent,
+            action: action.textContent,
+            error: action.classList.contains('err'),
+            idleLabel: chrome.i18n.getMessage('save')
+          } : null;
+        })())
+    """))
+    step(
+        "save completion shown on media card",
+        isinstance(completed_feedback, dict)
+        and completed_feedback.get("disabled") is False
+        and completed_feedback.get("button") == completed_feedback.get("idleLabel")
+        and bool(completed_feedback.get("action"))
+        and completed_feedback.get("error") is False,
+        repr(completed_feedback),
+    )
 
     settings = decode(await evaluate(popup_ws,
         "chrome.runtime.sendMessage({type:'ms-set-settings',settings:{rootFolder:'e2e-root',minSizeKb:500,blacklist:''}}).then(r=>JSON.stringify(r))"))

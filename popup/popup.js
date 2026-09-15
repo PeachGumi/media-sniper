@@ -7,6 +7,9 @@ let tabId = null;
 let pageUrl = null;
 let items = [];
 const hlsTimers = new Map();
+let saveOperationSequence = 0;
+let activeSaveCount = 0;
+let renderPending = false;
 
 function L() { return globalThis.MediaSniperLogic; }
 
@@ -85,12 +88,63 @@ function qualitySelector(item) {
 }
 
 function resetSaveButton(btn) {
+  if (btn.dataset.activeSave === '1') {
+    btn.dataset.activeSave = '';
+    activeSaveCount = Math.max(0, activeSaveCount - 1);
+    if (activeSaveCount === 0 && renderPending) Promise.resolve().then(flushDeferredRender);
+  }
   btn.classList.remove('busy');
+  btn.disabled = false;
+  btn.setAttribute('aria-busy', 'false');
+  btn.dataset.recording = '';
+  btn.dataset.stopping = '';
+  btn.dataset.jobKey = '';
+  btn.dataset.operation = '';
+  btn.dataset.stopAttempt = '';
   btn.textContent = t('save');
+}
+
+function setActionStatus(btn, text, isErr) {
+  const el = btn && btn._actionStatusEl;
+  if (!el) return;
+  el.textContent = text || '';
+  if (isErr) el.classList.add('err');
+  else el.classList.remove('err');
+}
+
+function beginSave(btn) {
+  const operation = String(++saveOperationSequence);
+  btn.classList.add('busy');
+  btn.disabled = true;
+  btn.setAttribute('aria-busy', 'true');
+  btn.textContent = t('starting');
+  btn.dataset.operation = operation;
+  btn.dataset.activeSave = '1';
+  btn.dataset.stopAttempt = '0';
+  activeSaveCount++;
+  btn.dataset.stopping = '';
+  btn.dataset.jobKey = '';
+  setActionStatus(btn, t('startingDownload'));
+  setStatus(t('startingDownload'));
+  return operation;
+}
+
+function isCurrentSave(btn, operation) {
+  return btn.dataset.operation === operation;
+}
+
+function flushDeferredRender() {
+  if (activeSaveCount > 0 || !renderPending) return;
+  renderPending = false;
+  render();
 }
 
 function render() {
   const list = $('#list');
+  if (activeSaveCount > 0) {
+    renderPending = true;
+    return;
+  }
   list.textContent = '';
   $('#count').textContent = items.length ? t('detectedCount', [String(items.length)]) : '';
   if (!items.length) {
@@ -127,9 +181,16 @@ function render() {
     const quality = qualitySelector(item);
     if (quality) info.appendChild(quality);
 
+    const action = document.createElement('div');
+    action.classList.add('action-status');
+    action.setAttribute('role', 'status');
+    action.setAttribute('aria-live', 'polite');
+    info.appendChild(action);
+
     const dl = document.createElement('button');
     dl.className = 'dl';
     dl.textContent = t('save');
+    dl._actionStatusEl = action;
     dl.addEventListener('click', () => save(item, dl));
 
     const copy = document.createElement('button');
@@ -154,10 +215,25 @@ function render() {
 }
 
 function save(item, btn) {
+  if (btn.dataset.stopping === '1') return;
   if (btn.dataset.recording === '1') {
-    chrome.runtime.sendMessage({ type: 'ms-hls-stop', url: item.url, jobKey: item.jobKey || null }, (resp) => {
-      if (chrome.runtime.lastError || (resp && resp.ok === false)) {
+    const operation = btn.dataset.operation;
+    const jobKey = btn.dataset.jobKey || item.jobKey || null;
+    const stopAttempt = String((Number(btn.dataset.stopAttempt) || 0) + 1);
+    btn.dataset.stopAttempt = stopAttempt;
+    btn.disabled = true;
+    btn.dataset.stopping = '1';
+    btn.textContent = t('stopping');
+    setActionStatus(btn, t('stoppingRecording'));
+    chrome.runtime.sendMessage({ type: 'ms-hls-stop', url: item.url, jobKey: jobKey }, (resp) => {
+      if (!isCurrentSave(btn, operation) || btn.dataset.jobKey !== (jobKey || '') ||
+          btn.dataset.stopping !== '1' || btn.dataset.stopAttempt !== stopAttempt) return;
+      if (chrome.runtime.lastError || !resp || resp.ok === false) {
         setStatus(t('stopFailed'), true);
+        setActionStatus(btn, t('stopFailed'), true);
+        btn.disabled = false;
+        btn.dataset.stopping = '';
+        btn.textContent = t('stop');
         return;
       }
       btn.textContent = t('stopping');
@@ -166,8 +242,7 @@ function save(item, btn) {
     return;
   }
 
-  btn.classList.add('busy');
-  btn.textContent = '…';
+  const operation = beginSave(btn);
 
   if (item.kind === 'hls' || item.kind === 'hls-audio' || item.kind === 'dash') {
     const variant = selectedQuality(item);
@@ -180,30 +255,42 @@ function save(item, btn) {
         audioUrl: variant ? (variant.audioUrl || null) : (item.audioUrl || null),
       },
       (resp) => {
-        if (chrome.runtime.lastError) {
-          setStatus(t('errorPrefix', [chrome.runtime.lastError.message]), true);
+        if (!isCurrentSave(btn, operation)) return;
+        if (chrome.runtime.lastError || !resp) {
+          const error = chrome.runtime.lastError ? chrome.runtime.lastError.message : t('noResponse');
+          setStatus(t('errorPrefix', [error]), true);
+          setActionStatus(btn, t('errorPrefix', [error]), true);
           resetSaveButton(btn);
           return;
         }
         if (resp && resp.error) {
           setStatus(t('failedPrefix', [String(resp.error)]), true);
+          setActionStatus(btn, t('failedPrefix', [String(resp.error)]), true);
           resetSaveButton(btn);
           return;
         }
         if (resp && resp.alreadyRunning) {
           setStatus(t('alreadyRunning'));
+          setActionStatus(btn, t('alreadyRunning'));
           resetSaveButton(btn);
           return;
         }
         if (resp && resp.recording) {
           setStatus(t('recordingStarted'));
-          btn.textContent = t('recording');
-          pollHls(Object.assign({}, item, { jobKey: resp.jobKey || item.url }), btn);
+          setActionStatus(btn, t('recordingStarted'));
+          btn.dataset.recording = '1';
+          btn.dataset.jobKey = resp.jobKey || item.url;
+          btn.disabled = false;
+          btn.textContent = t('stop');
+          pollHls(Object.assign({}, item, { jobKey: resp.jobKey || item.url }), btn, operation);
           return;
         }
-        setStatus(item.kind === 'dash' ? t('dashFetching') : t('hlsFetching'));
+        const fetching = item.kind === 'dash' ? t('dashFetching') : t('hlsFetching');
+        setStatus(fetching);
+        setActionStatus(btn, fetching);
         btn.textContent = t('fetching');
-        pollHls(Object.assign({}, item, { jobKey: resp.jobKey || item.url }), btn);
+        btn.dataset.jobKey = resp.jobKey || item.url;
+        pollHls(Object.assign({}, item, { jobKey: resp.jobKey || item.url }), btn, operation);
       }
     );
     return;
@@ -211,24 +298,31 @@ function save(item, btn) {
 
   if (item.via === 'youtube' && item.audioUrl) {
     chrome.runtime.sendMessage({ type: 'ms-yt-mux-download', item: item, tabId: tabId }, (resp) => {
-      if (chrome.runtime.lastError) {
-        setStatus(t('errorPrefix', [chrome.runtime.lastError.message]), true);
+      if (!isCurrentSave(btn, operation)) return;
+      if (chrome.runtime.lastError || !resp) {
+        const error = chrome.runtime.lastError ? chrome.runtime.lastError.message : t('noResponse');
+        setStatus(t('errorPrefix', [error]), true);
+        setActionStatus(btn, t('errorPrefix', [error]), true);
         resetSaveButton(btn);
         return;
       }
       if (resp && resp.error) {
         setStatus(t('failedPrefix', [String(resp.error)]), true);
+        setActionStatus(btn, t('failedPrefix', [String(resp.error)]), true);
         resetSaveButton(btn);
         return;
       }
       if (resp && resp.alreadyRunning) {
         setStatus(t('muxRunning'));
+        setActionStatus(btn, t('muxRunning'));
         resetSaveButton(btn);
         return;
       }
       btn.textContent = t('muxing');
       setStatus(t('muxStatus'));
-      pollHls({ key: resp.jobKey, url: resp.jobKey, dashEntry: null }, btn);
+      setActionStatus(btn, t('muxStatus'));
+      btn.dataset.jobKey = resp.jobKey || '';
+      pollHls({ key: resp.jobKey, jobKey: resp.jobKey, url: resp.jobKey, dashEntry: null }, btn, operation);
     });
     return;
   }
@@ -238,97 +332,148 @@ function save(item, btn) {
     : { type: 'ms-download', item: item, tabId: tabId };
 
   chrome.runtime.sendMessage(msg, (resp) => {
-    if (chrome.runtime.lastError) {
-      setStatus(t('errorPrefix', [chrome.runtime.lastError.message]), true);
+    if (!isCurrentSave(btn, operation)) return;
+    if (chrome.runtime.lastError || !resp) {
+      const error = chrome.runtime.lastError ? chrome.runtime.lastError.message : t('noResponse');
+      setStatus(t('errorPrefix', [error]), true);
+      setActionStatus(btn, t('errorPrefix', [error]), true);
       resetSaveButton(btn);
       return;
     }
     if (resp && resp.error) {
       setStatus(t('failedPrefix', [String(resp.error)]), true);
+      setActionStatus(btn, t('failedPrefix', [String(resp.error)]), true);
       resetSaveButton(btn);
       return;
     }
     btn.textContent = t('queued');
-    watchQueueEntry(resp.id, btn, item.via === 'youtube');
+    setActionStatus(btn, t('queuedStatus'));
+    watchQueueEntry(resp.id, btn, item.via === 'youtube', operation);
   });
 }
 
-function watchQueueEntry(entryId, btn, isYoutube) {
+function watchQueueEntry(entryId, btn, isYoutube, operation) {
   const started = Date.now();
+  let requestedStatus = 0;
+  let appliedStatus = 0;
   const timer = setInterval(() => {
+    const request = ++requestedStatus;
     chrome.runtime.sendMessage({ type: 'ms-queue-status' }, (qs) => {
-      if (chrome.runtime.lastError || !qs) return;
-      const e = (qs.queue || []).find((q) => q.id === entryId);
-      if (!e) return;
+      if (!isCurrentSave(btn, operation) || request < appliedStatus) return;
+      appliedStatus = request;
+      if (chrome.runtime.lastError || !qs) {
+        clearInterval(timer);
+        resetSaveButton(btn);
+        setStatus(t('jobLost'), true);
+        setActionStatus(btn, t('jobLost'), true);
+        return;
+      }
+      const e = (qs.queue || []).find((x) => x.id === entryId);
+      if (!e) {
+        clearInterval(timer);
+        resetSaveButton(btn);
+        setStatus(t('jobLost'), true);
+        setActionStatus(btn, t('jobLost'), true);
+        return;
+      }
 
       if (e.status === 'complete') {
         clearInterval(timer);
         resetSaveButton(btn);
-        setStatus(t('savedFile', [e.filename || '']));
+        const saved = t('savedFile', [e.filename || '']);
+        setStatus(saved);
+        setActionStatus(btn, saved);
       } else if (e.status === 'failed') {
         clearInterval(timer);
         resetSaveButton(btn);
         const forbidden = /FORBIDDEN|403|UNAUTHORIZED|http 403|http 401/i.test(e.error || '');
-        setStatus(
-          forbidden && isYoutube ? t('youtubeDenied') : t('failedPrefix', [e.error || 'unknown']),
-          true
-        );
+        const failed = forbidden && isYoutube ? t('youtubeDenied') : t('failedPrefix', [e.error || 'unknown']);
+        setStatus(failed, true);
+        setActionStatus(btn, failed, true);
       } else if (e.status === 'fallback') {
         btn.textContent = t('retrying');
         setStatus(t('cdnRetry'));
-      } else if (Date.now() - started > 30000) {
-        clearInterval(timer);
-        resetSaveButton(btn);
+        setActionStatus(btn, t('cdnRetry'));
+      } else if (e.status === 'started' || e.status === 'downloading') {
+        btn.textContent = t('saving');
         setStatus(t('downloadInProgress'));
+        setActionStatus(btn, t('downloadInProgress'));
+      } else if (Date.now() - started > 30000) {
+        btn.textContent = t('saving');
+        setStatus(t('downloadInProgress'));
+        setActionStatus(btn, t('downloadInProgress'));
       }
     });
   }, 1000);
 }
 
-function pollHls(item, btn) {
+function pollHls(item, btn, operation) {
   const started = Date.now();
+  let requestedStatus = 0;
+  let appliedStatus = 0;
   const timer = setInterval(() => {
+    const request = ++requestedStatus;
     chrome.runtime.sendMessage({
       type: 'ms-hls-status', jobKey: item.jobKey || null,
       url: item.url,
       dashEntry: item.dashEntry != null ? item.dashEntry : null,
     }, (job) => {
+      if (!isCurrentSave(btn, operation) || btn.dataset.jobKey !== (item.jobKey || '') || request < appliedStatus) return;
+      appliedStatus = request;
       if (chrome.runtime.lastError || !job) {
         clearInterval(timer);
         resetSaveButton(btn);
         setStatus(t('jobLost'), true);
+        setActionStatus(btn, t('jobLost'), true);
         return;
       }
 
       if (job.status === 'recording') {
         btn.dataset.recording = '1';
+        if (btn.dataset.stopping === '1') return;
+        btn.disabled = false;
         btn.textContent = t('stop');
-        setStatus(t('recordingStatus', [fmtDuration(job.seconds), formatBytes(job.bytes)]));
+        const recording = t('recordingStatus', [fmtDuration(job.seconds), formatBytes(job.bytes)]);
+        setStatus(recording);
+        setActionStatus(btn, recording);
         return;
       }
 
       btn.dataset.recording = '';
+      btn.dataset.stopping = '';
+      btn.disabled = true;
+      btn.setAttribute('aria-busy', 'true');
       if (job.status === 'combining' && job.total) {
         btn.textContent = Math.round((job.done / job.total) * 100) + '%';
-        setStatus(t('segmentProgress', [String(job.done), String(job.total)]));
+        const progress = t('segmentProgress', [String(job.done), String(job.total)]);
+        setStatus(progress);
+        setActionStatus(btn, progress);
       } else if (job.status === 'combining' && job.mode === 'ffmpeg') {
         btn.textContent = job.bytes ? formatBytes(job.bytes) : t('processing');
-        setStatus(t('ffmpegStatus', [job.seconds ? fmtDuration(job.seconds) : '']));
+        const processing = t('ffmpegStatus', [job.seconds ? fmtDuration(job.seconds) : '']);
+        setStatus(processing);
+        setActionStatus(btn, processing);
       } else if (job.status === 'downloading') {
         btn.textContent = t('saving');
         setStatus(t('combinedSaving'));
+        setActionStatus(btn, t('combinedSaving'));
       } else if (job.status === 'complete') {
         clearInterval(timer);
         resetSaveButton(btn);
-        setStatus(t('savedFile', [job.filename || '']));
+        const saved = t('savedFile', [job.filename || '']);
+        setStatus(saved);
+        setActionStatus(btn, saved);
       } else if (job.status === 'failed') {
         clearInterval(timer);
         resetSaveButton(btn);
-        setStatus(t('failedPrefix', [job.error || 'unknown']), true);
+        const failed = t('failedPrefix', [job.error || 'unknown']);
+        setStatus(failed, true);
+        setActionStatus(btn, failed, true);
       } else if (Date.now() - started > 30 * 60 * 1000) {
         clearInterval(timer);
         resetSaveButton(btn);
         setStatus(t('timeout'), true);
+        setActionStatus(btn, t('timeout'), true);
       }
     });
   }, 700);
@@ -420,9 +565,12 @@ $('#saveall').addEventListener('click', () => {
   }
   const btn = $('#saveall');
   btn.classList.add('busy');
-  btn.textContent = '…';
+  btn.disabled = true;
+  btn.textContent = t('starting');
+  setStatus(t('startingDownload'));
   chrome.runtime.sendMessage({ type: 'ms-download-all', tabId: tabId, selections: selectedQualityMap() }, (resp) => {
     btn.classList.remove('busy');
+    btn.disabled = false;
     btn.textContent = t('saveAll');
     if (chrome.runtime.lastError || !resp) {
       const err = chrome.runtime.lastError ? chrome.runtime.lastError.message : t('noResponse');

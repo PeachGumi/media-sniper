@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.12.1 (2026-09-15)
+
+### Changed
+
+- Save buttons now acknowledge clicks immediately and show per-item states for
+  starting, queued, downloading, processing, completed, and failed saves.
+- An active save disables repeat clicks; recording mode re-enables the button
+  when it becomes the Stop control.
+- Missing background responses now surface as an explicit error instead of
+  leaving the popup looking idle.
+
 ## v0.12.0 (2026-09-15)
 
 ### Changed
