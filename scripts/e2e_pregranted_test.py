@@ -230,7 +230,7 @@ async def main():
         await asyncio.sleep(1)
     step("direct download completed", bool(final and final.get("state") == "complete"), final)
 
-    completed_feedback = decode(await evaluate(popup_ws, """
+    completed_feedback_script = """
         JSON.stringify((() => {
           const row = Array.from(document.querySelectorAll('.item'))
             .find(el => el.querySelector('.badge.video'));
@@ -244,7 +244,16 @@ async def main():
             idleLabel: chrome.i18n.getMessage('save')
           } : null;
         })())
-    """))
+    """
+    completed_feedback = None
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        completed_feedback = decode(await evaluate(popup_ws, completed_feedback_script))
+        if (isinstance(completed_feedback, dict)
+                and completed_feedback.get("disabled") is False
+                and completed_feedback.get("button") == completed_feedback.get("idleLabel")):
+            break
+        await asyncio.sleep(.1)
     step(
         "save completion shown on media card",
         isinstance(completed_feedback, dict)
