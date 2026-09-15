@@ -47,6 +47,8 @@ const createdObjects = [];
 const revoked = [];
 const progress = [];
 const responses = new Map();
+const keepaliveMessages = [];
+let keepaliveDisconnects = 0;
 
 function makeResponse(bytes, declared) {
   const data = Uint8Array.from(bytes);
@@ -79,6 +81,12 @@ const fakeChrome = {
   runtime: {
     onMessage: { addListener(fn) { rawListener = fn; } },
     sendMessage(msg) { progress.push(msg); return Promise.resolve(); },
+    connect() {
+      return {
+        postMessage(message) { keepaliveMessages.push(message); },
+        disconnect() { keepaliveDisconnects++; },
+      };
+    },
   },
 };
 const context = vm.createContext({
@@ -98,6 +106,8 @@ const context = vm.createContext({
   },
   setTimeout,
   clearTimeout,
+  setInterval,
+  clearInterval,
   Map,
   Date,
   Number,
@@ -156,6 +166,9 @@ function dispatch(msg) {
   eq(hls.response.size, 5, 'HLS concat size');
   eq(originalCalls.length, 0, 'streamable HLS bypasses legacy full-buffer handler');
   eq(progress.filter((m) => m.type === 'ms-hls-progress').length, 2, 'HLS progress emitted per segment');
+  ok(keepaliveMessages.length > 0, 'OPFS HLS keeps the service worker alive while the popup is closed');
+  await new Promise(function (resolve) { setImmediate(resolve); });
+  eq(keepaliveDisconnects, 1, 'OPFS HLS releases its keepalive after completion');
   eq(policy.ownedTempCount(), 1, 'OPFS temp owned by returned URL');
   context.URL.revokeObjectURL(hls.response.url);
   eq(policy.ownedTempCount(), 0, 'revoke drops OPFS ownership');

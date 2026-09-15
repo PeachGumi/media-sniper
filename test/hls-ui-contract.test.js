@@ -49,6 +49,7 @@ function makeBackgroundChrome(session) {
       lastError: null,
       onMessage: { addListener: function (fn) { listeners.onMessage.push(fn); } },
       sendMessage: function (msg) {
+        if (msg && (msg.type === 'ms-offscreen-keepalive-acquire' || msg.type === 'ms-offscreen-keepalive-release')) return Promise.resolve({ ok: true });
         if (msg && msg.type === 'ms-offscreen-ffmpeg-status') return Promise.resolve({ running: false, done: null });
         if (msg && msg.type === 'ms-offscreen-ffmpeg-run') {
           ffmpegRuns.push(msg);

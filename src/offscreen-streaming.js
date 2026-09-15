@@ -28,6 +28,33 @@
   const filesByUrl = new Map();
   let seq = 0;
 
+  function beginMediaJobKeepalive() {
+    let port = null;
+    let timer = null;
+    let released = false;
+    try {
+      port = chrome.runtime.connect({ name: 'ms-media-job' });
+      const heartbeat = function () {
+        try { port.postMessage({ type: 'heartbeat' }); } catch (_) {}
+      };
+      heartbeat();
+      timer = setInterval(heartbeat, 20000);
+    } catch (_) {}
+    return function () {
+      if (released) return;
+      released = true;
+      if (timer != null) clearInterval(timer);
+      try { if (port) port.disconnect(); } catch (_) {}
+    };
+  }
+
+  function respondWithKeepalive(work, sendResponse) {
+    const release = beginMediaJobKeepalive();
+    Promise.resolve().then(work).then(sendResponse).catch(function (e) {
+      sendResponse({ error: String(e && e.message || e) });
+    }).finally(release);
+  }
+
   function hasOpfs() {
     return !!(globalThis.navigator && navigator.storage && typeof navigator.storage.getDirectory === 'function');
   }
@@ -283,21 +310,21 @@
       }
 
       if (msg.type === 'ms-offscreen-fetch-blob') {
-        buildRemote(msg).then(sendResponse).catch(function (e) {
-          sendResponse({ error: String(e && e.message || e) });
-        });
+        respondWithKeepalive(function () { return buildRemote(msg); }, sendResponse);
         return true;
       }
 
       if (msg.type === 'ms-offscreen-hls-build') {
-        buildConcat(msg).then(sendResponse).catch(function (e) {
-          sendResponse({ error: String(e && e.message || e) });
-        });
+        respondWithKeepalive(function () { return buildConcat(msg); }, sendResponse);
         return true;
       }
 
       if (msg.type === 'ms-offscreen-dash-build') {
-        buildDash(msg, listener, sender, sendResponse);
+        const release = beginMediaJobKeepalive();
+        buildDash(msg, listener, sender, function (response) {
+          release();
+          sendResponse(response);
+        });
         return true;
       }
 

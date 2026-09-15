@@ -201,17 +201,65 @@ let lastDone = null; // result of the most recent finished job (SW-restart recov
 // ffmpeg's return code below; keep routine stdout/stderr out of DevTools.
 function discardLibavLog() {}
 
+function beginMediaJobKeepalive() {
+  let port = null;
+  let timer = null;
+  let released = false;
+  try {
+    port = chrome.runtime.connect({ name: 'ms-media-job' });
+    const heartbeat = function () {
+      try { port.postMessage({ type: 'heartbeat' }); } catch (e) { /* worker may be restarting */ }
+    };
+    heartbeat();
+    timer = setInterval(heartbeat, 20000);
+  } catch (e) { /* old browser: the media job can still run */ }
+  return function () {
+    if (released) return;
+    released = true;
+    if (timer != null) clearInterval(timer);
+    try { if (port) port.disconnect(); } catch (e) { /* already disconnected */ }
+  };
+}
+
+function respondWithMediaKeepalive(work, sendResponse) {
+  const releaseKeepalive = beginMediaJobKeepalive();
+  Promise.resolve().then(work).then(sendResponse).catch(function (err) {
+    sendResponse({ error: String(err && err.message || err) });
+  }).finally(releaseKeepalive);
+}
+
+const keepaliveLeases = new Map();
+
+function acquireKeepaliveLease(leaseId) {
+  const id = String(leaseId || '');
+  if (!id || id.length > 128) return false;
+  if (keepaliveLeases.has(id)) return true;
+  if (keepaliveLeases.size >= 32) return false;
+  keepaliveLeases.set(id, beginMediaJobKeepalive());
+  return true;
+}
+
+function releaseKeepaliveLease(leaseId) {
+  const id = String(leaseId || '');
+  const release = keepaliveLeases.get(id);
+  if (!release) return false;
+  keepaliveLeases.delete(id);
+  release();
+  return true;
+}
+
 async function runFfmpegJob(msg, sendResponse) {
   if (current) { sendResponse({ error: '別のffmpegジョブが実行中です' }); return; }
   const jobId = msg.jobId || msg.url;
   // Reserve synchronously BEFORE any await: the guard above is the only thing
   // keeping two wasm instances out of this document, and the wasm boot +
   // ffmpeg run are long awaits — a late-arriving job must see us as busy.
-  current = { libav: null, jobId: jobId, chunks: null };
+  current = { libav: null, jobId: jobId, chunks: null, abortRequested: false };
   activeHeaders = msg.headers || {};
   lastDone = null;
   const chunks = [];
   let libav = null;
+  const releaseKeepalive = beginMediaJobKeepalive();
   try {
     // wasmurl is mandatory: the module otherwise resolves the wasm against
     // self.location.href (the offscreen page = src/), not the script's dir
@@ -223,9 +271,17 @@ async function runFfmpegJob(msg, sendResponse) {
     });
     current.libav = libav;
     current.chunks = chunks;
+    if (current.abortRequested) {
+      sendResponse({ error: 'recording stopped before ffmpeg startup completed' });
+      return;
+    }
 
     const OUT = 'out.' + (msg.ext || 'mp4');
     await libav.mkwriterdev(OUT);
+    if (current.abortRequested) {
+      sendResponse({ error: 'recording stopped during ffmpeg writer setup' });
+      return;
+    }
     libav.onwrite = function (name, pos, data) {
       chunks.push({ pos: pos, data: new Uint8Array(data) });
     };
@@ -315,11 +371,15 @@ async function runFfmpegJob(msg, sendResponse) {
     activeHeaders = {};
     activeFetchContext = null;
     try { if (libav && libav.exit) libav.exit(); } catch (e) { /* ignore */ }
+    releaseKeepalive();
   }
 }
 
 function abortFfmpegJob(msg, sendResponse) {
   if (!current) { sendResponse({ ok: false }); return; }
+  if (msg.jobId && current.jobId !== msg.jobId) { sendResponse({ ok: false }); return; }
+  current.abortRequested = true;
+  if (!current.libav) { sendResponse({ ok: true }); return; }
   try {
     if (current.libav.abortController) current.libav.abortController.abort();
   } catch (e) { /* ignore */ }
@@ -577,24 +637,38 @@ async function handleMuxLocal(msg, sendResponse) {
 chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
   if (!msg || typeof msg.type !== 'string') return false;
   switch (msg.type) {
+    case 'ms-offscreen-keepalive-acquire':
+      sendResponse({ ok: acquireKeepaliveLease(msg.leaseId) });
+      return false;
+    case 'ms-offscreen-keepalive-release':
+      sendResponse({ ok: true, released: releaseKeepaliveLease(msg.leaseId) });
+      return false;
     case 'ms-offscreen-fetch-blob':
-      handleFetchBlob(msg).then(sendResponse).catch(function (err) {
-        sendResponse({ error: String(err && err.message || err) });
-      });
+      respondWithMediaKeepalive(function () { return handleFetchBlob(msg); }, sendResponse);
       return true;
     case 'ms-offscreen-hls-build':
-      handleHlsBuild(msg).then(sendResponse).catch(function (err) {
-        sendResponse({ error: String(err && err.message || err) });
-      });
+      respondWithMediaKeepalive(function () { return handleHlsBuild(msg); }, sendResponse);
       return true;
     case 'ms-offscreen-ffmpeg-run':
       runFfmpegJob(msg, sendResponse);
       return true;
     case 'ms-offscreen-mux-local':
-      handleMuxLocal(msg, sendResponse);
+      {
+        const releaseKeepalive = beginMediaJobKeepalive();
+        handleMuxLocal(msg, function (response) {
+          releaseKeepalive();
+          sendResponse(response);
+        });
+      }
       return true;
     case 'ms-offscreen-dash-build':
-      handleDashBuild(msg, sendResponse);
+      {
+        const releaseKeepalive = beginMediaJobKeepalive();
+        handleDashBuild(msg, function (response) {
+          releaseKeepalive();
+          sendResponse(response);
+        });
+      }
       return true;
     case 'ms-offscreen-ffmpeg-abort':
       abortFfmpegJob(msg, sendResponse);

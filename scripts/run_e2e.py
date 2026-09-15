@@ -112,6 +112,11 @@ def make_fixture_harness():
     # that header so webRequest captures the context; the bundled LibAV then
     # has to replay it for the protected segment during the save job.
     shutil.copy2(os.path.join(hls,"seg0.ts"),os.path.join(hls,"authseg0.ts"))
+    with open(os.path.join(hls,"slowmanifest.m3u8"),"w",encoding="utf-8") as f:
+        f.write("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.0,\nseg0.ts\n#EXT-X-ENDLIST\n")
+    shutil.copy2(os.path.join(hls,"audio.mp3"),os.path.join(hls,"slowaudio.aac"))
+    with open(os.path.join(hls,"slowaudio.m3u8"),"w",encoding="utf-8") as f:
+        f.write("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.0,\nslowaudio.aac\n#EXT-X-ENDLIST\n")
     with open(os.path.join(hls,"auth.m3u8"),"w",encoding="utf-8") as f:
         f.write("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.0,\nauthseg0.ts\n#EXT-X-ENDLIST\n")
     index_path=os.path.join(hls,"index.html")

@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.12.2 (2026-09-15)
+
+### Fixed
+
+- HLS and DASH jobs are acknowledged before long media processing finishes, so
+  closing the popup or switching tabs no longer owns the job response channel.
+- Offscreen fetch, FFmpeg, and mux work now keeps the MV3 service worker awake
+  until the resulting browser download has been queued.
+- Routine FFmpeg progress output no longer floods Brave's extension-error list.
+
 ## v0.12.1 (2026-09-15)
 
 ### Changed

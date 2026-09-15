@@ -419,6 +419,25 @@ async function ensureOffscreen() {
   }
 }
 
+let mediaLeaseSequence = 0;
+
+async function runWithMediaJobLease(work) {
+  await ensureOffscreen();
+  mediaLeaseSequence = (mediaLeaseSequence + 1) % 1000000;
+  const leaseId = 'job-' + Date.now() + '-' + mediaLeaseSequence;
+  const acquired = await chrome.runtime.sendMessage({
+    type: 'ms-offscreen-keepalive-acquire', leaseId: leaseId,
+  });
+  if (!acquired || !acquired.ok) throw new Error('media keepalive unavailable');
+  try {
+    return await work();
+  } finally {
+    try {
+      await chrome.runtime.sendMessage({ type: 'ms-offscreen-keepalive-release', leaseId: leaseId });
+    } catch (e) { /* closing/restarted offscreen document releases the port */ }
+  }
+}
+
 // Fetch a media body and return a blob URL for it (fallback download path).
 // Bytes stay inside the offscreen document.
 async function makeBlobUrlFromRemote(url, mime, headers) {
@@ -806,10 +825,15 @@ function selectedHlsRequest(item) {
   };
 }
 
+function isMediaJobRunning(job) {
+  return !!job && (job.status === 'fetching' || job.status === 'combining' ||
+    job.status === 'recording' || job.status === 'downloading');
+}
+
 function startHls(tabId, jobKey, url, title, pageUrl, dashEntry, dashType, audioUrl, itemRef, requestedKind, variantUrl, variantKey) {
   const ref = itemRef || null;
   const existing = state.hlsJobs.get(jobKey);
-  if (existing && (existing.status === 'fetching' || existing.status === 'combining' || existing.status === 'recording')) {
+  if (isMediaJobRunning(existing)) {
     return Promise.resolve({ alreadyRunning: true });
   }
   state.hlsJobs.set(jobKey, {
@@ -828,7 +852,7 @@ function startHls(tabId, jobKey, url, title, pageUrl, dashEntry, dashType, audio
   } else {
     runner = (requestedKind === 'dash' || /\.mpd(\?|$)/i.test(url)) ? runDashJob : runHlsJob;
   }
-  return runner(jobKey, url).then(function (result) {
+  return runWithMediaJobLease(function () { return runner(jobKey, url); }).then(function (result) {
     if (result && typeof result === 'object') result.jobKey = jobKey;
     return result;
   }).catch(function (err) {
@@ -1247,6 +1271,16 @@ if (chrome.webRequest && chrome.webRequest.onSendHeaders) {
 // ---------------------------------------------------------------------------
 // messages
 // ---------------------------------------------------------------------------
+// An offscreen media job sends periodic port messages while it owns a long
+// ffmpeg/fetch operation. Receiving them keeps MV3 from suspending this worker
+// after the popup closes or the user switches tabs.
+if (chrome.runtime.onConnect && typeof chrome.runtime.onConnect.addListener === 'function') {
+  chrome.runtime.onConnect.addListener(function (port) {
+    if (!port || port.name !== 'ms-media-job' || !port.onMessage) return;
+    port.onMessage.addListener(function () { /* heartbeat only */ });
+  });
+}
+
 chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
   if (!msg || typeof msg.type !== 'string') return false;
   const tabId = msg.tabId != null ? msg.tabId : (sender.tab && sender.tab.id);
@@ -1368,7 +1402,7 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
         title: item.title || null, pageUrl: item.pageUrl || null, blobUrl: null, size: 0,
         seconds: 0, bytes: 0, startedAt: Date.now(), mode: 'mux', ext: 'mp4',
       });
-      runYtMuxJob(jobKey, item).catch(function (err) {
+      runWithMediaJobLease(function () { return runYtMuxJob(jobKey, item); }).catch(function (err) {
         const j = state.hlsJobs.get(jobKey);
         if (j) { j.status = 'failed'; j.error = String(err && err.message || err); }
       });
@@ -1402,10 +1436,18 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
     }
     case 'ms-hls-download': {
       const jobKey = msg.jobKey || buildMediaJobKey(msg.url, msg.dashEntry, msg.variantKey || null);
+      const existing = state.hlsJobs.get(jobKey);
+      if (isMediaJobRunning(existing)) {
+        sendResponse({ alreadyRunning: true, jobKey: jobKey });
+        return false;
+      }
       startHls(tabId, jobKey, msg.url, msg.title, msg.pageUrl, msg.dashEntry != null ? msg.dashEntry : null,
         msg.dashType || null, msg.audioUrl || null, null, msg.kind || null,
-        msg.variantUrl || null, msg.variantKey || null).then(sendResponse);
-      return true;
+        msg.variantUrl || null, msg.variantKey || null);
+      // Acknowledge before playlist fetch/ffmpeg completes. The popup is an
+      // ephemeral view and may close on tab switch; job ownership stays here.
+      sendResponse({ started: true, jobKey: jobKey });
+      return false;
     }
     case 'ms-hls-stop': {
       stopLiveRecording(msg.url, msg.jobKey || null).then(sendResponse);

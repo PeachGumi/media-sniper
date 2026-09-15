@@ -46,6 +46,10 @@ def open_tab(url):
     return json.load(urllib.request.urlopen(req, timeout=5))
 
 
+def close_target(target_id):
+    return urllib.request.urlopen(CDP + "/json/close/" + target_id, timeout=5).read()
+
+
 async def evaluate(ws_url, expression, timeout=15):
     async with websockets.connect(ws_url, max_size=20 * 1024 * 1024) as ws:
         await ws.send(json.dumps({"id": 1, "method": "Runtime.enable"}))
@@ -274,6 +278,92 @@ async def main():
 
     await evaluate(popup_ws,
         "chrome.runtime.sendMessage({type:'ms-set-settings',settings:{rootFolder:'',minSizeKb:500,blacklist:''}})")
+
+    # Start a deliberately >30s HLS job and destroy the popup immediately.
+    # Switching tabs closes a real action popup; processing and the final
+    # chrome.downloads handoff must remain owned by the extension background.
+    fixture_tab_id = await evaluate(popup_ws, "tabId")
+    step("fixture tab retained for detached HLS", isinstance(fixture_tab_id, int), fixture_tab_id)
+    dispatched = await evaluate(popup_ws, f"""
+        (() => {{
+          chrome.runtime.sendMessage({{
+            type:'ms-hls-download',
+            url:'http://127.0.0.1:{FIXTURE_PORT}/hls/slowmanifest.m3u8',
+            kind:'hls', tabId:{fixture_tab_id},
+            title:'E2E popup closed', pageUrl:'{FIXTURE_URL}'
+          }}, () => void chrome.runtime.lastError);
+          return 'dispatched';
+        }})()
+    """)
+    step("slow HLS dispatched without awaiting completion", dispatched == "dispatched", dispatched)
+    close_target(popup["id"] if popup else "")
+    open_tab("about:blank")
+
+    switched_download = None
+    # First offscreen creation also imports the bundled WASM module on slower
+    # runners; allow that startup plus the deliberate 35-second manifest stall.
+    deadline = time.time() + 120
+    while time.time() < deadline:
+        current_sw = target("service_worker", EXT_ID)
+        if current_sw:
+            try:
+                dls = decode(await evaluate(current_sw["webSocketDebuggerUrl"],
+                    "chrome.downloads.search({}).then(x=>JSON.stringify(x))")) or []
+                if not isinstance(dls, list):
+                    dls = []
+                switched_download = next((d for d in dls
+                    if isinstance(d, dict) and "E2E popup closed" in (d.get("filename") or "")), None)
+                if switched_download and switched_download.get("state") == "complete":
+                    break
+            except Exception:
+                pass
+        await asyncio.sleep(1)
+    step("HLS completes after popup closes and tab switches",
+         bool(switched_download and switched_download.get("state") == "complete"),
+         repr(switched_download))
+
+    # Repeat through the OPFS concat interceptor, which handles audio-only HLS
+    # before offscreen.js sees the message.
+    open_tab(popup_url)
+    await asyncio.sleep(.5)
+    opfs_popup = target("page", "popup/popup.html")
+    step("popup reopened for OPFS tab-switch test", opfs_popup is not None, repr(opfs_popup and opfs_popup.get("url")))
+    opfs_popup_ws = opfs_popup["webSocketDebuggerUrl"] if opfs_popup else ""
+    opfs_dispatched = await evaluate(opfs_popup_ws, f"""
+        (() => {{
+          chrome.runtime.sendMessage({{
+            type:'ms-hls-download',
+            url:'http://127.0.0.1:{FIXTURE_PORT}/hls/slowaudio.m3u8',
+            kind:'hls-audio', tabId:{fixture_tab_id},
+            title:'E2E OPFS popup closed', pageUrl:'{FIXTURE_URL}'
+          }}, () => void chrome.runtime.lastError);
+          return 'dispatched';
+        }})()
+    """)
+    step("slow OPFS HLS dispatched without awaiting completion", opfs_dispatched == "dispatched", opfs_dispatched)
+    close_target(opfs_popup["id"] if opfs_popup else "")
+    open_tab("about:blank")
+
+    opfs_download = None
+    deadline = time.time() + 65
+    while time.time() < deadline:
+        current_sw = target("service_worker", EXT_ID)
+        if current_sw:
+            try:
+                dls = decode(await evaluate(current_sw["webSocketDebuggerUrl"],
+                    "chrome.downloads.search({}).then(x=>JSON.stringify(x))")) or []
+                if not isinstance(dls, list):
+                    dls = []
+                opfs_download = next((d for d in dls
+                    if isinstance(d, dict) and "E2E OPFS popup closed" in (d.get("filename") or "")), None)
+                if opfs_download and opfs_download.get("state") == "complete":
+                    break
+            except Exception:
+                pass
+        await asyncio.sleep(1)
+    step("OPFS HLS completes after popup closes and tab switches",
+         bool(opfs_download and opfs_download.get("state") == "complete"),
+         repr(opfs_download))
     print("FUNCTIONAL E2E: PASS", flush=True)
 
 

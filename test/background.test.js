@@ -97,12 +97,19 @@ function makeChrome() {
             seconds: 3, bytes: 1234, done: chrome.__ffmpegDone || null,
           });
         }
+        if (msg && (msg.type === 'ms-offscreen-keepalive-acquire' || msg.type === 'ms-offscreen-keepalive-release')) {
+          chrome.__leaseMessages.push(msg);
+          return Promise.resolve({ ok: true });
+        }
         if (msg && msg.type === 'ms-offscreen-ffmpeg-run') {
           chrome.__ffmpegRuns.push(msg);
           if (msg.live) {
             // emulate a recording: resolves only when ms-offscreen-ffmpeg-abort arrives
             chrome.__ffmpegLiveJobId = msg.jobId;
             return new Promise(function (resolve) { chrome.__ffmpegLiveResolve = resolve; });
+          }
+          if (chrome.__holdFfmpegVod) {
+            return new Promise(function (resolve) { chrome.__ffmpegVodResolve = resolve; });
           }
           // emulate a VOD remux: real ffmpeg would jsfetch everything itself
           chrome.__ffmpegDone = { jobId: msg.jobId, url: 'blob:chrome-extension://testextensionid/ffmpeg-remux', size: 5000, ext: msg.ext, partial: false };
@@ -167,6 +174,7 @@ function makeChrome() {
     __swFetchLog: swFetchLog,
     __swFetchOpts: swFetchOpts,
     __ffmpegRuns: [],
+    __leaseMessages: [],
     __dashBuilds: [],
     __ffmpegDone: null,
     __ffmpegLiveResolve: null,
@@ -547,8 +555,22 @@ async function run() {
   // --- 8. HLS pipeline end-to-end (SW-side) ------------------------------------
   // VOD TS playlist now runs through the ffmpeg engine (VDH architecture):
   // SW only parses master/media, ffmpeg does segments + remux itself.
-  const hlsResp = await send(chrome, { type: 'ms-hls-download', url: 'https://cdn.example.com/live/master.m3u8', title: 'HLS Test Video', pageUrl: 'https://site.example.com/watch/9' }, { tab: { id: 7 } });
-  ok(hlsResp && hlsResp.queued, 'hls job queued a download');
+  chrome.__holdFfmpegVod = true;
+  let hlsResp = null;
+  chrome.__listeners.onMessage[0](
+    { type: 'ms-hls-download', url: 'https://cdn.example.com/live/master.m3u8', title: 'HLS Test Video', pageUrl: 'https://site.example.com/watch/9' },
+    { tab: { id: 7 } },
+    function (response) { hlsResp = response; }
+  );
+  for (let i = 0; i < 12; i++) await flush();
+  ok(hlsResp && hlsResp.started, 'HLS start is acknowledged before ffmpeg finishes so closing the popup cannot cancel the job');
+  ok(typeof chrome.__ffmpegVodResolve === 'function', 'HLS ffmpeg remains active after the start acknowledgement');
+  chrome.__holdFfmpegVod = false;
+  chrome.__ffmpegDone = { jobId: 'https://cdn.example.com/live/master.m3u8', url: 'blob:chrome-extension://testextensionid/ffmpeg-remux', size: 5000, ext: 'mp4', partial: false };
+  chrome.__ffmpegVodResolve({ url: chrome.__ffmpegDone.url, size: chrome.__ffmpegDone.size, partial: false });
+  for (let i = 0; i < 12; i++) await flush();
+  ok(chrome.__leaseMessages.some(function (m) { return m.type === 'ms-offscreen-keepalive-acquire'; }), 'service worker acquires an offscreen keepalive before fetching the HLS manifest');
+  ok(chrome.__leaseMessages.some(function (m) { return m.type === 'ms-offscreen-keepalive-release'; }), 'service worker releases the pre-offscreen keepalive after handoff');
   // SW fetched+parsed the playlists itself
   ok(chrome.__swFetchLog.some(function (u) { return u.indexOf('master.m3u8') >= 0; }), 'master playlist fetched by SW');
   ok(chrome.__swFetchLog.some(function (u) { return u.indexOf('media.m3u8') >= 0; }), 'media playlist fetched by SW');
@@ -582,7 +604,8 @@ async function run() {
     return origFetch(url);
   };
   const encResp = await send(chrome, { type: 'ms-hls-download', url: 'https://cdn.example.com/enc.m3u8', title: 'enc' }, { tab: { id: 7 } });
-  ok(encResp && encResp.queued, 'encrypted HLS accepted (ffmpeg path)');
+  ok(encResp && encResp.started, 'encrypted HLS accepted before ffmpeg finishes');
+  await settle();
   ok(chrome.__ffmpegRuns.some(function (r) { return r.url.indexOf('enc.m3u8') >= 0; }), 'encrypted playlist handed to ffmpeg');
   ctxRef.fetch = origFetch;
 
@@ -641,7 +664,8 @@ async function run() {
     return origFetch(url, opts);
   };
   const authResp = await send(chrome, { type: 'ms-hls-download', url: 'https://cdn.example.com/auth/playlist.m3u8?tok=a', title: 'Auth Stream' }, { tab: { id: 7 } });
-  ok(authResp && authResp.queued, 'auth hls queued');
+  ok(authResp && authResp.started, 'auth hls started');
+  await settle();
   const plFetch = chrome.__swFetchOpts.find(function (f) { return f.url.indexOf('auth/playlist.m3u8') >= 0; });
   ok(plFetch && plFetch.opts.headers && plFetch.opts.headers.Authorization === 'Bearer tok123', 'captured Authorization replayed on playlist fetch');
   // segments are now fetched by ffmpeg itself (jsfetch); the captured
@@ -737,7 +761,7 @@ async function run() {
   eq(chunkAdd.added, 0, 'direct chunk report filtered');
 
   const spaceResp = await send(chrome, { type: 'ms-hls-download', url: 'https://pscp.example.com/hls/space.m3u8?type=replay', title: 'My Space' }, { tab: { id: 7 } });
-  ok(spaceResp && spaceResp.queued, 'space hls queued');
+  ok(spaceResp && spaceResp.started, 'space hls started');
   await settle();
   const spaceJob = await send(chrome, { type: 'ms-hls-status', url: 'https://pscp.example.com/hls/space.m3u8?type=replay' });
   eq(spaceJob.status, 'downloading', 'space job downloading');
@@ -760,7 +784,8 @@ async function run() {
     return origFetch(url, opts);
   };
   const liveResp = await send(chrome, { type: 'ms-hls-download', url: 'https://cdn.example.com/live.m3u8', title: 'Live Show' }, { tab: { id: 7 } });
-  ok(liveResp && liveResp.recording, 'live recording started (non-blocking response)');
+  ok(liveResp && liveResp.started, 'live recording start acknowledged without holding the popup open');
+  await settle();
   let liveStatus = await send(chrome, { type: 'ms-hls-status', url: 'https://cdn.example.com/live.m3u8' });
   eq(liveStatus.status, 'recording', 'live job is recording');
   const liveRun = chrome.__ffmpegRuns.find(function (r) { return r.url.indexOf('live.m3u8') >= 0; });
@@ -833,7 +858,8 @@ async function run() {
   // save the video track: segments resolved from the template, audio track
   // muxed in as well (both handed to the offscreen dash builder)
   const dashResp = await send(chrome, { type: 'ms-hls-download', url: 'https://cdn.example.com/v3/manifest.mpd?sig=1', title: 'Dash Video', dashEntry: 0, dashType: 'video' }, { tab: { id: 7 } });
-  ok(dashResp && dashResp.queued, 'dash video queued');
+  ok(dashResp && dashResp.started, 'dash video started');
+  await settle();
   const db0 = chrome.__dashBuilds[0];
   ok(!!db0, 'dash video handed to offscreen dash builder');
   ok(db0 && db0.video, 'video track in build request');
@@ -846,7 +872,8 @@ async function run() {
   ok(!chrome.__ffmpegRuns.some(function (x) { return x.kind === 'dash'; }), 'dash never uses ffmpeg dash demuxer');
   // save the audio track: audio only, m4a out
   const dashAudioResp = await send(chrome, { type: 'ms-hls-download', url: 'https://cdn.example.com/v3/manifest.mpd?sig=1', title: 'Dash Audio', dashEntry: 1, dashType: 'audio' }, { tab: { id: 7 } });
-  ok(dashAudioResp && dashAudioResp.queued, 'dash audio queued');
+  ok(dashAudioResp && dashAudioResp.started, 'dash audio started');
+  await settle();
   const db1 = chrome.__dashBuilds[1];
   ok(!!db1, 'dash audio handed to offscreen dash builder');
   ok(db1 && !db1.video, 'audio save has no video track');
@@ -870,7 +897,10 @@ async function run() {
   const opaque = r.items.find(function (i) { return i.url.indexOf('opaque.mpd') >= 0; });
   ok(!!opaque && opaque.dashEntry === -1, 'unparseable mpd -> single fallback item');
   const opaqueResp = await send(chrome, { type: 'ms-hls-download', url: 'https://cdn.example.com/v3/opaque.mpd', title: 'Opaque', dashEntry: -1 }, { tab: { id: 7 } });
-  ok(opaqueResp && opaqueResp.error, 'fallback dash fails cleanly with an error');
+  ok(opaqueResp && opaqueResp.started, 'fallback dash start acknowledged');
+  await settle();
+  const opaqueStatus = await send(chrome, { type: 'ms-hls-status', url: 'https://cdn.example.com/v3/opaque.mpd', dashEntry: -1 });
+  ok(opaqueStatus && opaqueStatus.status === 'failed' && opaqueStatus.error, 'fallback dash fails cleanly with an observable error');
   eq(chrome.__dashBuilds.length, 2, 'no dash build attempted for unparseable manifest');
   ctxRef.fetch = origFetch;
 
@@ -912,7 +942,8 @@ async function run() {
     type: 'ms-hls-download', url: two.url, title: 'Two Source',
     variantUrl: twoVariant.url, variantKey: twoVariant.url, audioUrl: twoVariant.audioUrl,
   }, { tab: { id: 7 } });
-  ok(twoResp && twoResp.queued, 'two-source download queued');
+  ok(twoResp && twoResp.started, 'two-source download started');
+  await settle();
   eq(chrome.__ffmpegRuns.length, 1, 'one ffmpeg run');
   eq(chrome.__ffmpegRuns[0].audioUrl.indexOf('ja.m3u8') >= 0, true, 'ffmpeg job got the separate audio playlist');
   // headers replayed for BOTH playlists (captured Authorization must reach jsfetch)
@@ -1047,7 +1078,8 @@ async function run() {
       type: 'ms-hls-download', url: extensionlessDashUrl, kind: 'dash',
       title: 'Extensionless DASH', dashEntry: 0, dashType: 'video',
     }, { tab: { id: 7 } });
-    ok(extensionlessSave && extensionlessSave.queued, 'extensionless DASH save uses DASH pipeline');
+    ok(extensionlessSave && extensionlessSave.started, 'extensionless DASH save uses DASH pipeline');
+    await settle();
     ok(chrome.__dashBuilds.length > dashBuildCount, 'extensionless DASH save reached dash builder');
     ctxRef.fetch = origFetch;
   }

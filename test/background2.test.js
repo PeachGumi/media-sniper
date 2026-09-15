@@ -64,6 +64,9 @@ function makeChrome(opts) {
       lastError: null,
       onMessage: { addListener: function (fn) { listeners.onMessage.push(fn); } },
       sendMessage: function (msg) {
+        if (msg && (msg.type === 'ms-offscreen-keepalive-acquire' || msg.type === 'ms-offscreen-keepalive-release')) {
+          return Promise.resolve({ ok: true });
+        }
         if (msg && msg.type === 'ms-offscreen-fetch-blob') {
           return chrome.__ctx.fetch(msg.url, { headers: msg.headers || {} }).then(function (res) {
             if (!res.ok) return { error: 'http ' + res.status };

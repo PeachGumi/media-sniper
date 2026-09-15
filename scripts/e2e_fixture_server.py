@@ -3,6 +3,7 @@
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 import os
 import sys
+import time
 
 TOKEN = "Bearer media-sniper-e2e"
 
@@ -10,6 +11,10 @@ TOKEN = "Bearer media-sniper-e2e"
 class Handler(SimpleHTTPRequestHandler):
     def do_GET(self):
         path = self.path.split("?", 1)[0]
+        if path in ("/hls/slowmanifest.m3u8", "/hls/slowaudio.aac"):
+            # Keep the offscreen job alive beyond MV3's ordinary idle window.
+            # The popup is closed immediately after starting this fixture.
+            time.sleep(35)
         if path in ("/hls/auth.m3u8", "/hls/authseg0.ts"):
             if self.headers.get("Authorization") != TOKEN:
                 self.send_response(403)
