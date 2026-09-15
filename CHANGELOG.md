@@ -1,5 +1,41 @@
 # Changelog
 
+## v0.12.0 (2026-09-15)
+
+### Changed
+
+- HLS master playlists now appear as one logical video with a compact quality
+  selector instead of one popup card per rendition. The selected quality and
+  alternate-audio binding are preserved for individual and Save All jobs.
+- Page detection now also reads bounded, local-only HTML media, Open Graph and
+  Schema.org `VideoObject` metadata. Player/embed hints are never promoted to
+  downloadable items without a concrete media URL.
+- Direct media carrying the player's `Authorization`, `Referer` or `Origin`
+  context goes straight through the authenticated fetch path instead of first
+  creating a known-bad bare download.
+
+### Fixed
+
+- Extensionless DASH manifests are classified and routed by media kind rather
+  than a `.mpd` filename suffix; a `/hls/` path no longer overrides an explicit
+  MP4 or DASH content type.
+- Single-track DASH output is materialized as a typed downloadable Blob instead
+  of an OPFS-backed URL Chromium cancels.
+- Refreshed signed media URLs replace expired URLs without discarding richer
+  title, type, size or duration metadata.
+- Save All now sends adaptive YouTube video+audio items through the same mux
+  path as an individual save.
+- Byte-range observations use the full `Content-Range` size when available and
+  no longer present fragment length as complete-file size.
+- Non-live FFmpeg jobs with a non-zero return code no longer expose partial
+  output as a successful download.
+- Authorization-protected HLS now replays origin-bound request context through
+  the bundled LibAV segment/key fetches instead of only fetching the manifest.
+- HLS manifests, variants, segments, and popup quality options are bounded;
+  child playlists are suppressed once their master group is known.
+- Save All now advances after a download API rejection instead of leaving the
+  remaining media chain permanently blocked.
+
 ## v0.11.0 (2026-08-27)
 
 29 commits since v0.10.1. Highlights below; see the full log for everything.

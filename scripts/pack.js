@@ -1,7 +1,8 @@
 'use strict';
 /* Pack the extension into a zip (no external deps; shells out to zip if present). */
-const { execSync } = require('child_process');
+const { execFileSync } = require('child_process');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 
 const root = path.join(__dirname, '..');
@@ -70,10 +71,26 @@ for (const f of includes) {
   }
 }
 
+const stage = fs.mkdtempSync(path.join(os.tmpdir(), 'media-sniper-pack-'));
+const fixedTime = new Date('2000-01-01T00:00:00Z');
+
 try {
-  execSync('zip -r media-sniper.zip ' + includes.map((f) => `"${f}"`).join(' '), { cwd: root, stdio: 'inherit' });
+  for (const f of includes) {
+    const source = path.join(root, f);
+    const target = path.join(stage, f);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.copyFileSync(source, target);
+    fs.chmodSync(target, 0o644);
+    fs.utimesSync(target, fixedTime, fixedTime);
+  }
+
+  // Explicit files avoid directory entries; -X strips host UID/access-time
+  // metadata. Fixed staging mtimes make content-identical trees byte-identical.
+  execFileSync('zip', ['-X', '-q', out, ...includes], { cwd: stage, stdio: 'inherit' });
   console.log('packed ' + out);
 } catch (e) {
   console.error('zip failed: ' + e.message);
   process.exit(1);
+} finally {
+  fs.rmSync(stage, { recursive: true, force: true });
 }

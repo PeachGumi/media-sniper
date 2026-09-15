@@ -1,6 +1,6 @@
 # Media Sniper Privacy Policy
 
-Last updated: 2026-08-25
+Last updated: 2026-09-15
 
 Media Sniper is a browser extension that detects media requested by pages you visit and lets you save supported media using your browser session. Media Sniper does not operate a backend service and does not send analytics or telemetry to the project maintainer.
 
@@ -10,6 +10,8 @@ To provide media detection and download functionality, the extension may process
 
 - the URL and hostname of the page you are viewing;
 - the page title, used to suggest downloaded filenames;
+- bounded media metadata exposed in HTML media elements, Open Graph tags, and
+  Schema.org JSON-LD, such as a media URL, title, type, duration, and dimensions;
 - media, playlist, manifest, and segment URLs requested by the page;
 - response metadata such as content type and content length;
 - request metadata needed to retry authenticated media downloads: `Authorization`, `Referer`, and `Origin` when those headers are present;
@@ -19,6 +21,11 @@ To provide media detection and download functionality, the extension may process
 - browser download-history metadata used by the “Save all” feature to avoid re-downloading an item that already completed.
 
 Media Sniper does not ask for or store your account password. It does not intentionally capture arbitrary `X-*` request headers or copy browser Cookie request headers into its own media-header cache.
+
+Embedded metadata is parsed locally with size, depth, node-count, and URL-length
+limits. Raw page JSON is not sent to the extension background or stored; only
+compact normalized media candidates are reported. Player/embed URLs without a
+concrete media resource are treated as metadata-only and are not downloadable.
 
 ## Site-access model
 

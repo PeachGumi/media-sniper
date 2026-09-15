@@ -534,9 +534,9 @@ var MediaSniperLogic = globalThis.MediaSniperLogic || (function () {
     });
   }
 
-  // ---- VDH-inspired additions ------------------------------------------------
+  // ---- Media format helpers ---------------------------------------------------
 
-  // MIME -> extension fallback table (modeled on VDH's content-type mapping)
+  // MIME -> extension fallback table for common media formats.
   const MIME_EXT = [
     [/wave?/i, 'wav'], [/3gpp2?/i, '3gp'], [/flac/i, 'flac'], [/flv/i, 'flv'],
     [/m4a/i, 'm4a'], [/m4v/i, 'm4v'], [/matroska/i, 'mkv'], [/mov/i, 'mov'],
@@ -662,13 +662,12 @@ var MediaSniperLogic = globalThis.MediaSniperLogic || (function () {
     return Math.round(total * 10) / 10;
   }
 
-  // ---- VDH-style site handling -----------------------------------------------
+  // ---- Dedicated-site handling -----------------------------------------------
   // Sites that have dedicated extraction adapters. The generic webRequest
   // detector skips them entirely — on these sites the generic heuristics only
   // produce noise (e.g. YouTube's signature-protected DASH chunks with no
-  // file extension). Mirrors VDH's yS exclusion set; a site may only be added
-  // here once its adapter exists (VDH excludes instagram/vimeo/etc. because
-  // it ships adapters for them — we don't yet, so we must not exclude them).
+  // file extension). A site may only be added here once its adapter exists;
+  // unsupported sites must remain eligible for generic detection.
   const DEDICATED_SITES = ['youtube.com'];
 
   function isDedicatedSite(url) {

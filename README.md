@@ -19,6 +19,7 @@ Media Sniper は、Web ページ上でブラウザが実際に読み込んでい
 ### できること
 
 - ページ内の **MP4 / WebM / 音声ファイル**を検出して保存
+- HTML media、Open Graph、Schema.org の公開メタデータから具体的なメディアURLを補足
 - **HLS（`.m3u8`）** を解析し、動画として保存
 - **AES-128 HLS** をブラウザ内で復号して MP4 へ再多重化
 - **DASH（`.mpd`）** の映像・音声トラックを取得して結合
@@ -105,7 +106,7 @@ Media Sniper は、インストールしただけですべての Web サイト�
 | 種類 | 対応内容 |
 |---|---|
 | 直接ファイル | MP4、WebM、M4A、MP3、AAC、FLAC など |
-| HLS | VOD、ライブ、AES-128、fMP4、BYTERANGE、別音声 rendition、音声のみ ADTS |
+| HLS | VOD、ライブ、AES-128、fMP4、BYTERANGE、別音声 rendition、音声のみ ADTS、画質選択 |
 | DASH | MPD、SegmentTemplate、SegmentTimeline、階層継承、映像 + 音声 mux |
 | Blob | `<video>` / `<audio>` が参照する Blob URL |
 | YouTube | progressive、audio-only、adaptive video + audio mux |

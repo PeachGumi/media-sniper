@@ -86,8 +86,13 @@ jobs:
           console.log('libav provenance OK', prov.upstream_commit, prov.artifact_sha256);
           NODE
 
-      - name: Package
-        run: npm run zip
+      - name: Package reproducibly
+        run: |
+          npm run zip
+          cp media-sniper.zip /tmp/media-sniper-first.zip
+          touch manifest.json
+          npm run zip
+          cmp /tmp/media-sniper-first.zip media-sniper.zip
 
       - name: Verify packaged artifact
         run: |

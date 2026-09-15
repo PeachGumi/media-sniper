@@ -920,7 +920,7 @@ function advanceChainByJob(jobKey) {
 }
 
 // ---------------------------------------------------------------------------
-// webRequest detection (VDH-style): watch response headers directly.
+// Generic webRequest detection: watch response headers directly.
 // Works even on pages where content-script injection is blocked.
 // ---------------------------------------------------------------------------
 const WATCH_TYPES = ['xmlhttprequest', 'media', 'main_frame', 'other'];
@@ -1132,7 +1132,7 @@ function onResponseStarted(details) {
 
     const isDash = kind === 'dash' || (!kind && /\.mpd(\?|$)/i.test(url));
     if (isDash) {
-      // VDH-style: enumerate the mpd's tracks (video renditions + audio) as
+      // Enumerate the MPD's tracks (video renditions + audio) as
       // separate items. ffmpeg downloads one track per job — concurrent
       // adaptation-set fetches deadlock jsfetch, so no combined v+a here.
       fetch(url, { credentials: 'include', headers: headersFor(url) }).then(function (res) {

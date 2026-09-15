@@ -1,7 +1,7 @@
 'use strict';
 /* Media Sniper - YouTube adapter (MAIN world, youtube.com only).
  *
- * Mirrors VDH's dedicated-adapter approach: instead of sniffing YouTube's
+ * Uses a dedicated-adapter approach: instead of sniffing YouTube's
  * signature-protected media chunks (which have no file extension and produce
  * only noise), it reads the player response's streamingData directly and
  * reports the downloadable formats.
