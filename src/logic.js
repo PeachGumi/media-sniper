@@ -162,6 +162,7 @@ var MediaSniperLogic = globalThis.MediaSniperLogic || (function () {
     let score = (item.size && item.size > 0 ? item.size : 0);
     if (item.title) score += 1000;
     if (item.contentType) score += 100;
+    if (item.variants && item.variants.length) score += item.variants.length * 100;
     return score;
   }
 
@@ -191,6 +192,14 @@ var MediaSniperLogic = globalThis.MediaSniperLogic || (function () {
       // previously observed size remains the more useful metadata.
       if (Number(prev.size) > Number(it.size || 0)) merged.size = prev.size;
       if (Number(prev.duration) > Number(it.duration || 0)) merged.duration = prev.duration;
+      if (it.kind === 'hls' && (prev.variants || it.variants)) {
+        const variants = mergeHlsVariants(prev.variants, it.variants);
+        merged.variants = variants;
+        const previousSelection = selectHlsVariant({ variants: variants }, prev.selectedVariantKey);
+        const incomingSelection = selectHlsVariant({ variants: variants }, it.selectedVariantKey);
+        const selected = previousSelection || incomingSelection || pickBestVariant(variants);
+        merged.selectedVariantKey = selected ? hlsVariantKey(selected) : null;
+      }
       // The URL itself is the refresh signal and must always come from the
       // newest report, even when that report is otherwise sparse.
       merged.url = it.url;
@@ -299,12 +308,118 @@ var MediaSniperLogic = globalThis.MediaSniperLogic || (function () {
     return out;
   }
 
+  function withPlaylistToken(url, token) {
+    if (!token) return url;
+    try {
+      const u = new URL(url);
+      if (!u.search) return url + '?' + token;
+    } catch (e) { /* keep the resolved URL */ }
+    return url;
+  }
+
+  function hlsVariantKey(variant) {
+    return variant && variant.url ? String(variant.url) : '';
+  }
+
+  function resolutionArea(resolution) {
+    const m = String(resolution || '').match(/^(\d+)x(\d+)$/i);
+    return m ? Number(m[1]) * Number(m[2]) : 0;
+  }
+
+  function normalizeHlsVariants(variants) {
+    const byKey = new Map();
+    for (const raw of variants || []) {
+      if (!raw || !raw.url) continue;
+      const variant = Object.assign({}, raw, {
+        url: String(raw.url),
+        bandwidth: Number(raw.bandwidth) || 0,
+        resolution: raw.resolution ? String(raw.resolution) : null,
+        codecs: raw.codecs ? String(raw.codecs) : null,
+        audioUrl: raw.audioUrl ? String(raw.audioUrl) : null,
+      });
+      const key = hlsVariantKey(variant);
+      const previous = byKey.get(key);
+      // A later observation can fill in an alternate audio URL or richer
+      // rendition metadata without creating a duplicate quality entry.
+      if (previous) {
+        const merged = Object.assign({}, previous, variant);
+        if (!variant.audioUrl && previous.audioUrl) merged.audioUrl = previous.audioUrl;
+        if (!variant.resolution && previous.resolution) merged.resolution = previous.resolution;
+        if (!variant.codecs && previous.codecs) merged.codecs = previous.codecs;
+        if (!variant.bandwidth && previous.bandwidth) merged.bandwidth = previous.bandwidth;
+        byKey.set(key, merged);
+      } else {
+        byKey.set(key, variant);
+      }
+    }
+    return Array.from(byKey.values());
+  }
+
+  function mergeHlsVariants(existing, incoming) {
+    return normalizeHlsVariants((existing || []).concat(incoming || []));
+  }
+
+  function hlsVariantLabel(variant) {
+    if (!variant) return '';
+    if (variant.resolution) return String(variant.resolution);
+    if (variant.bandwidth) return Math.round(Number(variant.bandwidth) / 1000) + ' kbps';
+    return 'HLS';
+  }
+
   function pickBestVariant(variants) {
     let best = null;
     for (const v of variants || []) {
-      if (!best || (v.bandwidth || 0) > (best.bandwidth || 0)) best = v;
+      if (!best || (Number(v.bandwidth) || 0) > (Number(best.bandwidth) || 0) ||
+          ((Number(v.bandwidth) || 0) === (Number(best.bandwidth) || 0) &&
+           resolutionArea(v.resolution) > resolutionArea(best.resolution))) best = v;
     }
     return best;
+  }
+
+  function selectedHlsVariant(item) {
+    const variants = item && Array.isArray(item.variants) ? item.variants : [];
+    if (!variants.length) return null;
+    const key = item && item.selectedVariantKey ? String(item.selectedVariantKey) : '';
+    if (key) {
+      const selected = variants.find(function (variant) { return hlsVariantKey(variant) === key; });
+      if (selected) return selected;
+    }
+    return pickBestVariant(variants);
+  }
+
+  function selectHlsVariant(item, key) {
+    const variants = item && Array.isArray(item.variants) ? item.variants : [];
+    const wanted = String(key || '');
+    return variants.find(function (variant) { return hlsVariantKey(variant) === wanted; }) || null;
+  }
+
+  // Convert one validated master playlist into the single logical item shown
+  // by the popup. Variant URLs inherit the master's auth query when needed;
+  // alternate audio stays attached to its corresponding quality.
+  function groupHlsItem(masterUrl, parsed, meta) {
+    const media = parsed && Array.isArray(parsed.media) ? parsed.media : [];
+    const rawVariants = (parsed && parsed.variants || []).map(function (raw) {
+      const variant = Object.assign({}, raw, {
+        url: withPlaylistToken(raw.url, raw.token),
+      });
+      if (!variant.audioUrl && variant.audioGroup) {
+        const audio = media.find(function (entry) {
+          return entry && entry.type === 'AUDIO' && entry.uri && entry.groupId === variant.audioGroup && entry.isDefault;
+        }) || media.find(function (entry) {
+          return entry && entry.type === 'AUDIO' && entry.uri && entry.groupId === variant.audioGroup;
+        });
+        if (audio) variant.audioUrl = withPlaylistToken(audio.uri, variant.token);
+      }
+      return variant;
+    });
+    const variants = normalizeHlsVariants(rawVariants);
+    const best = pickBestVariant(variants);
+    return Object.assign({}, meta || {}, {
+      url: String(masterUrl),
+      kind: 'hls',
+      variants: variants,
+      selectedVariantKey: best ? hlsVariantKey(best) : null,
+    });
   }
 
   // ---- VDH-inspired additions ------------------------------------------------
@@ -661,7 +776,14 @@ var MediaSniperLogic = globalThis.MediaSniperLogic || (function () {
     sortItems: sortItems,
     ytDlpCommand: ytDlpCommand,
     parseM3u8: parseM3u8,
+    groupHlsItem: groupHlsItem,
+    normalizeHlsVariants: normalizeHlsVariants,
+    mergeHlsVariants: mergeHlsVariants,
+    hlsVariantKey: hlsVariantKey,
+    hlsVariantLabel: hlsVariantLabel,
     pickBestVariant: pickBestVariant,
+    selectedHlsVariant: selectedHlsVariant,
+    selectHlsVariant: selectHlsVariant,
     hostOf: hostOf,
     extFromContentType: extFromContentType,
     fullMediaUrlFromByteRange: fullMediaUrlFromByteRange,

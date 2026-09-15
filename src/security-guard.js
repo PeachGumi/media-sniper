@@ -21,7 +21,7 @@ const MediaSniperSecurity = (function () {
   const UI_TYPES = new Set([
     'ms-get-items', 'ms-get-settings', 'ms-set-settings', 'ms-download-all',
     'ms-yt-mux-download', 'ms-clear', 'ms-download', 'ms-download-blob',
-    'ms-hls-download', 'ms-hls-stop', 'ms-hls-status', 'ms-queue-status',
+    'ms-hls-download', 'ms-hls-stop', 'ms-hls-status', 'ms-queue-status', 'ms-select-quality',
   ]);
   const EXTENSION_INTERNAL_TYPES = new Set(['ms-offscreen-progress', 'ms-hls-progress']);
   const ALLOWED_KINDS = new Set(['video', 'audio', 'hls', 'hls-audio', 'dash', 'ts']);

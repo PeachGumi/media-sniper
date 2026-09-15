@@ -32,7 +32,10 @@ const source = fs.readFileSync(path.join(__dirname, '../src/navigation-refresh.j
   const tabUpdatedListeners = [];
   const injected = [];
   const state = {
-    itemsByTab: new Map([[7, [{ pageUrl: 'https://a.test/old', url: 'https://cdn.test/old.mp4' }]]]),
+    itemsByTab: new Map([[7, [{
+      pageUrl: 'https://a.test/old', url: 'https://cdn.test/old.mp4',
+      variants: [{ url: 'https://cdn.test/old/720.m3u8', resolution: '1280x720' }],
+    }]]]),
     pageMeta: new Map([[7, { title: 'old', url: 'https://a.test/old' }]]),
   };
   const ctx = {
@@ -72,7 +75,10 @@ const source = fs.readFileSync(path.join(__dirname, '../src/navigation-refresh.j
   eq(persistCalls, 1, 'navigation cleanup persisted');
   eq(badgeTab, 7, 'navigation cleanup updates badge');
 
-  state.itemsByTab.set(7, [{ pageUrl: 'https://a.test/new', url: 'https://cdn.test/new.mp4' }]);
+  state.itemsByTab.set(7, [{
+    pageUrl: 'https://a.test/new', url: 'https://cdn.test/new.mp4',
+    variants: [{ url: 'https://cdn.test/new/720.m3u8', resolution: '1280x720' }],
+  }]);
   response = null;
   listeners[0]({ type: 'ms-navigation', title: 'evil', url: 'https://evil.test/hijack' }, {
     id: 'extid', frameId: 0, url: 'https://a.test/old', tab: { id: 7, url: 'https://a.test/old' },

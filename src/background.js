@@ -95,6 +95,9 @@ function normalizeItem(raw, tabId) {
   const c = L.classifyUrl(url);
   let ext = c.ext || raw.ext || L.extFromContentType(raw.contentType, url);
   if (ext === 'm3u8' || ext === 'mpd') ext = null; // combined output, not playlist text
+  const variants = L.normalizeHlsVariants(raw.variants || []);
+  const requestedVariant = L.selectHlsVariant({ variants: variants }, raw.selectedVariantKey);
+  const defaultVariant = requestedVariant || L.pickBestVariant(variants);
   const item = {
     url: url,
     key: L.itemKey(url) + (raw.dashEntry != null ? '#e' + raw.dashEntry : ''),
@@ -109,6 +112,8 @@ function normalizeItem(raw, tabId) {
     dashEntry: raw.dashEntry != null ? raw.dashEntry : null,
     dashType: raw.dashType || null,
     audioUrl: raw.audioUrl || null, // separate-track audio playlist (HLS two-source)
+    variants: variants,
+    selectedVariantKey: defaultVariant ? L.hlsVariantKey(defaultVariant) : null,
     tabId: tabId,
   };
   return item;
@@ -450,9 +455,14 @@ async function runHlsJob(jobKey, playlistUrl) {
   let variant = null;
 
   if (masterParsed.type === 'master') {
-    variant = L.pickBestVariant(masterParsed.variants);
+    variant = masterParsed.variants.find(function (candidate) {
+      const candidateUrl = withToken(candidate.url, candidate.token);
+      return (job.variantUrl && candidateUrl === job.variantUrl) ||
+        (job.variantKey && candidateUrl === job.variantKey);
+    }) || L.pickBestVariant(masterParsed.variants);
     if (!variant) throw new Error('no variants in master playlist');
     mediaUrl = withToken(variant.url, variant.token);
+    if (!job.audioUrl) job.audioUrl = pickAudioUrl(masterParsed, variant);
     job.status = 'fetching';
     mediaText = await swFetchText(mediaUrl, headersFor(mediaUrl, hdrs));
   }
@@ -478,7 +488,7 @@ async function runHlsJob(jobKey, playlistUrl) {
       headers: segHeaders,
       mime: 'audio/aac',
     }, job);
-    return finishMediaJob(playlistUrl, made, 'aac', 'audio');
+    return finishMediaJob(jobKey, made, 'aac', 'audio');
   }
 
   // Path 2: ffmpeg (VDH architecture). Handles everything the hand-rolled
@@ -492,7 +502,7 @@ async function runHlsJob(jobKey, playlistUrl) {
   const twoSource = !audioOnly && !media.live && job.audioUrl;
   const audioHeaders = twoSource ? Object.assign({}, headersFor(mediaUrl, hdrs), headersFor(job.audioUrl, hdrs)) : null;
   const req = {
-    jobId: playlistUrl,
+    jobId: jobKey,
     kind: 'hls',
     url: mediaUrl,
     audioUrl: twoSource ? job.audioUrl : null,
@@ -512,7 +522,7 @@ async function runHlsJob(jobKey, playlistUrl) {
     offscreenFfmpegRun(req).then(function (made) {
       const secs = Math.max(1, Math.round((Date.now() - job.startedAt) / 1000));
       job.title = (job.title || 'stream') + ' [' + fmtClock(secs) + ']';
-      return finishMediaJob(playlistUrl, made, job.ext, audioOnly ? 'audio' : 'video');
+      return finishMediaJob(jobKey, made, job.ext, audioOnly ? 'audio' : 'video');
     }).catch(function (err) {
       job.status = 'failed';
       job.error = String(err && err.message || err);
@@ -522,7 +532,7 @@ async function runHlsJob(jobKey, playlistUrl) {
 
   job.status = 'combining';
   const made = await offscreenFfmpegRun(req);
-  return finishMediaJob(playlistUrl, made, job.ext, audioOnly ? 'audio' : 'video');
+  return finishMediaJob(jobKey, made, job.ext, audioOnly ? 'audio' : 'video');
 }
 
 function fmtClock(totalSec) {
@@ -656,7 +666,24 @@ async function runYtMuxJob(jobKey, item) {
   return finishMediaJob(jobKey, resp, 'mp4', 'video');
 }
 
-function startHls(tabId, jobKey, url, title, pageUrl, dashEntry, dashType, audioUrl, itemRef, requestedKind) {
+function buildMediaJobKey(url, dashEntry, variantKey) {
+  let key = String(url || '');
+  if (dashEntry != null && dashEntry >= 0) key += '#dash-entry=' + dashEntry;
+  if (variantKey) key += '#hls-variant=' + encodeURIComponent(String(variantKey));
+  return key;
+}
+
+function selectedHlsRequest(item) {
+  const variant = item && item.kind === 'hls' ? L.selectedHlsVariant(item) : null;
+  return {
+    variant: variant,
+    variantUrl: variant ? variant.url : null,
+    variantKey: variant ? L.hlsVariantKey(variant) : null,
+    audioUrl: variant ? (variant.audioUrl || null) : (item && item.audioUrl ? item.audioUrl : null),
+  };
+}
+
+function startHls(tabId, jobKey, url, title, pageUrl, dashEntry, dashType, audioUrl, itemRef, requestedKind, variantUrl, variantKey) {
   const ref = itemRef || null;
   const existing = state.hlsJobs.get(jobKey);
   if (existing && (existing.status === 'fetching' || existing.status === 'combining' || existing.status === 'recording')) {
@@ -669,6 +696,8 @@ function startHls(tabId, jobKey, url, title, pageUrl, dashEntry, dashType, audio
     dashEntry: dashEntry != null ? dashEntry : null,
     dashType: dashType || null,
     audioUrl: audioUrl || null,
+    variantUrl: variantUrl || null,
+    variantKey: variantKey || null,
   });
   let runner = null;
   if (ref && ref.via === 'youtube' && ref.audioUrl) {
@@ -676,19 +705,23 @@ function startHls(tabId, jobKey, url, title, pageUrl, dashEntry, dashType, audio
   } else {
     runner = (requestedKind === 'dash' || /\.mpd(\?|$)/i.test(url)) ? runDashJob : runHlsJob;
   }
-  return runner(jobKey, url).catch(function (err) {
+  return runner(jobKey, url).then(function (result) {
+    if (result && typeof result === 'object') result.jobKey = jobKey;
+    return result;
+  }).catch(function (err) {
     const j = state.hlsJobs.get(jobKey);
     if (j) { j.status = 'failed'; j.error = String(err && err.message || err); }
-    return { error: j && j.error };
+    return { error: j && j.error, jobKey: jobKey };
   });
 }
 
 // stop a live recording (ffmpeg abort; fragmented MP4 stays valid)
-function stopLiveRecording(url) {
-  const job = state.hlsJobs.get(url);
+function stopLiveRecording(url, jobKey) {
+  const key = jobKey || url;
+  const job = state.hlsJobs.get(key) || state.hlsJobs.get(url);
   if (!job || job.status !== 'recording') return Promise.resolve({ ok: false });
   return ensureOffscreen().then(function () {
-    return chrome.runtime.sendMessage({ type: 'ms-offscreen-ffmpeg-abort', jobId: url });
+    return chrome.runtime.sendMessage({ type: 'ms-offscreen-ffmpeg-abort', jobId: key });
   }).then(function (r) {
     return { ok: !!(r && r.ok) };
   }).catch(function () { return { ok: false }; });
@@ -712,9 +745,10 @@ function pumpMediaChain(tabId) {
   while (chain.idx < chain.items.length) {
     const item = chain.items[chain.idx];
     const isYtMux = item.via === 'youtube' && item.audioUrl;
+    const request = selectedHlsRequest(item);
     const jobKey = isYtMux
       ? 'yt-mux:' + (item.key || item.url)
-      : item.url + (item.dashEntry != null && item.dashEntry >= 0 ? '#dash-entry=' + item.dashEntry : '');
+      : buildMediaJobKey(item.url, item.dashEntry, request.variantKey);
     const prev = state.hlsJobs.get(jobKey);
     if (prev && prev.status === 'complete') { chain.idx++; continue; }
     if (prev && (prev.status === 'fetching' || prev.status === 'combining' || prev.status === 'downloading' || prev.status === 'recording')) {
@@ -727,8 +761,8 @@ function pumpMediaChain(tabId) {
     chain.running = true;
     chain.current = jobKey;
     startHls(tabId, jobKey, item.url, item.title, item.pageUrl || null,
-      item.dashEntry != null ? item.dashEntry : null, item.dashType || null, item.audioUrl || null,
-      isYtMux ? item : null, item.kind)
+      item.dashEntry != null ? item.dashEntry : null, item.dashType || null, request.audioUrl,
+      isYtMux ? item : null, item.kind, request.variantUrl, request.variantKey)
       .then(function (resp) {
         // {queued:true}: the blob DOWNLOAD is now in flight. The chain must
         // NOT advance here — the runner resolving only means "queued". The
@@ -907,20 +941,17 @@ function onResponseStarted(details) {
         const pageUrl = details.initiator || details.url;
         const baseTitle = pageTitle(details.tabId);
         if (parsed.type === 'master' && parsed.variants.length) {
-          // VDH-style: surface each variant as its own item so the user picks
-          // a resolution, instead of one opaque "HLS" entry. Each variant URL
-          // is a playable media playlist (tokens from the master are kept).
-          const metas = parsed.variants.map(function (v) {
-            const vurl = withToken(v.url, v.token);
-            const label = v.resolution ? ' [' + v.resolution + ']' : '';
-            return {
-              url: vurl, kind: 'hls', contentType: ct || null, size: 0,
-              via: 'webrequest', pageUrl: pageUrl,
-              title: (baseTitle || 'video') + label, duration: 0,
-              audioUrl: (function () { const a = pickAudioUrl(parsed, v); return a ? withToken(a, v.token) : null; })(),
-            };
-          });
-          addItems(details.tabId, metas);
+          // A master playlist is one logical item. Keep every rendition
+          // nested on it so the popup can choose a quality without creating
+          // duplicate cards or Save All jobs.
+          addItems(details.tabId, [L.groupHlsItem(url, parsed, {
+            contentType: ct || null,
+            size: 0,
+            via: 'webrequest',
+            pageUrl: pageUrl,
+            title: baseTitle,
+            duration: 0,
+          })]);
         } else {
           // audio-only HLS (X Spaces replays: .aac ADTS chunks) is its own
           // kind so the popup can label it 音声 and the save path picks .aac
@@ -1007,6 +1038,39 @@ function fillTitles(tabId) {
   } catch (e) { /* ignore */ }
 }
 
+function findItemForQuality(tabId, itemKey, itemUrl) {
+  const list = state.itemsByTab.get(tabId) || [];
+  return list.find(function (item) {
+    return (itemKey && item.key === itemKey) || (itemUrl && item.url === itemUrl);
+  }) || null;
+}
+
+function applyQualitySelection(tabId, itemKey, itemUrl, variantKey) {
+  const item = findItemForQuality(tabId, itemKey, itemUrl);
+  if (!item || !item.variants || !item.variants.length) return null;
+  const variant = L.selectHlsVariant(item, variantKey);
+  if (!variant) return null;
+  item.selectedVariantKey = L.hlsVariantKey(variant);
+  persistItems();
+  return variant;
+}
+
+function applyQualitySelections(tabId, selections) {
+  if (!selections || typeof selections !== 'object') return;
+  const list = state.itemsByTab.get(tabId) || [];
+  let changed = false;
+  for (const item of list) {
+    if (!item || !item.variants || !item.variants.length) continue;
+    const wanted = selections[item.key] || selections[item.url];
+    const variant = L.selectHlsVariant(item, wanted);
+    if (variant && item.selectedVariantKey !== L.hlsVariantKey(variant)) {
+      item.selectedVariantKey = L.hlsVariantKey(variant);
+      changed = true;
+    }
+  }
+  if (changed) persistItems();
+}
+
 if (chrome.webRequest && chrome.webRequest.onResponseStarted) {
   chrome.webRequest.onResponseStarted.addListener(onResponseStarted, { urls: ['<all_urls>'], types: WATCH_TYPES }, ['responseHeaders']);
 }
@@ -1069,8 +1133,19 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
       });
       return true;
     }
+    case 'ms-select-quality': {
+      restorePromise.then(function () {
+        const variant = applyQualitySelection(tabId, msg.itemKey || null, msg.itemUrl || null, msg.variantKey);
+        sendResponse(variant ? {
+          ok: true,
+          variantKey: L.hlsVariantKey(variant),
+        } : { ok: false, error: 'quality not found' });
+      });
+      return true;
+    }
     case 'ms-download-all': {
       restorePromise.then(function () {
+        applyQualitySelections(tabId, msg.selections);
         const items = L.sortItems(state.itemsByTab.get(tabId) || []);
         const existingSet = new Set();
         try {
@@ -1162,17 +1237,19 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
       return false;
     }
     case 'ms-hls-download': {
-      const jobKey = msg.url + (msg.dashEntry != null && msg.dashEntry >= 0 ? '#dash-entry=' + msg.dashEntry : '');
-      startHls(tabId, jobKey, msg.url, msg.title, msg.pageUrl, msg.dashEntry != null ? msg.dashEntry : null, msg.dashType || null, msg.audioUrl || null, null, msg.kind || null).then(sendResponse);
+      const jobKey = msg.jobKey || buildMediaJobKey(msg.url, msg.dashEntry, msg.variantKey || null);
+      startHls(tabId, jobKey, msg.url, msg.title, msg.pageUrl, msg.dashEntry != null ? msg.dashEntry : null,
+        msg.dashType || null, msg.audioUrl || null, null, msg.kind || null,
+        msg.variantUrl || null, msg.variantKey || null).then(sendResponse);
       return true;
     }
     case 'ms-hls-stop': {
-      stopLiveRecording(msg.url).then(sendResponse);
+      stopLiveRecording(msg.url, msg.jobKey || null).then(sendResponse);
       return true;
     }
     case 'ms-hls-status': {
       // jobKey form is used by yt-mux jobs (their key is not the media URL)
-      const jobKey = msg.jobKey || (msg.url + (msg.dashEntry != null && msg.dashEntry >= 0 ? '#dash-entry=' + msg.dashEntry : ''));
+      const jobKey = msg.jobKey || buildMediaJobKey(msg.url, msg.dashEntry, msg.variantKey || null);
       const job = state.hlsJobs.get(jobKey) || state.hlsJobs.get(msg.url);
       sendResponse(job ? {
         status: job.status, done: job.done, total: job.total, error: job.error,

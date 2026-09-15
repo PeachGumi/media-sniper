@@ -467,7 +467,7 @@ async function run() {
   r = await send(chrome, { type: 'ms-get-items', tabId: 7 });
   ok(!r.items.some(function (i) { return i.url.indexOf('thing.mp4') >= 0; }), 'html response filtered');
 
-  // m3u8 via content-type -> master playlist expanded into per-variant items
+  // m3u8 via content-type -> one logical master item with nested variants
   wr({
     statusCode: 200, url: 'https://cdn.example.com/live/master.m3u8', tabId: 7,
     initiator: 'https://site.example.com/', type: 'xmlhttprequest',
@@ -477,10 +477,10 @@ async function run() {
   await flush();
   r = await send(chrome, { type: 'ms-get-items', tabId: 7 });
   const hlsItem = r.items.find(function (i) { return i.kind === 'hls'; });
-  ok(!!hlsItem, 'hls variant added');
-  // master playlist is NOT shown as one opaque "HLS" entry; the variant's own
-  // media playlist URL is surfaced instead (VDH-style variant expansion)
-  eq(hlsItem && hlsItem.url, 'https://cdn.example.com/live/media.m3u8', 'variant media playlist surfaced, not master');
+  ok(!!hlsItem, 'hls master item added');
+  eq(hlsItem && hlsItem.url, 'https://cdn.example.com/live/master.m3u8', 'master URL remains the logical item URL');
+  eq(hlsItem && hlsItem.variants.length, 1, 'master keeps its nested variant');
+  eq(hlsItem && hlsItem.variants[0].url, 'https://cdn.example.com/live/media.m3u8', 'variant media playlist preserved');
   eq(hlsItem && hlsItem.title, 'Cool Video Page', 'hls item titled');
   ok(chrome.__swFetchLog.some(function (u) { return u.indexOf('master.m3u8') >= 0; }), 'SW fetched playlist');
 
@@ -569,7 +569,7 @@ async function run() {
 
   async function settle() { for (let i = 0; i < 8; i++) await flush(); }
 
-  // --- 10. multi-variant master: each variant becomes its own item -----------
+  // --- 10. multi-variant master: one item preserves every quality ------------
   ctxRef.fetch = function (url, opts) {
     chrome.__swFetchLog.push(url);
     chrome.__swFetchOpts.push({ url: url, opts: opts || {} });
@@ -587,10 +587,13 @@ async function run() {
   });
   await settle();
   r = await send(chrome, { type: 'ms-get-items', tabId: 7 });
-  const v720 = r.items.find(function (i) { return i.url.indexOf('v720.m3u8') >= 0; });
-  const v360 = r.items.find(function (i) { return i.url.indexOf('v360.m3u8') >= 0; });
-  ok(!!v720 && !!v360, 'multi-variant: both variants surfaced');
-  eq(v720 && v720.title, 'Cool Video Page [1280x720]', '720p variant labeled');
+  const grouped = r.items.find(function (i) { return i.url.indexOf('multi.m3u8') >= 0; });
+  eq(r.items.filter(function (i) { return i.url.indexOf('multi.m3u8') >= 0; }).length, 1, 'multi-variant: one logical item');
+  const v720 = grouped && grouped.variants.find(function (i) { return i.url.indexOf('v720.m3u8') >= 0; });
+  const v360 = grouped && grouped.variants.find(function (i) { return i.url.indexOf('v360.m3u8') >= 0; });
+  ok(!!v720 && !!v360, 'multi-variant: all variants nested');
+  eq(grouped && grouped.title, 'Cool Video Page', 'grouped item keeps the page title');
+  eq(grouped && grouped.selectedVariantKey, v720 && v720.url, 'highest bandwidth variant selected by default');
   ctxRef.fetch = origFetch;
 
   // --- 11. sent_headers capture & replay (VDH-style) ---------------------------
@@ -880,12 +883,16 @@ async function run() {
   });
   await settle();
   r = await send(chrome, { type: 'ms-get-items', tabId: 7 });
-  const two = r.items.find(function (i) { return i.url.indexOf('two-video.m3u8') >= 0; });
-  ok(!!two, 'two-source variant surfaced');
-  ok(!!two && two.audioUrl && two.audioUrl.indexOf('aud/ja.m3u8') >= 0, 'variant carries resolved audio rendition URL');
+  const two = r.items.find(function (i) { return i.url.indexOf('two.m3u8') >= 0; });
+  const twoVariant = two && two.variants[0];
+  ok(!!two, 'two-source master item surfaced');
+  ok(!!twoVariant && twoVariant.audioUrl && twoVariant.audioUrl.indexOf('aud/ja.m3u8') >= 0, 'variant carries resolved audio rendition URL');
   // save it: the ffmpeg job must receive the audio URL for the 2-input mux
   chrome.__ffmpegRuns.length = 0;
-  const twoResp = await send(chrome, { type: 'ms-hls-download', url: two.url, title: 'Two Source', audioUrl: two.audioUrl }, { tab: { id: 7 } });
+  const twoResp = await send(chrome, {
+    type: 'ms-hls-download', url: two.url, title: 'Two Source',
+    variantUrl: twoVariant.url, variantKey: twoVariant.url, audioUrl: twoVariant.audioUrl,
+  }, { tab: { id: 7 } });
   ok(twoResp && twoResp.queued, 'two-source download queued');
   eq(chrome.__ffmpegRuns.length, 1, 'one ffmpeg run');
   eq(chrome.__ffmpegRuns[0].audioUrl.indexOf('ja.m3u8') >= 0, true, 'ffmpeg job got the separate audio playlist');

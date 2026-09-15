@@ -48,6 +48,39 @@ function labelFor(item) {
   }
 }
 
+function selectedQuality(item) {
+  if (!item || item.kind !== 'hls' || !item.variants || !item.variants.length) return null;
+  return L().selectedHlsVariant(item);
+}
+
+function qualitySelector(item) {
+  const variants = item && item.kind === 'hls' && Array.isArray(item.variants) ? item.variants : [];
+  if (!variants.length) return null;
+  const select = document.createElement('select');
+  select.className = 'quality';
+  select.setAttribute('aria-label', 'Quality');
+  const current = selectedQuality(item);
+  if (current) item.selectedVariantKey = L().hlsVariantKey(current);
+  for (const variant of variants) {
+    const option = document.createElement('option');
+    option.value = L().hlsVariantKey(variant);
+    option.textContent = L().hlsVariantLabel(variant);
+    if (current && option.value === L().hlsVariantKey(current)) option.selected = true;
+    select.appendChild(option);
+  }
+  if (current) select.value = L().hlsVariantKey(current);
+  select.addEventListener('change', () => {
+    const variant = L().selectHlsVariant(item, select.value);
+    if (!variant) return;
+    item.selectedVariantKey = L().hlsVariantKey(variant);
+    chrome.runtime.sendMessage({
+      type: 'ms-select-quality', tabId: tabId, itemKey: item.key, itemUrl: item.url,
+      variantKey: item.selectedVariantKey,
+    }, () => { void chrome.runtime.lastError; });
+  });
+  return select;
+}
+
 function resetSaveButton(btn) {
   btn.classList.remove('busy');
   btn.textContent = t('save');
@@ -88,6 +121,8 @@ function render() {
     meta.textContent = bits.join(' · ') || item.contentType || '';
     info.appendChild(name);
     info.appendChild(meta);
+    const quality = qualitySelector(item);
+    if (quality) info.appendChild(quality);
 
     const dl = document.createElement('button');
     dl.className = 'dl';
@@ -117,7 +152,7 @@ function render() {
 
 function save(item, btn) {
   if (btn.dataset.recording === '1') {
-    chrome.runtime.sendMessage({ type: 'ms-hls-stop', url: item.url }, (resp) => {
+    chrome.runtime.sendMessage({ type: 'ms-hls-stop', url: item.url, jobKey: item.jobKey || null }, (resp) => {
       if (chrome.runtime.lastError || (resp && resp.ok === false)) {
         setStatus(t('stopFailed'), true);
         return;
@@ -132,11 +167,14 @@ function save(item, btn) {
   btn.textContent = '…';
 
   if (item.kind === 'hls' || item.kind === 'hls-audio' || item.kind === 'dash') {
+    const variant = selectedQuality(item);
     chrome.runtime.sendMessage(
       {
         type: 'ms-hls-download', url: item.url, kind: item.kind, tabId: tabId, title: item.title, pageUrl: pageUrl,
         dashEntry: item.dashEntry != null ? item.dashEntry : null, dashType: item.dashType || null,
-        audioUrl: item.audioUrl || null,
+        variantUrl: variant ? variant.url : null,
+        variantKey: variant ? L().hlsVariantKey(variant) : null,
+        audioUrl: variant ? (variant.audioUrl || null) : (item.audioUrl || null),
       },
       (resp) => {
         if (chrome.runtime.lastError) {
@@ -157,12 +195,12 @@ function save(item, btn) {
         if (resp && resp.recording) {
           setStatus(t('recordingStarted'));
           btn.textContent = t('recording');
-          pollHls(item, btn);
+          pollHls(Object.assign({}, item, { jobKey: resp.jobKey || item.url }), btn);
           return;
         }
         setStatus(item.kind === 'dash' ? t('dashFetching') : t('hlsFetching'));
         btn.textContent = t('fetching');
-        pollHls(item, btn);
+        pollHls(Object.assign({}, item, { jobKey: resp.jobKey || item.url }), btn);
       }
     );
     return;
@@ -248,7 +286,7 @@ function pollHls(item, btn) {
   const started = Date.now();
   const timer = setInterval(() => {
     chrome.runtime.sendMessage({
-      type: 'ms-hls-status',
+      type: 'ms-hls-status', jobKey: item.jobKey || null,
       url: item.url,
       dashEntry: item.dashEntry != null ? item.dashEntry : null,
     }, (job) => {
@@ -295,6 +333,15 @@ function pollHls(item, btn) {
   const prev = hlsTimers.get(item.key);
   if (prev) clearInterval(prev);
   hlsTimers.set(item.key, timer);
+}
+
+function selectedQualityMap() {
+  const selections = {};
+  for (const item of items) {
+    const variant = selectedQuality(item);
+    if (variant && item.key) selections[item.key] = L().hlsVariantKey(variant);
+  }
+  return selections;
 }
 
 let settings = { rootFolder: '', minSizeKb: 500, blacklist: '' };
@@ -371,7 +418,7 @@ $('#saveall').addEventListener('click', () => {
   const btn = $('#saveall');
   btn.classList.add('busy');
   btn.textContent = '…';
-  chrome.runtime.sendMessage({ type: 'ms-download-all', tabId: tabId }, (resp) => {
+  chrome.runtime.sendMessage({ type: 'ms-download-all', tabId: tabId, selections: selectedQualityMap() }, (resp) => {
     btn.classList.remove('busy');
     btn.textContent = t('saveAll');
     if (chrome.runtime.lastError || !resp) {

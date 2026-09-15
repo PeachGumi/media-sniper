@@ -77,6 +77,7 @@ eq(S.responseLooksMedia({ statusCode: 403, url: 'https://a.example/video.mp4', r
   eq(S.normalizeInboundMessage({ type: 'ms-download', item: {} }, contentSender, 'extid').ok, false, 'content sender cannot download');
   eq(S.normalizeInboundMessage({ type: 'ms-download', item: {} }, popupSender, 'extid').ok, true, 'own popup may download');
   eq(S.normalizeInboundMessage({ type: 'ms-set-settings', settings: {} }, contentSender, 'extid').ok, false, 'content sender cannot change settings');
+  eq(S.normalizeInboundMessage({ type: 'ms-select-quality', itemKey: 'master', variantKey: 'variant' }, popupSender, 'extid').ok, true, 'own popup may select quality');
 }
 
 // The YouTube adapter is accepted only from YouTube and only for its expected
