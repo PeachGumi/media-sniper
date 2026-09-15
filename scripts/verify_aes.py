@@ -27,6 +27,7 @@ FIXTURE_PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8899
 FIX = f"http://127.0.0.1:{FIXTURE_PORT}"
 PLAIN = FIX + "/hls/media.m3u8"
 ENC = FIX + "/hls/encindex.m3u8"
+AUTH = FIX + "/hls/auth.m3u8"
 PAGE = FIX + "/hls/index.html"
 ALL = ["http://*/*", "https://*/*"]
 PREGRANTED = os.environ.get("MEDIA_SNIPER_E2E_PREGRANTED") == "1"
@@ -180,7 +181,17 @@ async def main():
     await validate_mp4(record, "AES HLS")
     print("AES-128 HLS -> reproducible libav -> MP4: PASS", record, flush=True)
 
-    for rec in (plain_dl, record):
+    # Stage 3: both the playlist and segment reject requests without the
+    # Authorization header captured from the fixture page. This executes the
+    # real bundled LibAV jsfetch implementation, not a VM fake.
+    auth = await run_hls(sw_url, AUTH, "e2e authenticated libav", 9004)
+    if auth.get("error"):
+        raise RuntimeError("authenticated HLS failed: " + str(auth.get("error")))
+    auth_dl = await wait_download(sw_url, "e2e authenticated libav", 100_000)
+    await validate_mp4(auth_dl, "authenticated HLS")
+    print("authenticated HLS headers -> bundled libav -> MP4: PASS", auth_dl, flush=True)
+
+    for rec in (plain_dl, record, auth_dl):
         try:
             os.remove(rec.get("filename") or "")
         except OSError:

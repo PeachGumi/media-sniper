@@ -94,7 +94,7 @@ const MediaSniperSecurity = (function () {
   function isSensitiveName(name) {
     const n = String(name || '').toLowerCase();
     return n === 'authorization' || n === 'proxy-authorization' ||
-      n === 'cookie' || n === 'set-cookie' || n.startsWith('x-');
+      n === 'cookie' || n === 'set-cookie' || n === 'referer' || n === 'origin' || n.startsWith('x-');
   }
 
   function headerEntries(headers) {
@@ -206,6 +206,7 @@ const MediaSniperSecurity = (function () {
       const senderHost = hostOf(senderUrl);
       const mediaHost = hostOf(raw.url);
       if (!isYoutubeHost(senderHost) || !isYoutubeMediaHost(mediaHost)) return null;
+      if (raw.audioUrl && !isYoutubeMediaHost(hostOf(raw.audioUrl))) return null;
     }
 
     const out = {
@@ -350,8 +351,10 @@ const MediaSniperSecurity = (function () {
       const args = Array.prototype.slice.call(arguments, 1);
       let outbound = message;
       if (message && typeof message === 'object' && /^ms-offscreen-/.test(message.type || '') && message.headers) {
+        const headerOrigin = sourceOriginFromHeaders(message.headers);
         outbound = Object.assign({}, message, {
           headers: sanitizeHeadersForTargets(message.headers, collectTargets(message)),
+          headerOrigin: headerOrigin || null,
         });
       }
       return originals.runtimeSendMessage.apply(null, [outbound].concat(args));

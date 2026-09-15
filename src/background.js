@@ -83,6 +83,8 @@ function normalizeItem(raw, tabId) {
   if (url.indexOf('blob:chrome-extension://') !== 0 &&
       typeof L.isSafeMediaUrl === 'function' && !L.isSafeMediaUrl(url)) return null;
   if (url.indexOf('data:') === 0 || url.indexOf('chrome-extension:') === 0) return null;
+  if (raw.via === 'youtube' && typeof L.isYouTubeMediaUrl === 'function' &&
+      (!L.isYouTubeMediaUrl(url) || (raw.audioUrl && !L.isYouTubeMediaUrl(raw.audioUrl)))) return null;
   if (raw.via === 'metadata' && typeof L.isConcreteMetadataUrl === 'function' &&
       !L.isConcreteMetadataUrl(url, raw.contentType || null)) return null;
   // Page-created blob URLs (MSE players, X above all) are revoked by the page
@@ -129,10 +131,32 @@ function normalizeItem(raw, tabId) {
   return item;
 }
 
+function groupedChildKeys(masters) {
+  const keys = new Set();
+  for (const master of masters || []) {
+    if (!master || master.kind !== 'hls' || !Array.isArray(master.variants)) continue;
+    for (const variant of master.variants) {
+      if (!variant || !variant.url) continue;
+      const key = L.hlsVariantKey(variant);
+      if (key) keys.add(key);
+      if (variant.audioUrl) {
+        const audioKey = L.itemKey(variant.audioUrl);
+        if (audioKey) keys.add(audioKey);
+      }
+    }
+  }
+  return keys;
+}
+
+function isGroupedPlaylistChild(item, childKeys, masterKeys) {
+  if (!item || (item.kind !== 'hls' && item.kind !== 'hls-audio')) return false;
+  return childKeys.has(item.key) && !masterKeys.has(item.key);
+}
+
 function addItems(tabId, rawItems) {
   let items = state.itemsByTab.get(tabId) || [];
   const minSize = effectiveMinSize();
-  const incoming = (rawItems || []).map(function (r) { return normalizeItem(r, tabId); }).filter(Boolean).filter(function (it) {
+  let incoming = (rawItems || []).map(function (r) { return normalizeItem(r, tabId); }).filter(Boolean).filter(function (it) {
     // VDH rule at the detection gate: direct media with a known size below
     // the threshold is noise (ads, thumbnails, tracking pixels). blob: items
     // and items with unknown size pass through.
@@ -143,15 +167,41 @@ function addItems(tabId, rawItems) {
     return true;
   });
   if (!incoming.length) return { added: 0, total: items.length };
+
   const before = items.length;
-  items = L.mergeItems(incoming, items);
+  const candidateMasters = items.filter(function (it) {
+    return it && it.kind === 'hls' && Array.isArray(it.variants) && it.variants.length;
+  }).concat(incoming.filter(function (it) {
+    return it && it.kind === 'hls' && Array.isArray(it.variants) && it.variants.length;
+  }));
+  const childKeys = groupedChildKeys(candidateMasters);
+  const masterKeys = new Set(candidateMasters.map(function (it) { return it.key; }));
+  // If a variant arrives after its master, ignore it. If it arrived first,
+  // the final cleanup below removes it when the master supplies the group.
+  incoming = incoming.filter(function (it) {
+    return !isGroupedPlaylistChild(it, childKeys, masterKeys);
+  });
+  if (incoming.length) items = L.mergeItems(incoming, items);
+
+  // Detection order is not guaranteed: a child can be stored before the
+  // master. Recompute relationships from the merged masters and remove every
+  // child playlist from the top-level card list in one pass.
+  const masters = items.filter(function (it) {
+    return it && it.kind === 'hls' && Array.isArray(it.variants) && it.variants.length;
+  });
+  const mergedChildKeys = groupedChildKeys(masters);
+  const mergedMasterKeys = new Set(masters.map(function (it) { return it.key; }));
+  items = items.filter(function (it) {
+    return !isGroupedPlaylistChild(it, mergedChildKeys, mergedMasterKeys);
+  });
+
   // cap list: keep newest-first order, drop overflow from the tail
   if (items.length > MAX_ITEMS_PER_TAB) items = items.slice(items.length - MAX_ITEMS_PER_TAB);
   state.itemsByTab.set(tabId, items);
   persistItems();
   updateBadge(tabId);
   fillTitles(tabId);
-  return { added: items.length - before, total: items.length };
+  return { added: Math.max(0, items.length - before), total: items.length };
 }
 
 // ---------------------------------------------------------------------------
@@ -175,9 +225,9 @@ function updateBadge(tabId) {
 // that the option is honored for http(s) and blob: alike, and that
 // onDeterminingFilename is both unnecessary and harmful here.
 // ---------------------------------------------------------------------------
-function enqueue(item, forcedFilename) {
+function enqueue(item, forcedFilename, hlsUrl) {
   const filename = forcedFilename || L.filenameForItem(item, settings.rootFolder);
-  const entry = { id: 'q' + Date.now() + '-' + Math.floor(Math.random() * 1e6), item: item, filename: filename, status: 'queued', error: null };
+  const entry = { id: 'q' + Date.now() + '-' + Math.floor(Math.random() * 1e6), item: item, filename: filename, status: 'queued', error: null, hlsUrl: hlsUrl || null };
   state.queue.push(entry);
   pump();
   return entry;
@@ -201,7 +251,7 @@ function startOne(entry) {
   // with 200 + a tiny error body — a "successful" download that is junk.
   // If the player itself needed Authorization for this URL, skip the direct
   // attempt and fetch through the offscreen document with the header.
-  const hdrs = headersFor(url, entry.item.headers);
+  const hdrs = headersFor(url, entry.item.headers, entry.item.pageUrl);
   if (hasAuthenticatedHeaders(hdrs)) {
     fallbackDownload(entry);
     return;
@@ -217,6 +267,58 @@ function startOne(entry) {
   startDirect(entry);
 }
 
+function failDownloadEntry(entry, error) {
+  if (!entry || entry.status === 'failed' || entry.status === 'complete') return;
+  entry.status = 'failed';
+  entry.error = String(error && error.message || error || 'download failed');
+  state.active.delete(entry.id);
+  if (entry.downloadId != null) state.downloadToItem.delete(entry.downloadId);
+  if (entry.hlsUrl) {
+    const j = state.hlsJobs.get(entry.hlsUrl);
+    if (j) { j.status = 'failed'; j.error = entry.error; }
+    advanceChainByJob(entry.hlsUrl);
+  }
+  pump();
+}
+
+function acceptDownloadId(entry, downloadId) {
+  if (entry.status === 'failed' || entry.status === 'complete' || entry.downloadId != null) return;
+  if (chrome.runtime.lastError) {
+    failDownloadEntry(entry, chrome.runtime.lastError.message || 'download failed');
+    return;
+  }
+  if (!Number.isFinite(downloadId) || downloadId < 1) {
+    failDownloadEntry(entry, 'download API returned no id');
+    return;
+  }
+  entry.downloadId = downloadId;
+  state.downloadToItem.set(downloadId, entry);
+}
+
+function requestChromeDownload(entry, opts) {
+  let settled = false;
+  const done = function (downloadId) {
+    if (settled) return;
+    settled = true;
+    acceptDownloadId(entry, downloadId);
+  };
+  try {
+    const result = chrome.downloads.download(opts, done);
+    if (result && typeof result.then === 'function') {
+      result.then(done).catch(function (err) {
+        if (settled) return;
+        settled = true;
+        failDownloadEntry(entry, err);
+      });
+    }
+  } catch (err) {
+    if (!settled) {
+      settled = true;
+      failDownloadEntry(entry, err);
+    }
+  }
+}
+
 function startDirect(entry) {
   const url = entry.item.url;
   const opts = { url: url };
@@ -225,29 +327,7 @@ function startDirect(entry) {
   opts.filename = entry.filename;
   opts.conflictAction = 'uniquify';
   opts.saveAs = false;
-  const onDone = function (downloadId) {
-    if (chrome.runtime.lastError) {
-      entry.status = 'failed';
-      entry.error = chrome.runtime.lastError.message || 'download failed';
-      state.active.delete(entry.id);
-      pump();
-      return;
-    }
-    entry.downloadId = downloadId;
-    state.downloadToItem.set(downloadId, entry);
-  };
-  const res = chrome.downloads.download(opts, onDone);
-  if (res && typeof res.then === 'function') {
-    res.then(function (downloadId) {
-      entry.downloadId = downloadId;
-      state.downloadToItem.set(downloadId, entry);
-    }).catch(function (err) {
-      entry.status = 'failed';
-      entry.error = err && err.message || 'download failed';
-      state.active.delete(entry.id);
-      pump();
-    });
-  }
+  requestChromeDownload(entry, opts);
 }
 
 chrome.downloads.onChanged.addListener(function (delta) {
@@ -274,20 +354,12 @@ chrome.downloads.onChanged.addListener(function (delta) {
     const retriable = /FORBIDDEN|UNAUTHORIZED|ACCESS_DENIED|NETWORK_FAILED|SERVER_BAD_CONTENT|SERVER_FORBIDDEN/i.test(errCode);
     if (retriable && !entry.triedFallback && entry.item && entry.item.url.indexOf('blob:') !== 0) {
       entry.triedFallback = true;
+      delete entry.downloadId;
       state.downloadToItem.delete(delta.id);
       fallbackDownload(entry);
       return; // keep the queue slot; fallback re-registers or frees it
     }
-    entry.status = 'failed';
-    entry.error = errCode;
-    state.downloadToItem.delete(delta.id);
-    state.active.delete(entry.id);
-    if (entry.hlsUrl) {
-      const j = state.hlsJobs.get(entry.hlsUrl);
-      if (j) { j.status = 'failed'; j.error = errCode; }
-      advanceChainByJob(entry.hlsUrl);
-    }
-    pump();
+    failDownloadEntry(entry, errCode);
   }
 });
 
@@ -302,28 +374,18 @@ function fallbackDownload(entry) {
   entry.status = 'fallback';
   // captured player headers first (webRequest path), item.headers second
   // (popup/adapter path)
-  const headers = headersFor(item.url, item.headers);
+  const headers = headersFor(item.url, item.headers, item.pageUrl);
   // offscreen fetches the body itself (bytes never cross SW messaging)
   const mime = item.contentType || 'video/mp4';
   makeBlobUrlFromRemote(item.url, mime, headers).then(function (made) {
-    return chrome.downloads.download({
+    requestChromeDownload(entry, {
       url: made.url,
       filename: entry.filename,
       conflictAction: 'uniquify',
       saveAs: false,
     });
-  }).then(function (downloadId) {
-    entry.downloadId = downloadId;
-    state.downloadToItem.set(downloadId, entry);
   }).catch(function (err) {
-    entry.status = 'failed';
-    entry.error = String(err && err.message || err);
-    state.active.delete(entry.id);
-    if (entry.hlsUrl) {
-      const j = state.hlsJobs.get(entry.hlsUrl);
-      if (j) { j.status = 'failed'; j.error = entry.error; }
-    }
-    pump();
+    failDownloadEntry(entry, err);
   });
 }
 
@@ -427,15 +489,65 @@ async function offscreenFfmpegRun(req) {
     ext: req.ext || 'mp4',
     live: !!req.live,
     headers: req.headers || {},
+    pageUrl: req.pageUrl || null,
   });
   if (!resp || !resp.url) throw new Error('ffmpeg job failed' + (resp && resp.error ? ': ' + resp.error : ''));
   return { url: resp.url, size: resp.size || 0, partial: !!resp.partial };
 }
 
+function responseHeader(res, name) {
+  if (!res || !res.headers) return null;
+  if (typeof res.headers.get === 'function') return res.headers.get(name);
+  const wanted = String(name).toLowerCase();
+  for (const key of Object.keys(res.headers)) {
+    if (key.toLowerCase() === wanted) return res.headers[key];
+  }
+  return null;
+}
+
+async function boundedResponseText(res, maxChars) {
+  const max = Number(maxChars) || 0;
+  const declared = parseInt(responseHeader(res, 'content-length'), 10);
+  if (declared > max) throw new Error('manifest response exceeds limit');
+  if (!res || typeof res.text !== 'function') throw new Error('manifest response has no text body');
+  if (!res.body || typeof res.body.getReader !== 'function') {
+    const text = await res.text();
+    if (typeof text !== 'string' || text.length > max) throw new Error('manifest response exceeds limit');
+    return text;
+  }
+  const reader = res.body.getReader();
+  const chunks = [];
+  let total = 0;
+  try {
+    while (true) {
+      const part = await reader.read();
+      if (part.done) break;
+      const value = part.value instanceof Uint8Array ? part.value : new Uint8Array(part.value || 0);
+      total += value.byteLength;
+      if (total > max) {
+        try { await reader.cancel(); } catch (e) { /* best effort */ }
+        throw new Error('manifest response exceeds limit');
+      }
+      chunks.push(value);
+    }
+  } catch (err) {
+    try { reader.releaseLock(); } catch (e) { /* best effort */ }
+    throw err;
+  }
+  try { reader.releaseLock(); } catch (e) { /* best effort */ }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+  if (typeof TextDecoder === 'undefined') throw new Error('manifest decoder unavailable');
+  const text = new TextDecoder().decode(bytes);
+  if (text.length > max) throw new Error('manifest response exceeds limit');
+  return text;
+}
+
 function swFetchText(url, headers) {
   return fetch(url, { credentials: 'include', headers: headers || {} }).then(function (res) {
     if (!res.ok) throw new Error('http ' + res.status);
-    return res.text();
+    return boundedResponseText(res, L.MAX_HLS_PLAYLIST_CHARS);
   });
 }
 
@@ -454,7 +566,7 @@ async function runHlsJob(jobKey, playlistUrl) {
 
   // Replay the headers the page's player used for this playlist (X's CDN
   // requires Authorization: Bearer *** playlists AND segments alike).
-  const hdrs = headersFor(playlistUrl);
+  const hdrs = headersFor(playlistUrl, null, job.pageUrl);
 
   job.status = 'fetching';
   const masterText = await swFetchText(playlistUrl, hdrs);
@@ -467,14 +579,15 @@ async function runHlsJob(jobKey, playlistUrl) {
   if (masterParsed.type === 'master') {
     variant = masterParsed.variants.find(function (candidate) {
       const candidateUrl = withToken(candidate.url, candidate.token);
+      const candidateKey = L.hlsVariantKey({ url: candidateUrl });
       return (job.variantUrl && candidateUrl === job.variantUrl) ||
-        (job.variantKey && candidateUrl === job.variantKey);
+        (job.variantKey && (candidateUrl === job.variantKey || candidateKey === job.variantKey));
     }) || L.pickBestVariant(masterParsed.variants);
     if (!variant) throw new Error('no variants in master playlist');
     mediaUrl = withToken(variant.url, variant.token);
     if (!job.audioUrl) job.audioUrl = pickAudioUrl(masterParsed, variant);
     job.status = 'fetching';
-    mediaText = await swFetchText(mediaUrl, headersFor(mediaUrl, hdrs));
+    mediaText = await swFetchText(mediaUrl, headersFor(mediaUrl, hdrs, playlistUrl));
   }
 
   const media = L.parseM3u8(mediaText, mediaUrl);
@@ -490,7 +603,7 @@ async function runHlsJob(jobKey, playlistUrl) {
     job.status = 'combining';
     job.mode = 'concat';
     job.total = media.segments.length + (media.initUrl ? 1 : 0);
-    const segHeaders = headersFor(media.segments[0].url, hdrs);
+    const segHeaders = headersFor(media.segments[0].url, hdrs, mediaUrl);
     const made = await offscreenHlsBuild({
       playlistUrl: playlistUrl,
       segments: media.segments.map(function (s) { return s.url; }),
@@ -510,7 +623,7 @@ async function runHlsJob(jobKey, playlistUrl) {
   // audio playlist and maps one stream from each. VOD only — live two-source
   // muxing is not worth the complexity here.
   const twoSource = !audioOnly && !media.live && job.audioUrl;
-  const audioHeaders = twoSource ? Object.assign({}, headersFor(mediaUrl, hdrs), headersFor(job.audioUrl, hdrs)) : null;
+  const audioHeaders = twoSource ? Object.assign({}, headersFor(mediaUrl, hdrs, playlistUrl), headersFor(job.audioUrl, hdrs, playlistUrl)) : null;
   const req = {
     jobId: jobKey,
     kind: 'hls',
@@ -518,7 +631,8 @@ async function runHlsJob(jobKey, playlistUrl) {
     audioUrl: twoSource ? job.audioUrl : null,
     ext: job.ext,
     live: !!media.live,
-    headers: twoSource ? audioHeaders : headersFor(mediaUrl, hdrs),
+    pageUrl: job.pageUrl || null,
+    headers: twoSource ? audioHeaders : headersFor(mediaUrl, hdrs, playlistUrl),
   };
 
   if (media.live) {
@@ -568,10 +682,9 @@ function finishMediaJob(playlistUrl, made, ext, kind) {
     pageUrl: job.pageUrl || null,
     size: made.size,
   }, job.tabId);
-  const entry = enqueue(item);
+  const entry = enqueue(item, null, playlistUrl);
   // link the queue entry back to the job so completion/failure of the blob
   // download updates the job state the popup is polling
-  entry.hlsUrl = playlistUrl;
   job.filename = entry.filename;
   return { queued: true };
 }
@@ -588,7 +701,7 @@ function finishMediaJob(playlistUrl, made, ext, kind) {
 async function runDashJob(jobKey, url) {
   const job = state.hlsJobs.get(jobKey);
   if (!job) throw new Error('no job');
-  const hdrs = headersFor(url);
+  const hdrs = headersFor(url, null, job.pageUrl);
   job.status = 'fetching';
   const mpdText = await swFetchText(url, hdrs);
   const parsed = L.parseMpdSegments(mpdText, url);
@@ -647,7 +760,7 @@ async function offscreenDashBuild(req, job) {
 async function runYtMuxJob(jobKey, item) {
   const job = state.hlsJobs.get(jobKey);
   if (!job) throw new Error('no job');
-  const hdrs = headersFor(item.url, item.headers);
+  const hdrs = headersFor(item.url, item.headers, item.pageUrl);
 
   // resolve real track URLs: youtube.com/oembed gives title metadata but not
   // streams; the adapter already extracted signed googlevideo urls.
@@ -661,7 +774,7 @@ async function runYtMuxJob(jobKey, item) {
 
   const vResp = await makeBlobUrlFromRemote(videoUrl, 'video/mp4', hdrs);
   job.total = 2; job.done = 1;
-  const aResp = await makeBlobUrlFromRemote(audioUrl, 'audio/mp4', headersFor(audioUrl, hdrs));
+  const aResp = await makeBlobUrlFromRemote(audioUrl, 'audio/mp4', headersFor(audioUrl, hdrs, item.url));
   job.done = 2;
 
   job.status = 'combining';
@@ -846,16 +959,55 @@ function onSendHeaders(details) {
   } catch (e) { /* never break browsing */ }
 }
 
-function headersFor(url, fallback) {
+function originOfUrl(url) {
+  try {
+    const u = new URL(String(url || ''));
+    return (u.protocol === 'http:' || u.protocol === 'https:') ? u.origin : null;
+  } catch (e) { return null; }
+}
+
+function capturedSourceOrigin(src) {
+  const entries = Array.isArray(src)
+    ? src.map(function (h) { return [h.name, h.value]; })
+    : Object.keys(src || {}).map(function (k) { return [k, src[k]]; });
+  for (const [name, value] of entries) {
+    if (String(name).toLowerCase() === 'x-media-sniper-source-origin') {
+      const origin = originOfUrl(value);
+      if (origin) return origin;
+    }
+  }
+  for (const [name, value] of entries) {
+    if (String(name).toLowerCase() === 'origin') {
+      const origin = originOfUrl(value);
+      if (origin) return origin;
+    }
+  }
+  for (const [name, value] of entries) {
+    if (String(name).toLowerCase() === 'referer') {
+      const origin = originOfUrl(value);
+      if (origin) return origin;
+    }
+  }
+  return null;
+}
+
+function headersFor(url, fallback, fallbackUrl) {
   // captured array first; fallback may be a captured array OR a plain object
   const cap = capturedReqHeaders.get(L.itemKey(url));
   const src = (cap && cap.length) ? cap : fallback;
   if (!src) return {};
+  const targetOrigin = originOfUrl(url);
+  const sourceOrigin = (cap && capturedSourceOrigin(cap)) || originOfUrl(fallbackUrl);
+  const crossOrigin = !targetOrigin || !sourceOrigin || targetOrigin !== sourceOrigin;
   const out = {};
-  if (Array.isArray(src)) {
-    for (const h of src) { if (keepableHeader(h.name)) out[h.name] = h.value; }
-  } else {
-    for (const k of Object.keys(src)) { if (keepableHeader(k)) out[k] = src[k]; }
+  const entries = Array.isArray(src)
+    ? src.map(function (h) { return [h.name, h.value]; })
+    : Object.keys(src).map(function (k) { return [k, src[k]]; });
+  for (const [name, value] of entries) {
+    if (!keepableHeader(name)) continue;
+    const lower = String(name).toLowerCase();
+    if (crossOrigin && (lower === 'referer' || lower === 'origin')) continue;
+    out[name] = value;
   }
   return out;
 }
@@ -943,11 +1095,12 @@ function onResponseStarted(details) {
       // plus any headers the player itself sent for this URL)
       fetch(url, { credentials: 'include', headers: headersFor(url) }).then(function (res) {
         if (!res.ok) return null;
-        return res.text();
+        return boundedResponseText(res, L.MAX_HLS_PLAYLIST_CHARS);
       }).then(function (text) {
         if (!text || text.indexOf('#EXTM3U') !== 0) return;
         if (L.isSubtitlePlaylist(text)) return;
         const parsed = L.parseM3u8(text, url);
+        if (parsed.truncated) return;
         const pageUrl = details.initiator || details.url;
         const baseTitle = pageTitle(details.tabId);
         if (parsed.type === 'master' && parsed.variants.length) {
@@ -984,9 +1137,10 @@ function onResponseStarted(details) {
       // adaptation-set fetches deadlock jsfetch, so no combined v+a here.
       fetch(url, { credentials: 'include', headers: headersFor(url) }).then(function (res) {
         if (!res.ok) return null;
-        return res.text();
+        return boundedResponseText(res, L.MAX_HLS_PLAYLIST_CHARS);
       }).then(function (mpd) {
-        const tracks = L.parseMpdTracks(mpd);
+        if (typeof mpd === 'string' && mpd.length > L.MAX_HLS_PLAYLIST_CHARS) return;
+        const tracks = L.parseMpdTracks(mpd || '');
         const pageUrl = details.initiator || details.url;
         const baseTitle = pageTitle(details.tabId);
         if (!tracks.length) {

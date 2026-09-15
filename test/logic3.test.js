@@ -74,4 +74,19 @@ eq(refreshed[0].size, 9000000, 'richer size retained across URL refresh');
 eq(refreshed[0].title, 'Richer title', 'richer title retained across URL refresh');
 eq(refreshed[0].contentType, 'video/mp4', 'richer content type retained across URL refresh');
 
+// HLS master and rendition signatures rotate without changing the logical
+// playlist/quality identity. The stable key must retain quality selectors while
+// dropping only transient authorization parameters.
+const hlsMasterOld = 'https://cdn.example/master.m3u8?quality=720&token=old&variant=video';
+const hlsMasterNew = 'https://cdn.example/master.m3u8?quality=720&token=new&variant=video';
+const hlsMasterOtherQuality = 'https://cdn.example/master.m3u8?quality=1080&token=new&variant=video';
+eq(L.itemKey(hlsMasterOld), L.itemKey(hlsMasterNew), 'signed HLS master refresh keeps one stable key');
+eq(L.itemKey(hlsMasterOld) === L.itemKey(hlsMasterOtherQuality), false, 'HLS quality identity remains in stable key');
+const hlsVariantOld = { url: 'https://cdn.example/v720.m3u8?quality=720&sig=old', bandwidth: 800000, resolution: '1280x720' };
+const hlsVariantNew = { url: 'https://cdn.example/v720.m3u8?quality=720&sig=new', bandwidth: 800000, resolution: '1280x720' };
+const variantsAfterRefresh = L.normalizeHlsVariants([hlsVariantOld, hlsVariantNew]);
+eq(variantsAfterRefresh.length, 1, 'signed HLS rendition refresh does not duplicate quality');
+eq(variantsAfterRefresh[0].url, hlsVariantNew.url, 'signed HLS rendition uses newest URL');
+eq(L.hlsVariantKey(hlsVariantOld), L.hlsVariantKey(hlsVariantNew), 'HLS selection key survives signature rotation');
+
 report('logic3');

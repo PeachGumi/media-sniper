@@ -54,12 +54,15 @@ function selectedQuality(item) {
 }
 
 function qualitySelector(item) {
-  const variants = item && item.kind === 'hls' && Array.isArray(item.variants) ? item.variants : [];
-  if (!variants.length) return null;
+  const source = item && item.kind === 'hls' && Array.isArray(item.variants) ? item.variants : [];
+  if (!source.length) return null;
+  const limit = Number(L().MAX_HLS_VARIANTS) || 128;
+  const variants = source.slice(0, limit);
+  const boundedItem = Object.assign({}, item, { variants: variants });
   const select = document.createElement('select');
   select.className = 'quality';
   select.setAttribute('aria-label', 'Quality');
-  const current = selectedQuality(item);
+  const current = selectedQuality(boundedItem);
   if (current) item.selectedVariantKey = L().hlsVariantKey(current);
   for (const variant of variants) {
     const option = document.createElement('option');

@@ -128,6 +128,20 @@ async function runBackgroundContract() {
   vm.runInContext(bgSrc, ctx);
 
   const response = chrome.__listeners.onWebResponseStarted[0];
+  // The browser can see a variant before the master response. It is a real
+  // candidate until the later master identifies it as a grouped child.
+  response({
+    statusCode: 200,
+    url: 'https://cdn.example.test/hls/video/720.m3u8?auth=child',
+    tabId: 1,
+    initiator: 'https://site.example/watch',
+    type: 'media',
+    responseHeaders: [{ name: 'content-type', value: 'application/vnd.apple.mpegurl' }],
+  });
+  await settle();
+  let beforeMaster = await send(chrome, { type: 'ms-get-items', tabId: 1 });
+  ok(beforeMaster.items.some(function (entry) { return entry.url.indexOf('/video/720.m3u8') >= 0; }), 'variant can be observed before its master');
+
   response({
     statusCode: 200,
     url: 'https://cdn.example.test/hls/master.m3u8?auth=parent',
@@ -142,6 +156,7 @@ async function runBackgroundContract() {
   const item = result.items.find(function (entry) { return entry.url.indexOf('/master.m3u8') >= 0; });
   ok(!!item, 'background exposes one logical master item');
   eq(result.items.filter(function (entry) { return entry.url.indexOf('/master.m3u8') >= 0; }).length, 1, 'master does not create duplicate quality cards');
+  eq(result.items.filter(function (entry) { return entry.url.indexOf('/video/720.m3u8') >= 0; }).length, 0, 'grouped child is removed regardless of detection order');
   eq(item && item.variants.length, 2, 'background item retains all HLS variants');
   const highest = item && item.variants.find(function (variant) { return variant.resolution === '1920x1080'; });
   eq(item && item.selectedVariantKey, L.hlsVariantKey(highest), 'background defaults to highest quality');
@@ -253,11 +268,19 @@ async function runPopupContract() {
   quality.dispatch('change');
   const selectionMessage = messages.find(function (message) { return message.type === 'ms-select-quality'; });
   ok(!!selectionMessage, 'popup sends quality selection to the background');
-  eq(selectionMessage && selectionMessage.variantKey, item.variants[0].url, 'popup sends the selected variant key');
+  eq(selectionMessage && selectionMessage.variantKey, L.hlsVariantKey(item.variants[0]), 'popup sends the stable selected variant key');
 
   elements.saveall.dispatch('click');
   const allMessage = messages.filter(function (message) { return message.type === 'ms-download-all'; }).pop();
-  eq(allMessage && allMessage.selections[item.key], item.variants[0].url, 'Save All sends the selected quality, not every variant');
+  eq(allMessage && allMessage.selections[item.key], L.hlsVariantKey(item.variants[0]), 'Save All sends the selected quality, not every variant');
+
+  // Popup rendering is also a trust boundary for restored/session data: a
+  // poisoned item must not create an unbounded number of option nodes.
+  vm.runInContext("items[0].variants = Array.from({length: MediaSniperLogic.MAX_HLS_VARIANTS + 10}, (_, i) => ({url: 'https://cdn.example.test/v' + i + '.m3u8', bandwidth: i + 1})); render();", ctx);
+  const boundedRow = elements.list.children[0];
+  const boundedQuality = boundedRow.children[1].children.find(function (child) { return child.tagName === 'SELECT'; });
+  ok(!!boundedQuality, 'popup keeps a quality selector for bounded variants');
+  ok(boundedQuality && boundedQuality.children.length <= L.MAX_HLS_VARIANTS, 'popup caps quality options');
 }
 
 (async function () {

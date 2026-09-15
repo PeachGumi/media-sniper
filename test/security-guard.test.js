@@ -16,6 +16,7 @@ eq(S.captureAllowedName('X-API-Key'), false, 'do not capture API keys');
   const headers = {
     Authorization: 'Bearer secret',
     Referer: 'https://page.example/watch',
+    Origin: 'https://page.example',
     'X-CSRF-Token': 'csrf-secret',
     'X-Media-Sniper-Source-Origin': 'https://media.example',
   };
@@ -27,7 +28,8 @@ eq(S.captureAllowedName('X-API-Key'), false, 'do not capture API keys');
   const cross = S.sanitizeHeadersForTargets(headers, ['https://cdn.other.example/video.mp4']);
   eq(cross.Authorization, undefined, 'cross-origin Authorization stripped');
   eq(cross['X-CSRF-Token'], undefined, 'cross-origin X-* stripped');
-  eq(cross.Referer, 'https://page.example/watch', 'non-credential Referer can remain for hotlink protection');
+  eq(cross.Referer, undefined, 'cross-origin Referer stripped');
+  eq(cross.Origin, undefined, 'cross-origin Origin stripped');
 
   const mixed = S.sanitizeHeadersForTargets(headers, [
     'https://media.example/a.ts',
@@ -116,6 +118,14 @@ eq(S.responseLooksMedia({ statusCode: 403, url: 'https://a.example/video.mp4', r
     items: [{ url: 'https://evil.example/payload', kind: 'video', via: 'youtube' }],
   }, ytSender, 'extid');
   eq(bad.msg.items.length, 0, 'YouTube arbitrary host rejected');
+  const badAudio = S.normalizeInboundMessage({
+    type: 'ms-report',
+    items: [{
+      url: 'https://rr1---sn.example.googlevideo.com/videoplayback?itag=137',
+      audioUrl: 'https://evil.example/audio.mp4', kind: 'video', via: 'youtube',
+    }],
+  }, ytSender, 'extid');
+  eq(badAudio.msg.items.length, 0, 'YouTube audio URL outside YouTube/googlevideo rejected');
 }
 
 // Integration: prepare()/activate() must install the promotion listener before

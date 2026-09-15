@@ -107,6 +107,18 @@ def make_fixture_harness():
         os.path.join(hls,"media.m3u8"),
     ],check=True,timeout=60)
 
+    # A second copy of the same valid stream is served behind a synthetic
+    # Authorization requirement. The fixture page requests its playlist with
+    # that header so webRequest captures the context; the bundled LibAV then
+    # has to replay it for the protected segment during the save job.
+    shutil.copy2(os.path.join(hls,"seg0.ts"),os.path.join(hls,"authseg0.ts"))
+    with open(os.path.join(hls,"auth.m3u8"),"w",encoding="utf-8") as f:
+        f.write("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.0,\nauthseg0.ts\n#EXT-X-ENDLIST\n")
+    index_path=os.path.join(hls,"index.html")
+    with open(index_path,encoding="utf-8") as f: index=f.read()
+    probe="<script>fetch('/hls/auth.m3u8',{headers:{Authorization:'Bearer media-sniper-e2e'}}).catch(()=>{});</script>"
+    with open(index_path,"w",encoding="utf-8") as f: f.write(index.replace("</body>",probe+"</body>"))
+
     key_path=os.path.join(hls,"aes.key")
     with open(key_path,"wb") as f: f.write(bytes(range(16)))
     key_info=os.path.join(hls,"aes-key-info.txt")
@@ -185,7 +197,10 @@ def browser_run(browser, root, functional=False, fixture_root=None):
     fp=None
     if functional:
         if not fixture_root: raise RuntimeError("functional browser run requires fixture_root")
-        fp=subprocess.Popen([sys.executable,"-m","http.server",str(fixture_port)],cwd=fixture_root,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+        fp=subprocess.Popen([
+            sys.executable,os.path.join(REPO_ROOT,"scripts","e2e_fixture_server.py"),
+            str(fixture_port),fixture_root,
+        ],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
     procs=[p for p in (bp,fp) if p is not None]
 
     def teardown():

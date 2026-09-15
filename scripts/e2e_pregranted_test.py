@@ -98,15 +98,25 @@ async def main():
     step("fixture page opened", page is not None, page and page.get("url"))
     page_ws = page["webSocketDebuggerUrl"]
 
-    need = {"clip.mp4": False, "audio.mp3": False, "media.m3u8": False}
+    need = {"clip.mp4": False, "audio.mp3": False, "grouped HLS": False}
     deadline = time.time() + 15
     while time.time() < deadline:
         raw = await evaluate(sw_ws, "chrome.storage.session.get('msItems').then(r=>JSON.stringify(r.msItems||{}))")
         items = decode(raw) or {}
-        urls = [i.get("url", "") for arr in items.values() for i in arr if f":{FIXTURE_PORT}/" in i.get("url", "")]
+        if not isinstance(items, dict):
+            items = {}
+        media_items = [i for arr in items.values() for i in arr]
+        urls = [i.get("url", "") for i in media_items if f":{FIXTURE_PORT}/" in i.get("url", "")]
         for u in urls:
-            for suffix in need:
+            for suffix in ("clip.mp4", "audio.mp3"):
                 if u.endswith(suffix): need[suffix] = True
+        for item in media_items:
+            variants = item.get("variants") or []
+            if item.get("url", "").endswith("master.m3u8") and any(
+                (variant.get("url") or "").endswith("media.m3u8")
+                for variant in variants
+            ):
+                need["grouped HLS"] = True
         if all(need.values()): break
         await asyncio.sleep(1)
     step("detect direct video/audio/HLS", all(need.values()), need)

@@ -24,6 +24,101 @@ import LibAVFactory from './libav/libav-6.5.7.1-h264-aac-mp3.wasm.mjs';
 // that is our injection point for captured Authorization/Referer headers.
 // ---------------------------------------------------------------------------
 let activeHeaders = {}; // {name: value} for the currently running ffmpeg job
+const nativeFetch = typeof globalThis.fetch === 'function' ? globalThis.fetch.bind(globalThis) : null;
+let activeFetchContext = null;
+
+function requestOrigin(input) {
+  try {
+    const raw = typeof input === 'string' ? input : (input && input.url);
+    const u = new URL(String(raw || ''));
+    return (u.protocol === 'http:' || u.protocol === 'https:') ? u.origin : null;
+  } catch (e) { return null; }
+}
+
+function headerEntries(headers) {
+  if (!headers) return [];
+  if (Array.isArray(headers)) return headers.map(function (h) { return [String(h.name || ''), String(h.value || '')]; });
+  if (typeof Headers !== 'undefined' && headers instanceof Headers) return Array.from(headers.entries());
+  return Object.keys(headers).map(function (name) { return [name, String(headers[name])]; });
+}
+
+function isSensitiveReplayHeader(name) {
+  const lower = String(name || '').toLowerCase();
+  return lower === 'referer' || lower === 'origin';
+}
+
+function contextHeaderEntries(headers, url, context) {
+  const targetOrigin = requestOrigin(url);
+  const allowedResource = !!targetOrigin && context.resourceOrigins.has(targetOrigin);
+  const crossOrigin = !targetOrigin || targetOrigin !== context.headerOrigin;
+  const out = [];
+  for (const [name, value] of headerEntries(headers)) {
+    const lower = String(name).toLowerCase();
+    if (context.headerNames.has(lower) && (!allowedResource || (crossOrigin && isSensitiveReplayHeader(lower)))) continue;
+    out.push([name, value]);
+  }
+  return out;
+}
+
+function contextHeadersFor(url, context) {
+  if (!context) return [];
+  return contextHeaderEntries(context.headers, url, context);
+}
+
+function installFetchContext(msg) {
+  const roots = [msg && msg.url, msg && msg.audioUrl];
+  const origins = Array.isArray(msg && msg.allowedOrigins) ? msg.allowedOrigins.slice() : [];
+  const resourceOrigins = new Set();
+  roots.concat(origins).forEach(function (value) {
+    const origin = requestOrigin(value);
+    if (origin) resourceOrigins.add(origin);
+  });
+  const headerOrigin = requestOrigin(msg && msg.headerOrigin) || requestOrigin(msg && msg.url) || requestOrigin(msg && msg.audioUrl);
+  const headerNames = new Set(headerEntries(msg && msg.headers).map(function (entry) { return entry[0].toLowerCase(); }));
+  return {
+    headers: msg && msg.headers || {},
+    headerNames: headerNames,
+    headerOrigin: headerOrigin,
+    resourceOrigins: resourceOrigins,
+  };
+}
+
+if (nativeFetch) {
+  globalThis.fetch = function (input, init) {
+    const context = activeFetchContext;
+    if (!context) return nativeFetch(input, init);
+    const options = Object.assign({}, init || {});
+    const entries = [];
+    if (input && input.headers) entries.push.apply(entries, headerEntries(input.headers));
+    if (options.headers) entries.push.apply(entries, headerEntries(options.headers));
+    const extra = contextHeadersFor(input, context);
+    const merged = {};
+    for (const [name, value] of entries.concat(extra)) merged[name] = value;
+    const filtered = contextHeaderEntries(merged, input, context);
+    const headers = {};
+    for (const [name, value] of filtered) headers[name] = value;
+    options.headers = headers;
+    if (!options.credentials) options.credentials = 'include';
+    return nativeFetch(input, options);
+  };
+}
+
+function combinedAbortSignal(first, second) {
+  if (!second) return { signal: first, cleanup: function () {} };
+  const ctrl = new AbortController();
+  const abort = function () { if (!ctrl.signal.aborted) ctrl.abort(); };
+  if (first && first.aborted) abort();
+  if (second.aborted) abort();
+  if (first && !first.aborted) first.addEventListener('abort', abort);
+  if (!second.aborted) second.addEventListener('abort', abort);
+  return {
+    signal: ctrl.signal,
+    cleanup: function () {
+      if (first) first.removeEventListener('abort', abort);
+      second.removeEventListener('abort', abort);
+    },
+  };
+}
 
 globalThis.FindPngSliceIndex = function (d) {
   // some CDNs prepend junk PNG bytes; VDH skips them (their mt() function)
@@ -55,12 +150,12 @@ globalThis.FetchWithRetry = async function (url, headers, attempts, fetchTimeout
   let lastErr = null;
   for (let a = 0; a < Math.max(1, attempts || 1); a++) {
     const ctrl = new AbortController();
-    const anySig = signal ? AbortSignal.any([ctrl.signal, signal]) : ctrl.signal;
-    const timer = setTimeout(function () { ctrl.abort('timeout'); }, fetchTimeout || 30000);
+    const combined = combinedAbortSignal(ctrl.signal, signal);
+    const timer = setTimeout(function () { ctrl.abort(); }, fetchTimeout || 30000);
     try {
       // credentials:'include': the extension has host permissions, so this
       // also carries site cookies — one step beyond what VDH's jsfetch sends
-      const r = await fetch(url, { headers: merged, cache: bypassCache ? 'reload' : 'default', credentials: 'include', signal: anySig });
+      const r = await fetch(url, { headers: merged, cache: bypassCache ? 'reload' : 'default', credentials: 'include', signal: combined.signal });
       clearTimeout(timer);
       if (r.ok) {
         // Return the LIVE response to jsfetch (exactly what VDH does). The
@@ -79,6 +174,9 @@ globalThis.FetchWithRetry = async function (url, headers, attempts, fetchTimeout
       clearTimeout(timer);
       if (e && e.name === 'AbortError') return (signal && signal.aborted) ? { aborted: true } : { timeout: true };
       lastErr = e;
+    } finally {
+      clearTimeout(timer);
+      combined.cleanup();
     }
     if (a + 1 < Math.max(1, attempts || 1)) {
       await new Promise(function (res) { setTimeout(res, Math.pow(2, a) * (retryDelay || 250)); });
@@ -172,6 +270,7 @@ async function runFfmpegJob(msg, sendResponse) {
     }, 1000);
 
     let rc = 0;
+    activeFetchContext = installFetchContext(msg);
     try {
       rc = await libav.ffmpeg(args);
     } catch (e) {
@@ -206,6 +305,7 @@ async function runFfmpegJob(msg, sendResponse) {
     if (current && current.timer) clearInterval(current.timer);
     current = null;
     activeHeaders = {};
+    activeFetchContext = null;
     try { if (libav && libav.exit) libav.exit(); } catch (e) { /* ignore */ }
   }
 }

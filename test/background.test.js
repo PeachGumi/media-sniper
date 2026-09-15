@@ -195,6 +195,11 @@ function makeContext(chrome) {
           return Promise.resolve('#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000\nmedia.m3u8\n');
         } });
       }
+      if (url.indexOf('huge.m3u8') >= 0) {
+        return Promise.resolve({ ok: true, text: function () {
+          return Promise.resolve('#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\nv.m3u8\n' + '#'.repeat(2 * 1024 * 1024));
+        } });
+      }
       if (url.indexOf('media.m3u8') >= 0) {
         return Promise.resolve({ ok: true, text: function () {
           return Promise.resolve('#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.0,\nseg0.ts\n#EXTINF:2.0,\nseg1.ts\n#EXT-X-ENDLIST\n');
@@ -266,6 +271,20 @@ async function run() {
   const ctx = makeContext(chrome);
   vm.runInContext(logicSrc, ctx);
   vm.runInContext(bgSrc, ctx);
+
+  // A valid-looking HLS response that exceeds the parser input budget must
+  // not become a top-level card after the asynchronous validation fetch.
+  const responseListener = chrome.__listeners.onWebResponseStarted[0];
+  responseListener({
+    url: 'https://cdn.example.com/huge.m3u8', statusCode: 200, tabId: 99,
+    responseHeaders: [{ name: 'content-type', value: 'application/vnd.apple.mpegurl' }],
+  });
+  await flush();
+  await flush();
+  await flush();
+  const boundedItems = (await send(chrome, { type: 'ms-get-items', tabId: 99 })).items;
+  eq(boundedItems.some(function (item) { return item.url.indexOf('huge.m3u8') >= 0; }), false, 'oversized HLS response is rejected by background');
+  await send(chrome, { type: 'ms-clear', tabId: 99 });
 
   // --- 1. report + dedupe + get ---------------------------------------------
   let r = await send(chrome, { type: 'ms-report', items: [
@@ -437,7 +456,7 @@ async function run() {
 
   // but the youtube adapter's own report (via=youtube) passes through
   r = await send(chrome, { type: 'ms-report', items: [
-    { url: 'https://rr2---sn-youtube.com/videoplayback?itag=22', kind: 'video', contentType: 'video/mp4', size: 9000000, via: 'youtube', pageUrl: 'https://www.youtube.com/watch?v=abc', title: 'YT Video [720p]', duration: 300 },
+    { url: 'https://rr2---sn-youtube.googlevideo.com/videoplayback?itag=22', kind: 'video', contentType: 'video/mp4', size: 9000000, via: 'youtube', pageUrl: 'https://www.youtube.com/watch?v=abc', title: 'YT Video [720p]', duration: 300 },
   ], tabId: 7 });
   r = await send(chrome, { type: 'ms-get-items', tabId: 7 });
   const ytItem = r.items.find(function (i) { return i.via === 'youtube'; });
@@ -977,7 +996,10 @@ async function run() {
       };
       authChrome.__listeners.onSendHeaders[0]({
         url: authUrl, initiator: 'https://site.example.com/',
-        requestHeaders: [{ name: headerName, value: 'captured-' + headerName }],
+        requestHeaders: [
+          { name: headerName, value: 'captured-' + headerName },
+          { name: 'x-media-sniper-source-origin', value: 'https://video.example.com' },
+        ],
       });
       await send(authChrome, { type: 'ms-download', item: {
         url: authUrl, kind: 'video', contentType: 'video/mp4', size: 5000000,

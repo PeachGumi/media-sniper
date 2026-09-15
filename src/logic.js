@@ -66,6 +66,16 @@ var MediaSniperLogic = globalThis.MediaSniperLogic || (function () {
     } catch (e) { return false; }
   }
 
+  function isYouTubeMediaUrl(url) {
+    try {
+      const u = new URL(String(url || ''));
+      if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+      const h = String(u.hostname || '').toLowerCase();
+      return h === 'youtube.com' || h.endsWith('.youtube.com') ||
+        h === 'googlevideo.com' || h.endsWith('.googlevideo.com');
+    } catch (e) { return false; }
+  }
+
   function isVimeoPlayerUrl(url) {
     try {
       const u = new URL(String(url || ''));
@@ -160,19 +170,48 @@ var MediaSniperLogic = globalThis.MediaSniperLogic || (function () {
     return root ? root + '/' + name : name;
   }
 
+  // Query parameters used to authorize a request are not part of a media
+  // item's identity. Keep this list deliberately narrow: unknown parameters
+  // may carry a rendition, language, or other quality selector and therefore
+  // must remain in the stable key.
+  const TRANSIENT_AUTH_PARAMS = new Set([
+    'auth', 'authorization', 'expires', 'expire', 'expiry', 'e', 'et',
+    'hdnea', 'hmac', 'hash', 'jwt', 'key', 'policy', 'session', 'sig',
+    'signature', 'sp', 'st', 'se', 'token', 'tok', 'x-token', 'access_token',
+    'x-amz-algorithm', 'x-amz-credential', 'x-amz-date', 'x-amz-expires',
+    'x-amz-security-token', 'x-amz-signature',
+  ]);
+
+  function queryParamName(raw) {
+    try { return decodeURIComponent(String(raw || '').replace(/\\+/g, ' ')).toLowerCase(); }
+    catch (e) { return String(raw || '').toLowerCase(); }
+  }
+
+  function isTransientAuthParam(name) {
+    const n = queryParamName(name);
+    return TRANSIENT_AUTH_PARAMS.has(n) || /^x-amz-(?:algorithm|credential|date|expires|security-token|signature)$/i.test(n);
+  }
+
+  function stableUrl(url) {
+    const u = new URL(url);
+    const rawQuery = u.search ? u.search.slice(1) : '';
+    const kept = rawQuery ? rawQuery.split('&').filter(function (part) {
+      return !isTransientAuthParam(part.split('=', 1)[0]);
+    }) : [];
+    u.search = kept.length ? '?' + kept.join('&') : '';
+    u.hash = '';
+    return u.href;
+  }
+
   function itemKey(url) {
     if (!url) return '';
     if (url.indexOf('blob:') === 0) return url;
     try {
       const u = new URL(url);
-      // Playlists: the query string often carries the auth token and
-      // distinguishes variants, so keep the full URL as the key.
-      if (/\.(m3u8|mpd)$/i.test(u.pathname)) return url;
       // Chunked media CDNs (googlevideo et al.): range requests for ONE track
-      // differ only in transient params (range/ratebypass/ei...), while
-      // DIFFERENT tracks or videos share the same pathname. Key on
-      // path + itag (format) + id (video) so chunks of one track dedupe
-      // without ever colliding across videos or formats.
+      // differ in transient params, while DIFFERENT tracks or videos share the
+      // same pathname. Key on path + itag (format) + id (video) so chunks of
+      // one track dedupe without colliding across videos or formats.
       const itag = u.searchParams.get('itag');
       const gid = u.searchParams.get('id');
       if (itag != null || gid != null) {
@@ -183,9 +222,7 @@ var MediaSniperLogic = globalThis.MediaSniperLogic || (function () {
         if (gid != null) k += '#gid=' + gid;
         return k;
       }
-      u.search = '';
-      u.hash = '';
-      return u.href;
+      return stableUrl(url);
     } catch (e) {
       return url;
     }
@@ -280,9 +317,23 @@ var MediaSniperLogic = globalThis.MediaSniperLogic || (function () {
     return attrs;
   }
 
+  const MAX_HLS_PLAYLIST_CHARS = 2 * 1024 * 1024;
+  const MAX_HLS_VARIANTS = 128;
+  const MAX_HLS_MEDIA = 128;
+  const MAX_HLS_SEGMENTS = 20000;
+  const MAX_HLS_KEYS = 128;
+
   function parseM3u8(text, baseUrl) {
-    const out = { type: null, variants: [], segments: [], encrypted: false, live: false, initUrl: null, media: [] };
-    const lines = String(text).split(/\r?\n/);
+    const out = {
+      type: null, variants: [], segments: [], encrypted: false, live: false,
+      initUrl: null, media: [], keyUrls: [], truncated: false,
+    };
+    if (typeof text !== 'string') return out;
+    if (text.length > MAX_HLS_PLAYLIST_CHARS) {
+      out.truncated = true;
+      return out;
+    }
+    const lines = text.split(/\r?\n/);
     const parentToken = (function () {
       try { const s = new URL(baseUrl).search; return s ? s.slice(1) : ''; } catch (e) { return ''; }
     })();
@@ -297,9 +348,18 @@ var MediaSniperLogic = globalThis.MediaSniperLogic || (function () {
       } else if (line.indexOf('#EXT-X-KEY:') === 0) {
         const attrs = parseAttrs(line.slice('#EXT-X-KEY:'.length));
         if (attrs.METHOD && attrs.METHOD !== 'NONE') out.encrypted = true;
+        if (attrs.URI && out.keyUrls.length < MAX_HLS_KEYS) {
+          out.keyUrls.push(resolveUrl(baseUrl, attrs.URI));
+        } else if (attrs.URI) {
+          out.truncated = true;
+        }
       } else if (line.indexOf('#EXT-X-MEDIA:') === 0) {
         // alternate renditions (separate audio playlists, VDH "two sources")
         const attrs = parseAttrs(line.slice('#EXT-X-MEDIA:'.length));
+        if (out.media.length >= MAX_HLS_MEDIA) {
+          out.truncated = true;
+          continue;
+        }
         out.media.push({
           type: String(attrs.TYPE || '').toUpperCase(),
           groupId: attrs['GROUP-ID'] || null,
@@ -319,20 +379,32 @@ var MediaSniperLogic = globalThis.MediaSniperLogic || (function () {
       } else if (line[0] !== '#') {
         const url = resolveUrl(baseUrl, line);
         if (pending && pending.duration != null && out.type === 'media') {
-          out.segments.push({ url: url, duration: pending.duration });
+          if (out.segments.length >= MAX_HLS_SEGMENTS) {
+            out.truncated = true;
+          } else {
+            out.segments.push({ url: url, duration: pending.duration });
+          }
           pending = null;
         } else if (pending && out.type === 'master') {
-          out.variants.push({
-            url: url,
-            bandwidth: parseInt(pending.BANDWIDTH, 10) || 0,
-            resolution: pending.RESOLUTION || null,
-            codecs: pending.CODECS || null,
-            audioGroup: pending.AUDIO || null,
-            token: parentToken,
-          });
+          if (out.variants.length >= MAX_HLS_VARIANTS) {
+            out.truncated = true;
+          } else {
+            out.variants.push({
+              url: url,
+              bandwidth: parseInt(pending.BANDWIDTH, 10) || 0,
+              resolution: pending.RESOLUTION || null,
+              codecs: pending.CODECS || null,
+              audioGroup: pending.AUDIO || null,
+              token: parentToken,
+            });
+          }
           pending = null;
         } else if (out.type === 'media') {
-          out.segments.push({ url: url, duration: 0 });
+          if (out.segments.length >= MAX_HLS_SEGMENTS) {
+            out.truncated = true;
+          } else {
+            out.segments.push({ url: url, duration: 0 });
+          }
         }
       }
     }
@@ -351,7 +423,7 @@ var MediaSniperLogic = globalThis.MediaSniperLogic || (function () {
   }
 
   function hlsVariantKey(variant) {
-    return variant && variant.url ? String(variant.url) : '';
+    return variant && variant.url ? itemKey(String(variant.url)) : '';
   }
 
   function resolutionArea(resolution) {
@@ -372,6 +444,7 @@ var MediaSniperLogic = globalThis.MediaSniperLogic || (function () {
       });
       const key = hlsVariantKey(variant);
       const previous = byKey.get(key);
+      if (!previous && byKey.size >= MAX_HLS_VARIANTS) continue;
       // A later observation can fill in an alternate audio URL or richer
       // rendition metadata without creating a duplicate quality entry.
       if (previous) {
@@ -409,10 +482,16 @@ var MediaSniperLogic = globalThis.MediaSniperLogic || (function () {
     return best;
   }
 
+  function variantKeyValue(key) {
+    const raw = String(key || '');
+    if (!raw) return '';
+    return itemKey(raw);
+  }
+
   function selectedHlsVariant(item) {
     const variants = item && Array.isArray(item.variants) ? item.variants : [];
     if (!variants.length) return null;
-    const key = item && item.selectedVariantKey ? String(item.selectedVariantKey) : '';
+    const key = variantKeyValue(item && item.selectedVariantKey);
     if (key) {
       const selected = variants.find(function (variant) { return hlsVariantKey(variant) === key; });
       if (selected) return selected;
@@ -422,7 +501,7 @@ var MediaSniperLogic = globalThis.MediaSniperLogic || (function () {
 
   function selectHlsVariant(item, key) {
     const variants = item && Array.isArray(item.variants) ? item.variants : [];
-    const wanted = String(key || '');
+    const wanted = variantKeyValue(key);
     return variants.find(function (variant) { return hlsVariantKey(variant) === wanted; }) || null;
   }
 
@@ -801,6 +880,8 @@ var MediaSniperLogic = globalThis.MediaSniperLogic || (function () {
     classifyUrl: classifyUrl,
     kindFromContentType: kindFromContentType,
     isSafeMediaUrl: isSafeMediaUrl,
+    isYouTubeMediaUrl: isYouTubeMediaUrl,
+    isYoutubeMediaUrl: isYouTubeMediaUrl,
     isVimeoPlayerUrl: isVimeoPlayerUrl,
     isConcreteMetadataUrl: isConcreteMetadataUrl,
     sanitizeFilename: sanitizeFilename,
@@ -813,6 +894,10 @@ var MediaSniperLogic = globalThis.MediaSniperLogic || (function () {
     sortItems: sortItems,
     ytDlpCommand: ytDlpCommand,
     parseM3u8: parseM3u8,
+    MAX_HLS_PLAYLIST_CHARS: MAX_HLS_PLAYLIST_CHARS,
+    MAX_HLS_VARIANTS: MAX_HLS_VARIANTS,
+    MAX_HLS_MEDIA: MAX_HLS_MEDIA,
+    MAX_HLS_SEGMENTS: MAX_HLS_SEGMENTS,
     groupHlsItem: groupHlsItem,
     normalizeHlsVariants: normalizeHlsVariants,
     mergeHlsVariants: mergeHlsVariants,

@@ -43,6 +43,11 @@ function makeChrome(opts) {
     downloads: {
       onChanged: { addListener: function (fn) { listeners.onChanged.push(fn); } },
       download: function (o, cb) {
+        if (opts.downloadMode === 'reject') return Promise.reject(new Error('download rejected'));
+        if (opts.downloadMode === 'no-id') {
+          if (cb) cb(undefined);
+          return Promise.resolve(undefined);
+        }
         const id = downloadSeq++;
         downloads.push({ id: id, opts: o, done: false });
         if (cb) cb(id);
@@ -236,6 +241,14 @@ async function run() {
     eq(r.deferred, 1, 'hls deferred to chain');
     eq(chrome.downloads.__downloads[0].opts.filename, 'new.mp4', 'only new.mp4 started');
 
+    // YouTube mux intake must reject an adaptive audio URL that is not hosted
+    // by YouTube/googlevideo before any offscreen fetch is attempted.
+    const badAudio = await send(chrome, { type: 'ms-yt-mux-download', item: {
+      url: 'https://rr3---sn-example.googlevideo.com/videoplayback?id=bad&itag=137',
+      kind: 'video', via: 'youtube', audioUrl: 'https://evil.example/audio.mp4',
+    }, tabId: 1 });
+    ok(badAudio && badAudio.error, 'background rejects untrusted YouTube audio URL');
+
     // now actually skip: existing history has matching relative name
     const chrome2 = makeChrome({
       existingDownloads: ['/Users/u/Downloads/skipme.mp4', '/Users/u/Downloads/other.mkv'],
@@ -351,6 +364,27 @@ async function run() {
     eq(item && item.vimeoId, '123456789', 'Vimeo identity stays metadata on concrete item');
     ok(got.some(function (x) { return x.title === 'MIME clip'; }), 'media MIME makes extensionless metadata concrete');
     ok(!got.some(function (x) { return /player\.vimeo|metadata\/player/.test(x.url); }), 'Vimeo/player hints are not downloadable');
+  }
+
+  // --- 8. download failures terminate every deferred chain slot ------------
+  {
+    const chrome = makeChrome({ downloadMode: 'reject' });
+    const ctx = makeContext(chrome);
+    vm.runInContext(logicSrc, ctx);
+    vm.runInContext(bgSrc, ctx);
+    await send(chrome, { type: 'ms-report', tabId: 1, items: [
+      { url: 'https://cdn.example/one.m3u8', kind: 'hls', contentType: 'application/vnd.apple.mpegurl', title: 'one' },
+      { url: 'https://cdn.example/two.m3u8', kind: 'hls', contentType: 'application/vnd.apple.mpegurl', title: 'two' },
+    ] });
+    const all = await send(chrome, { type: 'ms-download-all', tabId: 1 });
+    eq(all.deferred, 2, 'failure fixture starts two deferred HLS jobs');
+    for (let i = 0; i < 12; i++) await flush();
+    const statuses = await send(chrome, { type: 'ms-queue-status' });
+    eq(statuses.queue.filter(function (q) { return q.status === 'failed'; }).length, 2, 'rejected blob downloads become terminal queue entries');
+    const first = await send(chrome, { type: 'ms-hls-status', jobKey: 'https://cdn.example/one.m3u8' });
+    const second = await send(chrome, { type: 'ms-hls-status', jobKey: 'https://cdn.example/two.m3u8' });
+    eq(first && first.status, 'failed', 'first HLS job reaches terminal failure');
+    eq(second && second.status, 'failed', 'chain advances to and fails the second HLS job');
   }
 
   report('background2');

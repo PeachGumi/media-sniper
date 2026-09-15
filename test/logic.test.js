@@ -115,6 +115,34 @@ eq(L.parseM3u8(enc, 'https://a/x.m3u8').encrypted, true, 'AES-128 detected');
 const best = L.pickBestVariant(pm.variants);
 eq(best.url, 'https://cdn.example.com/abs/v1080/index.m3u8', 'best variant = highest bandwidth');
 
+// Manifest input and parser output stay bounded even when a server sends a
+// hostile playlist with thousands of lines.
+ok(Number.isInteger(L.MAX_HLS_PLAYLIST_CHARS) && L.MAX_HLS_PLAYLIST_CHARS > 0, 'HLS playlist character limit is exported');
+ok(Number.isInteger(L.MAX_HLS_VARIANTS) && L.MAX_HLS_VARIANTS > 0, 'HLS variant limit is exported');
+ok(Number.isInteger(L.MAX_HLS_MEDIA) && L.MAX_HLS_MEDIA > 0, 'HLS media rendition limit is exported');
+ok(Number.isInteger(L.MAX_HLS_SEGMENTS) && L.MAX_HLS_SEGMENTS > 0, 'HLS segment limit is exported');
+const oversizedPlaylist = L.parseM3u8('#EXTM3U\n' + 'x'.repeat(2 * 1024 * 1024), 'https://cdn.example/huge.m3u8');
+ok(oversizedPlaylist.truncated === true, 'oversized HLS playlist fails closed');
+eq(oversizedPlaylist.variants.length, 0, 'oversized HLS variants are not retained');
+eq(oversizedPlaylist.segments.length, 0, 'oversized HLS segments are not retained');
+const manyMasterLines = ['#EXTM3U'];
+for (let i = 0; i < 150; i++) {
+  manyMasterLines.push('#EXT-X-STREAM-INF:BANDWIDTH=' + (i + 1) + ',RESOLUTION=640x' + (i + 1));
+  manyMasterLines.push('v' + i + '.m3u8');
+}
+const boundedMaster = L.parseM3u8(manyMasterLines.join('\n'), 'https://cdn.example/master.m3u8');
+ok(boundedMaster.variants.length <= L.MAX_HLS_VARIANTS, 'master variants are capped');
+const manyMediaLines = ['#EXTM3U'];
+for (let i = 0; i < 150; i++) {
+  manyMediaLines.push('#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="g' + i + '",URI="a' + i + '.m3u8"');
+}
+for (let i = 0; i < 20050; i++) {
+  manyMediaLines.push('#EXTINF:1,', 's' + i + '.ts');
+}
+const boundedMedia = L.parseM3u8(manyMediaLines.join('\n'), 'https://cdn.example/media.m3u8');
+ok(boundedMedia.media.length <= L.MAX_HLS_MEDIA, 'alternate HLS media renditions are capped');
+ok(boundedMedia.segments.length <= L.MAX_HLS_SEGMENTS, 'HLS segments are capped');
+
 report('logic');
 
 
