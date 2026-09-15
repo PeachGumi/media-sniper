@@ -9,6 +9,7 @@ let listener = null;
 let exited = 0;
 let fetchProbe = false;
 const fetchCalls = [];
+const factoryCalls = [];
 let offscreenGlobal = null;
 const libav = {
   onwrite: null,
@@ -41,7 +42,10 @@ URLCtor.createObjectURL = function (blob) { return 'blob:test/' + blob.size; };
 const context = vm.createContext({
   console,
   chrome: fakeChrome,
-  __LibAVFactory: function () { return Promise.resolve(libav); },
+  __LibAVFactory: function (options) {
+    factoryCalls.push(options || {});
+    return Promise.resolve(libav);
+  },
   fetch: function (url, options) {
     fetchCalls.push({ url: url, options: options || {} });
     return Promise.resolve({ ok: true });
@@ -74,6 +78,8 @@ ok(typeof listener === 'function', 'offscreen message listener installed');
     }, {}, resolve);
   });
   ok(result && result.error, 'non-live ffmpeg failure is reported even when output exists');
+  ok(typeof factoryCalls[0].printErr === 'function', 'routine ffmpeg stderr is intercepted instead of becoming extension errors');
+  ok(typeof factoryCalls[0].print === 'function', 'routine ffmpeg stdout is intercepted instead of flooding the console');
   eq(result && result.url, undefined, 'non-live ffmpeg failure does not return a download URL');
   eq(exited, 1, 'failed ffmpeg instance is cleaned up');
 

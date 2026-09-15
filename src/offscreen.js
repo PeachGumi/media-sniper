@@ -195,6 +195,12 @@ globalThis.MAX_READ_ATTEMPTS = 6;
 let current = null; // { libav, jobId, chunks, timer, seconds, bytes }
 let lastDone = null; // result of the most recent finished job (SW-restart recovery)
 
+// Emscripten maps ffmpeg's normal stderr stream to console.error by default.
+// HLS emits one "Opening ..." line per segment, so Brave records a successful
+// download as hundreds of extension errors. Actual failure is determined from
+// ffmpeg's return code below; keep routine stdout/stderr out of DevTools.
+function discardLibavLog() {}
+
 async function runFfmpegJob(msg, sendResponse) {
   if (current) { sendResponse({ error: '別のffmpegジョブが実行中です' }); return; }
   const jobId = msg.jobId || msg.url;
@@ -212,6 +218,8 @@ async function runFfmpegJob(msg, sendResponse) {
     libav = await LibAVFactory({
       noworker: true,
       wasmurl: chrome.runtime.getURL('src/libav/libav-6.5.7.1-h264-aac-mp3.wasm.wasm'),
+      print: discardLibavLog,
+      printErr: discardLibavLog,
     });
     current.libav = libav;
     current.chunks = chunks;
@@ -457,6 +465,8 @@ async function handleDashBuild(msg, sendResponse) {
     libav = await LibAVFactory({
       noworker: true,
       wasmurl: chrome.runtime.getURL('src/libav/libav-6.5.7.1-h264-aac-mp3.wasm.wasm'),
+      print: discardLibavLog,
+      printErr: discardLibavLog,
     });
     current.libav = libav;
 
@@ -526,6 +536,8 @@ async function handleMuxLocal(msg, sendResponse) {
     libav = await LibAVFactory({
       noworker: true,
       wasmurl: chrome.runtime.getURL('src/libav/libav-6.5.7.1-h264-aac-mp3.wasm.wasm'),
+      print: discardLibavLog,
+      printErr: discardLibavLog,
     });
     current.libav = libav;
 
