@@ -27,6 +27,8 @@ eq(L.kindFromContentType('video/MP2T', 'https://a/b'), 'ts', 'ct video/mp2t');
 // content-type says octet-stream but url has ext -> fall back to ext
 eq(L.kindFromContentType('application/octet-stream', 'https://a/b.mp4'), 'video', 'octet-stream falls back to url ext');
 eq(L.kindFromContentType('text/html', 'https://a/b.mp4'), null, 'text/html never media');
+eq(L.isVimeoPlayerUrl('https://player.vimeo.com/video/12345'), true, 'Vimeo player URL recognized');
+eq(L.isVimeoPlayerUrl('https://evil.vimeo.com/video/12345'), false, 'untrusted Vimeo subdomain is not recognized');
 
 // --- sanitizeFilename -----------------------------------------------------
 eq(L.sanitizeFilename('a/b\\c:d*e?f"g<h>i|j', 'x'), 'a_b_c_d_e_f_g_h_i_j', 'illegal chars replaced');

@@ -17,8 +17,8 @@
 
   function injectBridge() {
     try {
-      // inject logic first, then bridge (async=false keeps order)
-      const files = ['src/logic.js', 'src/bridge.js'];
+      // inject logic first, then metadata adapter, then bridge (async=false keeps order)
+      const files = ['src/logic.js', 'src/page-metadata.js', 'src/bridge.js'];
       for (const f of files) {
         const s = document.createElement('script');
         s.src = chrome.runtime.getURL(f);
@@ -149,6 +149,7 @@
       queueReport({
         url: d.url, kind: d.kind, contentType: d.contentType,
         size: d.size, via: d.via, pageUrl: d.pageUrl, duration: d.duration,
+        title: d.title, metadataSource: d.metadataSource, vimeoId: d.vimeoId,
       });
     } else if (d.type === 'blob-size') {
       // size arrived for a blob URL we already reported: update item

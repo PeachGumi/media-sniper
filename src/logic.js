@@ -19,6 +19,8 @@ var MediaSniperLogic = globalThis.MediaSniperLogic || (function () {
     ts: 'ts', m4s: 'ts', fmp4: 'ts',
   };
 
+  const MAX_URL_LENGTH = 4096;
+
   const DEFAULT_EXT = { video: 'mp4', audio: 'm4a', hls: 'ts', 'hls-audio': 'aac', dash: 'mp4', ts: 'ts' };
 
   function extOf(url) {
@@ -48,6 +50,37 @@ var MediaSniperLogic = globalThis.MediaSniperLogic || (function () {
       if (c.indexOf('dash+xml') >= 0) return 'dash';
     }
     return classifyUrl(url).kind;
+  }
+
+  function isSafeMediaUrl(url) {
+    try {
+      const raw = String(url || '');
+      if (!raw || raw.length > MAX_URL_LENGTH) return false;
+      const u = new URL(raw);
+      if (u.protocol === 'http:' || u.protocol === 'https:') return u.href.length <= MAX_URL_LENGTH;
+      if (u.protocol === 'blob:') {
+        const inner = new URL(String(u.href).slice('blob:'.length));
+        return (inner.protocol === 'http:' || inner.protocol === 'https:') && u.href.length <= MAX_URL_LENGTH;
+      }
+      return false;
+    } catch (e) { return false; }
+  }
+
+  function isVimeoPlayerUrl(url) {
+    try {
+      const u = new URL(String(url || ''));
+      const h = String(u.hostname || '').toLowerCase();
+      if (h !== 'vimeo.com' && h !== 'www.vimeo.com' && h !== 'player.vimeo.com') return false;
+      return !/\.(mp4|m4v|webm|mkv|mov|flv|ogv|mp3|m4a|aac|ogg|opus|wav|flac)(?:$|[?#])/i.test(u.pathname || '');
+    } catch (e) { return false; }
+  }
+
+  function isConcreteMetadataUrl(url, contentType) {
+    if (!isSafeMediaUrl(url)) return false;
+    const kind = kindFromContentType(contentType || null, url);
+    if (kind !== 'video' && kind !== 'audio') return false;
+    if (isVimeoPlayerUrl(url)) return false;
+    return true;
   }
 
   function sanitizeFilename(name, fallback) {
@@ -764,8 +797,12 @@ var MediaSniperLogic = globalThis.MediaSniperLogic || (function () {
   return {
     EXT_KIND: EXT_KIND,
     DEFAULT_EXT: DEFAULT_EXT,
+    MAX_URL_LENGTH: MAX_URL_LENGTH,
     classifyUrl: classifyUrl,
     kindFromContentType: kindFromContentType,
+    isSafeMediaUrl: isSafeMediaUrl,
+    isVimeoPlayerUrl: isVimeoPlayerUrl,
+    isConcreteMetadataUrl: isConcreteMetadataUrl,
     sanitizeFilename: sanitizeFilename,
     filenameForItem: filenameForItem,
     sanitizeRootFolder: sanitizeRootFolder,

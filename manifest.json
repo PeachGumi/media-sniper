@@ -27,6 +27,7 @@
     {
       "resources": [
         "src/logic.js",
+        "src/page-metadata.js",
         "src/bridge.js"
       ],
       "matches": [

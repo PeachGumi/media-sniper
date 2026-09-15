@@ -12,7 +12,8 @@
  *    error's stack points at whoever called fetch.
  *
  * What this bridge still owns (things webRequest cannot see):
- *  - <video>/<audio> element scanning (incl. blob: sources)
+ *  - <video>/<audio>/<source> scanning (incl. blob: sources)
+ *  - bounded page metadata (Open Graph + Schema.org JSON-LD)
  *  - URL.createObjectURL tracking (blob URL -> byte size)
  *
  * Communicates with the isolated content script via window.postMessage.
@@ -24,13 +25,40 @@
 
   var MARKER = 'media-sniper-bridge';
   var MAX_EMIT_PER_PAGE = 500;
+  var MAX_MEDIA_ELEMENTS = 128;
   var emitted = 0;
   var scanPageUrl = String(location.href || '');
+  var metadataSeen = Object.create(null);
+  var metadataSeenCount = 0;
 
   var L = window.MediaSniperLogic || {
     classifyUrl: function () { return { kind: null, ext: null }; },
     kindFromContentType: function () { return null; },
+    itemKey: function (url) { return String(url || ''); },
   };
+  var PM = window.MediaSniperPageMetadata || null;
+
+  function resetPageState() {
+    emitted = 0;
+    metadataSeen = Object.create(null);
+    metadataSeenCount = 0;
+  }
+
+  function resolveSafeUrl(raw) {
+    try {
+      if (PM && typeof PM.safeUrl === 'function') return PM.safeUrl(String(raw || ''), location.href);
+      var value = String(raw || '').trim();
+      if (!value || value.length > 4096) return null;
+      var u = new URL(value, location.href);
+      if (u.protocol === 'http:' || u.protocol === 'https:') return u.href.length <= 4096 ? u.href : null;
+      if (u.protocol === 'blob:') {
+        var inner = new URL(String(u.href).slice('blob:'.length));
+        if (inner.protocol !== 'http:' && inner.protocol !== 'https:') return null;
+        return u.href.length <= 4096 ? u.href : null;
+      }
+      return null;
+    } catch (_) { return null; }
+  }
 
   function emit(payload) {
     if (emitted >= MAX_EMIT_PER_PAGE) return;
@@ -43,58 +71,174 @@
     } catch (e) { /* never break the page */ }
   }
 
+  function readAttr(el, name) {
+    try {
+      if (el && typeof el.getAttribute === 'function') return String(el.getAttribute(name) || '');
+      return el && el[name] != null ? String(el[name]) : '';
+    } catch (_) { return ''; }
+  }
+
+  function keyFor(url, kind) {
+    try {
+      var k = typeof L.itemKey === 'function' ? L.itemKey(url) : url;
+      return String(k || url) + '\u0000' + String(kind || '');
+    } catch (_) { return String(url || '') + '\u0000' + String(kind || ''); }
+  }
+
   function looksMedia(url, contentType) {
     if (!url || typeof url !== 'string') return false;
-    if (url.indexOf('data:') === 0 || url.indexOf('chrome-extension:') === 0) return false;
-    var kind = L.kindFromContentType(contentType || null, url);
+    var abs = resolveSafeUrl(url);
+    if (!abs) return false;
+    var kind = L.kindFromContentType(contentType || null, abs);
     if (!kind) return false;
     // playlists are owned by the background webRequest path: it validates
     // the text, expands master playlists into per-resolution variants and
     // rejects subtitle playlists. A raw m3u8 from here would show up as one
     // opaque "HLS" entry (the mystery-file complaint).
-    if (kind === 'hls' || kind === 'dash') return false;
-    return true;
+    if (kind === 'hls' || kind === 'dash' || kind === 'ts') return false;
+    return kind === 'video' || kind === 'audio';
   }
 
-  function emitMedia(url, contentType, size, via) {
-    try {
-      var abs = new URL(url, location.href).href;
-      if (!looksMedia(abs, contentType)) return;
-      var kind = L.kindFromContentType(contentType || null, abs);
-      emit({ url: abs, kind: kind, contentType: contentType || null, size: size || 0, via: via });
-    } catch (e) { /* swallow */ }
+  function elementHint(el) {
+    var current = el;
+    for (var depth = 0; current && depth < 8; depth++, current = current.parentElement) {
+      var tag = String(current.tagName || '').toLowerCase();
+      if (tag === 'video') return 'video';
+      if (tag === 'audio') return 'audio';
+    }
+    return null;
   }
 
-  // ---- video element scanning (blob: sources & src attributes) --------------
-  function scanVideoEls(force) {
+  function elementKind(el, url, contentType) {
+    var inferred = null;
+    try { inferred = L.kindFromContentType(contentType || null, url); } catch (_) {}
+    if (inferred === 'hls' || inferred === 'dash' || inferred === 'ts') return null;
+    if (inferred === 'video' || inferred === 'audio') return inferred;
+    return elementHint(el);
+  }
+
+  function metadataTitleFor(url, kind, titleMap) {
+    if (!titleMap) return '';
+    return titleMap[keyFor(url, kind)] || titleMap[keyFor(url, '')] || '';
+  }
+
+  function scanVideoEls(force, pageTitle, titleMap) {
+    var observed = [];
     try {
       var here = String(location.href || '');
       if (here !== scanPageUrl) {
         scanPageUrl = here;
-        emitted = 0;
+        resetPageState();
       }
-      var els = document.querySelectorAll('video, video source, audio');
-      for (var i = 0; i < els.length; i++) {
+      var els = document.querySelectorAll('video, audio, source');
+      for (var i = 0; i < els.length && i < MAX_MEDIA_ELEMENTS; i++) {
         var el = els[i];
-        var src = el.currentSrc || el.src;
-        if (!src) continue;
-        var changed = el.__msEmittedSrc !== src;
-        if (src.indexOf('blob:') === 0 && (force || changed)) {
-          el.__msEmittedSrc = src;
-          var dur = el.duration || 0;
-          emit({ url: src, kind: 'video', contentType: null, size: 0, via: 'element', duration: dur || 0 });
-        } else if (looksMedia(src, null) && (force || changed)) {
-          el.__msEmittedSrc = src;
-          emitMedia(src, null, 0, 'element');
+        var src = '';
+        try { src = el.currentSrc || ''; } catch (_) {}
+        if (!src) src = readAttr(el, 'src');
+        if (!src) {
+          try { src = el.src || ''; } catch (_) { src = ''; }
         }
+        if (!src) continue;
+        var abs = resolveSafeUrl(src);
+        if (!abs) continue;
+        var contentType = readAttr(el, 'type');
+        var kind = elementKind(el, abs, contentType);
+        if (!kind) {
+          // Existing blob handling has no MIME to classify. The media element
+          // itself is the concrete source, so its tag supplies the kind.
+          if (abs.indexOf('blob:') === 0) kind = elementHint(el) || 'video';
+          else continue;
+        }
+        var title = metadataTitleFor(abs, kind, titleMap) || pageTitle || readAttr(el, 'title') || readAttr(el, 'aria-label');
+        var signature = abs + '\u0000' + kind + '\u0000' + title;
+        var changed = el.__msEmittedSrc !== abs || el.__msEmittedSignature !== signature;
+        if (force || changed) {
+          el.__msEmittedSrc = abs;
+          el.__msEmittedSignature = signature;
+          var duration = 0;
+          try { duration = Number(el.duration) || 0; } catch (_) {}
+          if (!duration && el.parentElement) {
+            try { duration = Number(el.parentElement.duration) || 0; } catch (_) {}
+          }
+          var payload = {
+            url: abs, kind: kind, contentType: contentType || null, size: 0,
+            via: 'element', duration: duration || 0,
+          };
+          if (title) payload.title = title;
+          try {
+            if (PM && typeof PM.vimeoIdentityForElement === 'function') {
+              var vimeoId = PM.vimeoIdentityForElement(el, location.href);
+              if (vimeoId) payload.vimeoId = vimeoId;
+            }
+          } catch (_) {}
+          emit(payload);
+        }
+        observed.push({ url: abs, kind: kind, key: keyFor(abs, kind) });
       }
     } catch (e) { /* swallow */ }
+    return observed;
+  }
+
+  function rememberMetadataTitle(map, record) {
+    if (!record || !record.url || !record.title) return;
+    var key = keyFor(record.url, record.kind);
+    var old = map[key];
+    if (!old || String(record.title).length > String(old).length) map[key] = String(record.title).slice(0, 500);
+    var urlKey = keyFor(record.url, '');
+    if (!map[urlKey] || String(record.title).length > String(map[urlKey]).length) map[urlKey] = String(record.title).slice(0, 500);
+  }
+
+  function emitMetadata(record) {
+    if (!record || !record.url || (record.kind !== 'video' && record.kind !== 'audio')) return;
+    var abs = resolveSafeUrl(record.url);
+    if (!abs) return;
+    // Recheck concrete metadata at the emission boundary. A metadata record
+    // with only an embed/player URL is a hint, not a downloadable item.
+    if (!looksMedia(abs, record.contentType) && !((record.contentType || '').toLowerCase().indexOf('video/') === 0 || (record.contentType || '').toLowerCase().indexOf('audio/') === 0)) return;
+    var title = record.title ? String(record.title).slice(0, 500) : '';
+    var source = record.metadataSource ? String(record.metadataSource).slice(0, 20) : 'metadata';
+    var dedupe = keyFor(abs, record.kind) + '\u0000' + source + '\u0000' + title;
+    if (metadataSeen[dedupe]) return;
+    if (metadataSeenCount >= MAX_EMIT_PER_PAGE) return;
+    metadataSeen[dedupe] = true;
+    metadataSeenCount++;
+    var payload = {
+      url: abs, kind: record.kind, contentType: record.contentType || null,
+      size: 0, via: 'metadata', metadataSource: source,
+    };
+    if (title) payload.title = title;
+    if (record.duration) payload.duration = Number(record.duration) || 0;
+    emit(payload);
+  }
+
+  function scanPageMetadata(force) {
+    if (!PM || typeof PM.collect !== 'function') {
+      scanVideoEls(force, '', null);
+      return;
+    }
+    var data;
+    try { data = PM.collect(document, location.href) || {}; } catch (_) { data = {}; }
+    var pageTitle = data.pageTitle ? String(data.pageTitle).slice(0, 500) : '';
+    var titleMap = Object.create(null);
+    var all = (data.candidates || []).concat(data.hints || []);
+    for (var i = 0; i < all.length; i++) rememberMetadataTitle(titleMap, all[i]);
+    var observed = scanVideoEls(force, pageTitle, titleMap);
+    var observedKeys = Object.create(null);
+    for (var j = 0; j < observed.length; j++) observedKeys[observed[j].key] = true;
+    var candidates = data.candidates || [];
+    for (var k = 0; k < candidates.length; k++) {
+      var record = candidates[k];
+      if (!record || record.via === 'element' || record.metadataSource === 'element') continue;
+      if (observedKeys[keyFor(record.url, record.kind)]) continue;
+      emitMetadata(record);
+    }
   }
 
   try {
     // Do not wait two seconds for the first pass after injection/navigation.
-    scanVideoEls(false);
-    var iv = setInterval(function () { scanVideoEls(false); }, 2000);
+    scanPageMetadata(false);
+    var iv = setInterval(function () { scanPageMetadata(false); }, 2000);
     setTimeout(function () { clearInterval(iv); }, 5 * 60 * 1000);
   } catch (e) { /* ignore */ }
 
@@ -128,7 +272,7 @@
       // Explicit/manual scans must re-report the current source even if the
       // same element was already seen. This makes Clear -> Rescan work and
       // refreshes reused elements after SPA navigation.
-      if (d.type === 'scan') scanVideoEls(true);
+      if (d.type === 'scan') scanPageMetadata(true);
     } catch (e) { /* ignore */ }
   });
 })();

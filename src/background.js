@@ -76,7 +76,15 @@ function effectiveMinSize() {
 function normalizeItem(raw, tabId) {
   if (!raw || !raw.url) return null;
   const url = String(raw.url);
+  if (url.length > 4096) return null;
+  // Extension-owned blobs are the output of our offscreen document. All other
+  // URLs, including page blobs and non-network schemes, must pass the shared
+  // safe URL policy before they reach a download queue.
+  if (url.indexOf('blob:chrome-extension://') !== 0 &&
+      typeof L.isSafeMediaUrl === 'function' && !L.isSafeMediaUrl(url)) return null;
   if (url.indexOf('data:') === 0 || url.indexOf('chrome-extension:') === 0) return null;
+  if (raw.via === 'metadata' && typeof L.isConcreteMetadataUrl === 'function' &&
+      !L.isConcreteMetadataUrl(url, raw.contentType || null)) return null;
   // Page-created blob URLs (MSE players, X above all) are revoked by the page
   // the moment playback context changes; downloading one reliably fails with
   // SERVER_CANCELED and Chrome surfaces it as "check your internet
@@ -109,6 +117,8 @@ function normalizeItem(raw, tabId) {
     pageUrl: raw.pageUrl || null,
     title: raw.title || null,
     duration: Number(raw.duration) || 0,
+    metadataSource: raw.metadataSource || null,
+    vimeoId: /^\d{1,20}$/.test(String(raw.vimeoId || '')) ? String(raw.vimeoId) : null,
     dashEntry: raw.dashEntry != null ? raw.dashEntry : null,
     dashType: raw.dashType || null,
     audioUrl: raw.audioUrl || null, // separate-track audio playlist (HLS two-source)

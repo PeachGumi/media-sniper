@@ -16,6 +16,10 @@ const MediaSniperSecurity = (function () {
   const PENDING_MAX = 256;
   const MAX_REPORT_ITEMS = 500;
   const MAX_TEXT = 500;
+  const MAX_URL_LENGTH = 4096;
+  const MEDIA_EXTENSIONS = /\.(mp4|m4v|webm|mkv|mov|flv|ogv|mp3|m4a|aac|ogg|opus|wav|flac)(?:$|[?#])/i;
+  const VIMEO_PLAYER_HOST = /^player\.vimeo\.com$/i;
+  const VIMEO_ROOT_HOST = /^(?:www\.)?vimeo\.com$/i;
 
   const CONTENT_TYPES = new Set(['ms-page-meta', 'ms-report']);
   const UI_TYPES = new Set([
@@ -25,7 +29,7 @@ const MediaSniperSecurity = (function () {
   ]);
   const EXTENSION_INTERNAL_TYPES = new Set(['ms-offscreen-progress', 'ms-hls-progress']);
   const ALLOWED_KINDS = new Set(['video', 'audio', 'hls', 'hls-audio', 'dash', 'ts']);
-  const ALLOWED_VIA = new Set(['element', 'blob-size', 'youtube']);
+  const ALLOWED_VIA = new Set(['element', 'blob-size', 'youtube', 'metadata']);
 
   function originOf(url) {
     try {
@@ -45,8 +49,15 @@ const MediaSniperSecurity = (function () {
 
   function isAllowedMediaUrl(url) {
     try {
-      const u = new URL(String(url || ''));
-      return u.protocol === 'http:' || u.protocol === 'https:' || u.protocol === 'blob:';
+      const raw = String(url || '');
+      if (!raw || raw.length > MAX_URL_LENGTH) return false;
+      const u = new URL(raw);
+      if (u.protocol === 'http:' || u.protocol === 'https:') return u.href.length <= MAX_URL_LENGTH;
+      if (u.protocol === 'blob:') {
+        const inner = new URL(String(u.href).slice('blob:'.length));
+        return (inner.protocol === 'http:' || inner.protocol === 'https:') && u.href.length <= MAX_URL_LENGTH;
+      }
+      return false;
     } catch (e) { return false; }
   }
 
@@ -149,12 +160,47 @@ const MediaSniperSecurity = (function () {
     return Number.isFinite(n) && n >= 0 ? n : 0;
   }
 
+  function concreteMetadataUrl(raw) {
+    if (!raw || !isAllowedMediaUrl(raw)) return false;
+    try {
+      const u = new URL(String(raw));
+      const path = u.pathname || '';
+      // Public Vimeo player pages and ordinary no-extension URLs are identity
+      // hints, not media files. A metadata report needs a recognizable media
+      // extension or a media MIME supplied below.
+      if ((VIMEO_PLAYER_HOST.test(u.hostname) || VIMEO_ROOT_HOST.test(u.hostname)) && !MEDIA_EXTENSIONS.test(path)) return false;
+      return MEDIA_EXTENSIONS.test(path);
+    } catch (_) { return false; }
+  }
+
+  function metadataReportIsConcrete(raw, url) {
+    if (!raw || raw.via !== 'metadata') return true;
+    const ct = String(raw.contentType || '').toLowerCase().split(';')[0].trim();
+    if (ct.indexOf('video/') !== 0 && ct.indexOf('audio/') !== 0) {
+      if (ct.indexOf('text/') === 0 || ct.indexOf('json') >= 0) return false;
+      return concreteMetadataUrl(url);
+    }
+    try {
+      const u = new URL(String(url));
+      if ((VIMEO_PLAYER_HOST.test(u.hostname) || VIMEO_ROOT_HOST.test(u.hostname)) && !MEDIA_EXTENSIONS.test(u.pathname || '')) return false;
+      return true;
+    } catch (_) { return false; }
+  }
+
+  function boundedVimeoId(value) {
+    const id = String(value == null ? '' : value).trim();
+    return /^\d{1,20}$/.test(id) ? id : null;
+  }
+
   function sanitizeReportedItem(raw, senderUrl) {
     if (!raw || typeof raw !== 'object' || !isAllowedMediaUrl(raw.url)) return null;
     const kind = String(raw.kind || '');
     if (kind && !ALLOWED_KINDS.has(kind)) return null;
     const via = String(raw.via || '');
     if (via && !ALLOWED_VIA.has(via)) return null;
+
+    const url = String(raw.url);
+    if (!metadataReportIsConcrete(raw, url)) return null;
 
     if (via === 'youtube') {
       const senderHost = hostOf(senderUrl);
@@ -176,6 +222,12 @@ const MediaSniperSecurity = (function () {
     if (raw.audioUrl && isAllowedMediaUrl(raw.audioUrl)) out.audioUrl = String(raw.audioUrl);
     if (raw.dashEntry != null && Number.isInteger(Number(raw.dashEntry))) out.dashEntry = Number(raw.dashEntry);
     if (raw.dashType === 'video' || raw.dashType === 'audio') out.dashType = raw.dashType;
+    if (via === 'metadata' && raw.metadataSource != null) {
+      const source = cleanText(raw.metadataSource, 20).toLowerCase();
+      if (/^(og|jsonld|element|schema)$/.test(source)) out.metadataSource = source;
+    }
+    const vimeoId = boundedVimeoId(raw.vimeoId);
+    if (vimeoId) out.vimeoId = vimeoId;
     return out;
   }
 
@@ -394,6 +446,9 @@ const MediaSniperSecurity = (function () {
     isSensitiveName: isSensitiveName,
     sanitizeHeadersForTargets: sanitizeHeadersForTargets,
     responseLooksMedia: responseLooksMedia,
+    isAllowedMediaUrl: isAllowedMediaUrl,
+    concreteMetadataUrl: concreteMetadataUrl,
+    metadataReportIsConcrete: metadataReportIsConcrete,
     sanitizeReportedItem: sanitizeReportedItem,
     normalizeInboundMessage: normalizeInboundMessage,
     collectTargets: collectTargets,

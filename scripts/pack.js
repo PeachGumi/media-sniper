@@ -22,6 +22,7 @@ const includes = [
   '_locales/en/messages.json',
   '_locales/ja/messages.json',
   'src/logic.js',
+  'src/page-metadata.js',
   'src/bridge.js',
   'src/content.js',
   'src/background-entry.js',

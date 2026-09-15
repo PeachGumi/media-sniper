@@ -328,6 +328,31 @@ async function run() {
     ok(chrome.downloads.__downloads[0].opts.url.indexOf('blob:') === 0, 'Save All adaptive download uses muxed blob URL');
   }
 
+  // --- 7. generic metadata intake stays concrete and bounded -----------------
+  {
+    const chrome = makeChrome();
+    const ctx = makeContext(chrome);
+    vm.runInContext(logicSrc, ctx);
+    vm.runInContext(bgSrc, ctx);
+    const valid = await send(chrome, { type: 'ms-report', items: [
+      { url: 'https://cdn.example/metadata/clip.mp4', kind: 'video', via: 'metadata', title: 'Meta clip', metadataSource: 'og', vimeoId: '123456789' },
+      { url: 'https://cdn.example/metadata/opaque', kind: 'video', contentType: 'video/mp4', via: 'metadata', title: 'MIME clip' },
+      { url: 'https://player.vimeo.com/video/123456789', kind: 'video', contentType: 'video/mp4', via: 'metadata' },
+      { url: 'https://cdn.example/metadata/player', kind: 'video', via: 'metadata' },
+      { url: 'DATA:video/mp4,abc', kind: 'video', via: 'metadata' },
+      { url: 'javascript:alert(1)', kind: 'video', via: 'metadata' },
+      { url: 'https://cdn.example/' + 'z'.repeat(5000) + '.mp4', kind: 'video', via: 'metadata' },
+    ], tabId: 4 });
+    eq(valid.added, 2, 'only concrete metadata URLs enter background');
+    const got = (await send(chrome, { type: 'ms-get-items', tabId: 4 })).items;
+    const item = got.find(function (x) { return x.title === 'Meta clip'; });
+    ok(!!item, 'metadata title reaches normalized item');
+    eq(item && item.metadataSource, 'og', 'metadata source reaches normalized item');
+    eq(item && item.vimeoId, '123456789', 'Vimeo identity stays metadata on concrete item');
+    ok(got.some(function (x) { return x.title === 'MIME clip'; }), 'media MIME makes extensionless metadata concrete');
+    ok(!got.some(function (x) { return /player\.vimeo|metadata\/player/.test(x.url); }), 'Vimeo/player hints are not downloadable');
+  }
+
   report('background2');
 }
 

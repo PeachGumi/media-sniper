@@ -68,6 +68,28 @@ eq(S.responseLooksMedia({ statusCode: 403, url: 'https://a.example/video.mp4', r
   eq(n.msg.items[0].pageUrl, 'https://site.example/frame', 'pageUrl comes from sender, not payload');
   eq(n.msg.items[0].size, 0, 'negative size normalized');
   eq(n.msg.items[0].duration, 12.5, 'duration normalized');
+
+  const metadata = S.normalizeInboundMessage({
+    type: 'ms-report',
+    items: [{
+      url: 'https://cdn.example/clip.mp4', kind: 'video', via: 'metadata',
+      metadataSource: 'og', title: 'Clip', vimeoId: '123456789',
+    }],
+  }, sender, 'extid');
+  ok(metadata.ok && metadata.msg.items.length === 1, 'generic metadata report accepted');
+  eq(metadata.msg.items[0] && metadata.msg.items[0].metadataSource, 'og', 'metadata source preserved compactly');
+  eq(metadata.msg.items[0] && metadata.msg.items[0].vimeoId, '123456789', 'bounded Vimeo identity preserved');
+  const metadataHints = S.normalizeInboundMessage({
+    type: 'ms-report',
+    items: [
+      { url: 'https://player.vimeo.com/video/123456789', kind: 'video', via: 'metadata', contentType: 'video/mp4' },
+      { url: 'https://vimeo.com/13579', kind: 'video', via: 'metadata', contentType: 'video/mp4' },
+      { url: 'https://site.example/player', kind: 'video', via: 'metadata' },
+      { url: 'https://cdn.example/fake.mp4', kind: 'video', via: 'metadata', contentType: 'text/html' },
+      { url: 'https://cdn.example/' + 'x'.repeat(5000) + '.mp4', kind: 'video', via: 'metadata' },
+    ],
+  }, sender, 'extid');
+  eq(metadataHints.msg.items.length, 0, 'metadata-only/player/overlong hints rejected');
 }
 
 // A content script/web page must never invoke privileged download operations.
