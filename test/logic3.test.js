@@ -52,4 +52,26 @@ eq(L.itemKey(gvA) === L.itemKey(gvA2), true, 'range chunks of one track dedupe')
 eq(L.itemKey(gvA) === L.itemKey(gvA140), false, 'different itags stay distinct');
 eq(L.isBlacklisted('sub.X.COM', 'x.com'), true, 'case-insensitive');
 
+// A refreshed signed URL keeps the stable item key but must replace stale
+// media URLs without throwing away the richer metadata already collected.
+const refreshed = L.mergeItems([
+  {
+    key: 'yt-track', url: 'https://g.example/videoplayback?itag=137&sig=new',
+    audioUrl: 'https://g.example/videoplayback?itag=140&sig=new', kind: 'video', ext: 'mp4', size: 0,
+  },
+], [
+  {
+    key: 'yt-track', url: 'https://g.example/videoplayback?itag=137&sig=old',
+    audioUrl: 'https://g.example/videoplayback?itag=140&sig=old', kind: 'video', ext: 'mp4',
+    size: 9000000, title: 'Richer title', contentType: 'video/mp4', duration: 42,
+    pageUrl: 'https://www.youtube.com/watch?v=track',
+  },
+]);
+eq(refreshed.length, 1, 'refreshed signed item remains deduplicated');
+eq(refreshed[0].url, 'https://g.example/videoplayback?itag=137&sig=new', 'refreshed video URL replaces stale URL');
+eq(refreshed[0].audioUrl, 'https://g.example/videoplayback?itag=140&sig=new', 'refreshed audio URL replaces stale URL');
+eq(refreshed[0].size, 9000000, 'richer size retained across URL refresh');
+eq(refreshed[0].title, 'Richer title', 'richer title retained across URL refresh');
+eq(refreshed[0].contentType, 'video/mp4', 'richer content type retained across URL refresh');
+
 report('logic3');

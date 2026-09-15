@@ -43,6 +43,7 @@ const root = {
 
 let rawListener = null;
 let nextUrl = 1;
+const createdObjects = [];
 const revoked = [];
 const progress = [];
 const responses = new Map();
@@ -85,7 +86,10 @@ const context = vm.createContext({
   chrome: fakeChrome,
   navigator: { storage: { async getDirectory() { return root; } } },
   URL: {
-    createObjectURL(file) { return 'blob:opfs/' + (nextUrl++) + '?size=' + file.size; },
+    createObjectURL(file) {
+      createdObjects.push(file);
+      return 'blob:opfs/' + (nextUrl++) + '?size=' + file.size;
+    },
     revokeObjectURL(url) { revoked.push(url); },
   },
   fetch: async function (url) {
@@ -174,6 +178,18 @@ function dispatch(msg) {
   ok(/^blob:opfs\//.test(originalCalls[0].videoUrl), 'video mux input is OPFS File URL');
   ok(/^blob:opfs\//.test(originalCalls[0].audioUrl), 'audio mux input is OPFS File URL');
   eq(policy.ownedTempCount(), 0, 'temporary DASH track files released after mux response');
+
+  const beforeSingleDashObjects = createdObjects.length;
+  const singleDash = await dispatch({
+    type: 'ms-offscreen-dash-build',
+    playlistUrl: 'https://x/single.mpd',
+    video: { type: 'video', initUrl: 'https://x/v-init', segments: ['https://x/v-1'] },
+    headers: {},
+  });
+  const singleDashObjects = createdObjects.slice(beforeSingleDashObjects);
+  const singleDashBlob = singleDashObjects.find(function (object) { return object instanceof Blob; });
+  ok(!!singleDashBlob, 'single-track DASH returns an in-memory Blob');
+  eq(singleDashBlob && singleDashBlob.type, 'video/mp4', 'single-track DASH Blob is typed as video/mp4');
 
   responses.set('https://x/too-big', () => makeResponse([1], policy.MAX_DISK_ASSEMBLY_BYTES + 1));
   const tooBig = await dispatch({ type: 'ms-offscreen-fetch-blob', url: 'https://x/too-big' });

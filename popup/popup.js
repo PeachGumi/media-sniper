@@ -134,7 +134,7 @@ function save(item, btn) {
   if (item.kind === 'hls' || item.kind === 'hls-audio' || item.kind === 'dash') {
     chrome.runtime.sendMessage(
       {
-        type: 'ms-hls-download', url: item.url, tabId: tabId, title: item.title, pageUrl: pageUrl,
+        type: 'ms-hls-download', url: item.url, kind: item.kind, tabId: tabId, title: item.title, pageUrl: pageUrl,
         dashEntry: item.dashEntry != null ? item.dashEntry : null, dashType: item.dashType || null,
         audioUrl: item.audioUrl || null,
       },

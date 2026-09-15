@@ -187,7 +187,7 @@ function startOne(entry) {
   // If the player itself needed Authorization for this URL, skip the direct
   // attempt and fetch through the offscreen document with the header.
   const hdrs = headersFor(url, entry.item.headers);
-  if (hdrs && (hdrs.Authorization || hdrs.authorization)) {
+  if (hasAuthenticatedHeaders(hdrs)) {
     fallbackDownload(entry);
     return;
   }
@@ -656,8 +656,8 @@ async function runYtMuxJob(jobKey, item) {
   return finishMediaJob(jobKey, resp, 'mp4', 'video');
 }
 
-function startHls(tabId, jobKey, url, title, pageUrl, dashEntry, dashType, audioUrl, itemRef) {
-  msgItemRef = itemRef || null;
+function startHls(tabId, jobKey, url, title, pageUrl, dashEntry, dashType, audioUrl, itemRef, requestedKind) {
+  const ref = itemRef || null;
   const existing = state.hlsJobs.get(jobKey);
   if (existing && (existing.status === 'fetching' || existing.status === 'combining' || existing.status === 'recording')) {
     return Promise.resolve({ alreadyRunning: true });
@@ -671,10 +671,10 @@ function startHls(tabId, jobKey, url, title, pageUrl, dashEntry, dashType, audio
     audioUrl: audioUrl || null,
   });
   let runner = null;
-  if (url.indexOf('yt-mux:') === 0 && msgItemRef) {
-    runner = function () { return runYtMuxJob(jobKey, msgItemRef); };
+  if (ref && ref.via === 'youtube' && ref.audioUrl) {
+    runner = function () { return runYtMuxJob(jobKey, ref); };
   } else {
-    runner = /\.mpd(\?|$)/i.test(url) ? runDashJob : runHlsJob;
+    runner = (requestedKind === 'dash' || /\.mpd(\?|$)/i.test(url)) ? runDashJob : runHlsJob;
   }
   return runner(jobKey, url).catch(function (err) {
     const j = state.hlsJobs.get(jobKey);
@@ -699,7 +699,6 @@ function stopLiveRecording(url) {
 // document holds a single ffmpeg instance, so parallel jobs would just queue
 // on the busy-guard anyway. Direct items are already in the download queue.
 // ---------------------------------------------------------------------------
-let msgItemRef = null;
 const mediaChains = new Map(); // tabId -> {items, idx, running, current, tabId}
 
 function startMediaChain(tabId, items) {
@@ -712,7 +711,10 @@ function pumpMediaChain(tabId) {
   if (!chain || chain.running) return;
   while (chain.idx < chain.items.length) {
     const item = chain.items[chain.idx];
-    const jobKey = item.url + (item.dashEntry != null && item.dashEntry >= 0 ? '#dash-entry=' + item.dashEntry : '');
+    const isYtMux = item.via === 'youtube' && item.audioUrl;
+    const jobKey = isYtMux
+      ? 'yt-mux:' + (item.key || item.url)
+      : item.url + (item.dashEntry != null && item.dashEntry >= 0 ? '#dash-entry=' + item.dashEntry : '');
     const prev = state.hlsJobs.get(jobKey);
     if (prev && prev.status === 'complete') { chain.idx++; continue; }
     if (prev && (prev.status === 'fetching' || prev.status === 'combining' || prev.status === 'downloading' || prev.status === 'recording')) {
@@ -725,7 +727,8 @@ function pumpMediaChain(tabId) {
     chain.running = true;
     chain.current = jobKey;
     startHls(tabId, jobKey, item.url, item.title, item.pageUrl || null,
-      item.dashEntry != null ? item.dashEntry : null, item.dashType || null, item.audioUrl || null)
+      item.dashEntry != null ? item.dashEntry : null, item.dashType || null, item.audioUrl || null,
+      isYtMux ? item : null, item.kind)
       .then(function (resp) {
         // {queued:true}: the blob DOWNLOAD is now in flight. The chain must
         // NOT advance here — the runner resolving only means "queued". The
@@ -813,6 +816,13 @@ function headersFor(url, fallback) {
   return out;
 }
 
+function hasAuthenticatedHeaders(headers) {
+  for (const name of Object.keys(headers || {})) {
+    if (/^(?:referer|origin|authorization)$/i.test(name) && headers[name]) return true;
+  }
+  return false;
+}
+
 function enrichFromCapture(item) {
   const cap = capturedReqHeaders.get(L.itemKey(item.url));
   if (cap && cap.length) item.headers = cap.slice();
@@ -858,18 +868,31 @@ function onResponseStarted(details) {
 
     let ct = null;
     let size = 0;
+    let rangeTotal = 0;
+    const isFullMediaUrl = url !== observedUrl;
     if (details.responseHeaders) {
       for (const h of details.responseHeaders) {
         const name = String(h.name || '').toLowerCase();
         if (name === 'content-type') ct = h.value;
         if (name === 'content-length') size = parseInt(h.value, 10) || 0;
+        if (name === 'content-range') {
+          const m = String(h.value || '').match(/\/(\d+)\s*$/);
+          if (m) rangeTotal = parseInt(m[1], 10) || 0;
+        }
       }
     }
+    // The observed response is a playback fragment. Content-Length is only
+    // the fragment size; use the advertised full-object total when present,
+    // otherwise keep the full URL's size unknown.
+    if (isFullMediaUrl) size = rangeTotal;
     // an html response is never media (anti-hotlink redirects serve html)
     if (ct && String(ct).toLowerCase().indexOf('text/html') === 0) return;
 
-    const isHls = (ct && /mpegurl/i.test(ct)) || L.looksLikeHlsUrl(url);
     const kind = L.kindFromContentType(ct, url);
+    // A declared media type is authoritative. Path heuristics are only a
+    // fallback for extensionless responses, otherwise /hls/*.mp4 and DASH
+    // manifests carrying an /hls/ path get routed to the wrong pipeline.
+    const isHls = kind === 'hls' || (!kind && L.looksLikeHlsUrl(url));
 
     if (isHls) {
       // validate playlist text (SW fetch carries cookies thanks to host perms,
@@ -913,7 +936,7 @@ function onResponseStarted(details) {
       return;
     }
 
-    const isDash = (ct && /dash\+xml/i.test(ct)) || /\.mpd(\?|$)/i.test(url);
+    const isDash = kind === 'dash' || (!kind && /\.mpd(\?|$)/i.test(url));
     if (isDash) {
       // VDH-style: enumerate the mpd's tracks (video renditions + audio) as
       // separate items. ffmpeg downloads one track per job — concurrent
@@ -1066,7 +1089,8 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
         let skipped = 0;
         const deferredItems = [];
         for (const it of items) {
-          if (it.kind === 'hls' || it.kind === 'hls-audio' || it.kind === 'dash') { deferredItems.push(it); continue; }
+          if (it.kind === 'hls' || it.kind === 'hls-audio' || it.kind === 'dash' ||
+              (it.via === 'youtube' && it.audioUrl)) { deferredItems.push(it); continue; }
           const fname = L.filenameForItem(it, root);
           // skip-existing: compare against completed browser download history.
           // The final on-disk name may differ from our suggestion (uniquify's
@@ -1139,7 +1163,7 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
     }
     case 'ms-hls-download': {
       const jobKey = msg.url + (msg.dashEntry != null && msg.dashEntry >= 0 ? '#dash-entry=' + msg.dashEntry : '');
-      startHls(tabId, jobKey, msg.url, msg.title, msg.pageUrl, msg.dashEntry != null ? msg.dashEntry : null, msg.dashType || null, msg.audioUrl || null).then(sendResponse);
+      startHls(tabId, jobKey, msg.url, msg.title, msg.pageUrl, msg.dashEntry != null ? msg.dashEntry : null, msg.dashType || null, msg.audioUrl || null, null, msg.kind || null).then(sendResponse);
       return true;
     }
     case 'ms-hls-stop': {

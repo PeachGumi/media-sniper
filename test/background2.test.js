@@ -306,6 +306,28 @@ async function run() {
     ok(st && (st.status === 'downloading' || st.status === 'combining' || st.status === 'complete'), 'status pollable by jobKey');
   }
 
+  // Save All must use the same local-file mux path as an individual adaptive
+  // YouTube save; it must not enqueue the video-only URL directly.
+  {
+    const chrome = makeChrome();
+    const ctx = makeContext(chrome);
+    vm.runInContext(logicSrc, ctx);
+    vm.runInContext(bgSrc, ctx);
+    await send(chrome, { type: 'ms-report', tabId: 1, items: [{
+      url: 'https://rr3---sn-example.googlevideo.com/videoplayback?id=all&itag=137',
+      kind: 'video', contentType: 'video/mp4', ext: 'mp4', size: 9000000,
+      title: 'Save All Adaptive', via: 'youtube',
+      audioUrl: 'https://rr3---sn-example.googlevideo.com/videoplayback?id=all&itag=140',
+    }] });
+    const r = await send(chrome, { type: 'ms-download-all', tabId: 1 });
+    eq(r.queued, 0, 'Save All does not queue adaptive video directly');
+    eq(r.deferred, 1, 'Save All defers adaptive video to mux chain');
+    await flush(); await flush(); await flush(); await flush();
+    eq(chrome.__muxCalls.length, 1, 'Save All invokes local YouTube mux once');
+    eq(chrome.downloads.__downloads.length, 1, 'Save All downloads the muxed blob once');
+    ok(chrome.downloads.__downloads[0].opts.url.indexOf('blob:') === 0, 'Save All adaptive download uses muxed blob URL');
+  }
+
   report('background2');
 }
 

@@ -181,6 +181,11 @@ async function runFfmpegJob(msg, sendResponse) {
     clearInterval(current.timer);
     const aborted = !!(libav.abortController && libav.abortController.signal.aborted);
 
+    if (rc !== 0 && !msg.live) {
+      sendResponse({ error: 'ffmpeg failed (rc=' + rc + ')' });
+      return;
+    }
+
     // assemble written chunks positionally (frag output may rewrite offsets)
     let total = 0;
     for (const c of chunks) total = Math.max(total, c.pos + c.data.length);
@@ -370,6 +375,11 @@ async function handleDashBuild(msg, sendResponse) {
       rc = await libav.ffmpeg(['-y', '-nostdin', '-i', '/v.mp4', '-c', 'copy', '-avoid_negative_ts', 'make_zero', '-f', 'mp4', 'out.mp4']);
     }
 
+    if (rc !== 0) {
+      sendResponse({ error: 'ffmpeg出力に失敗しました (rc=' + rc + ')' });
+      return;
+    }
+
     let total = 0;
     for (const c of chunks) total = Math.max(total, c.pos + c.data.length);
     if (total === 0) {
@@ -428,6 +438,11 @@ async function handleMuxLocal(msg, sendResponse) {
     await libav.writeFile('/v.mp4', vBuf);
     await libav.writeFile('/a.m4a', aBuf);
     const rc = await libav.ffmpeg(['-y', '-nostdin', '-i', '/v.mp4', '-i', '/a.m4a', '-c', 'copy', '-map', '0:v:0', '-map', '1:a:0?', '-avoid_negative_ts', 'make_zero', '-f', 'mp4', 'out.mp4']);
+
+    if (rc !== 0) {
+      sendResponse({ error: 'muxに失敗しました (rc=' + rc + ')' });
+      return;
+    }
 
     let total = 0;
     for (const c of chunks) total = Math.max(total, c.pos + c.data.length);

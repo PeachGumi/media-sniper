@@ -170,7 +170,31 @@ var MediaSniperLogic = globalThis.MediaSniperLogic || (function () {
     for (const it of existing || []) map.set(it.key, it);
     for (const it of incoming || []) {
       const prev = map.get(it.key);
-      if (!prev || richness(it) > richness(prev)) map.set(it.key, it);
+      if (!prev) {
+        map.set(it.key, it);
+        continue;
+      }
+
+      // Signed media URLs rotate while the logical item key stays stable.
+      // Merge the new identity/metadata into the old item, but do not let a
+      // sparse refresh erase title, type, size, or other richer fields.
+      const merged = Object.assign({}, prev, it);
+      const retainedFields = ['title', 'contentType', 'size', 'duration', 'via', 'pageUrl', 'ext', 'audioUrl', 'dashType'];
+      for (const field of retainedFields) {
+        const next = it[field];
+        const old = prev[field];
+        const nextHasValue = next !== null && next !== undefined && next !== '' && !(typeof next === 'number' && next === 0);
+        const oldHasValue = old !== null && old !== undefined && old !== '' && !(typeof old === 'number' && old === 0);
+        if (!nextHasValue && oldHasValue) merged[field] = old;
+      }
+      // A refreshed response can carry a smaller/unknown size while the
+      // previously observed size remains the more useful metadata.
+      if (Number(prev.size) > Number(it.size || 0)) merged.size = prev.size;
+      if (Number(prev.duration) > Number(it.duration || 0)) merged.duration = prev.duration;
+      // The URL itself is the refresh signal and must always come from the
+      // newest report, even when that report is otherwise sparse.
+      merged.url = it.url;
+      map.set(it.key, merged);
     }
     return Array.from(map.values());
   }

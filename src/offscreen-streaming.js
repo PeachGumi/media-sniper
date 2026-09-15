@@ -184,7 +184,7 @@
     }
   }
 
-  async function buildTrack(track, headers, playlistUrl, progress) {
+  async function buildTrack(track, headers, playlistUrl, progress, typed) {
     const urls = [];
     if (track && track.initUrl) urls.push(track.initUrl);
     for (const u of ((track && track.segments) || [])) urls.push(u);
@@ -210,7 +210,7 @@
       }
       await writable.close();
       writable = null;
-      return fileUrl(temp, track && track.type === 'audio' ? 'audio/mp4' : 'video/mp4');
+      return fileUrl(temp, track && track.type === 'audio' ? 'audio/mp4' : 'video/mp4', typed);
     } catch (e) {
       try { if (writable) await writable.abort(); } catch (_) {}
       await removeTemp(temp.name);
@@ -224,11 +224,12 @@
     const progress = { done: 0, total: videoCount + audioCount };
     let video = null;
     let audio = null;
+    const singleTrack = !!msg.video !== !!msg.audio;
     try {
       // Tracks are built one at a time so segment download memory stays near a
       // single network chunk rather than N concurrent full segments.
-      if (msg.video) video = await buildTrack(msg.video, msg.headers, msg.playlistUrl, progress);
-      if (msg.audio) audio = await buildTrack(msg.audio, msg.headers, msg.playlistUrl, progress);
+      if (msg.video) video = await buildTrack(msg.video, msg.headers, msg.playlistUrl, progress, singleTrack);
+      if (msg.audio) audio = await buildTrack(msg.audio, msg.headers, msg.playlistUrl, progress, singleTrack);
 
       if (video && audio) {
         if (video.size + audio.size > MAX_MUX_INPUT_BYTES) {

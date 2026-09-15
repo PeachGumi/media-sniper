@@ -380,6 +380,38 @@ async function run() {
   ok(!!ig, 'Instagram byte-range media detected');
   eq(ig.url, 'https://scontent.example/o1/video.mp4?sig=a%2Fb&ccb=17-1', 'Instagram item points at complete MP4 URL');
 
+  // Meta's observed response is only a fragment. The full URL item must use
+  // the Content-Range total, or zero when the response gives no total, never
+  // the fragment's Content-Length.
+  wr({
+    statusCode: 200,
+    url: 'https://scontent.example/o1/range-total.mp4?sig=range-total&bytestart=100&byteend=199',
+    tabId: 7, initiator: 'https://www.instagram.com/', type: 'media',
+    responseHeaders: [
+      { name: 'Content-Type', value: 'video/mp4' },
+      { name: 'Content-Length', value: '600000' },
+      { name: 'Content-Range', value: 'bytes 100-199/9000000' },
+    ],
+  });
+  await flush();
+  r = await send(chrome, { type: 'ms-get-items', tabId: 7 });
+  const rangeTotal = r.items.find(function (i) { return i.url.indexOf('range-total.mp4') >= 0; });
+  eq(rangeTotal && rangeTotal.size, 9000000, 'Meta full URL uses Content-Range total size');
+
+  wr({
+    statusCode: 200,
+    url: 'https://scontent.example/o1/range-unknown.mp4?sig=range-unknown&bytestart=200&byteend=299',
+    tabId: 7, initiator: 'https://www.instagram.com/', type: 'media',
+    responseHeaders: [
+      { name: 'Content-Type', value: 'video/mp4' },
+      { name: 'Content-Length', value: '600000' },
+    ],
+  });
+  await flush();
+  r = await send(chrome, { type: 'ms-get-items', tabId: 7 });
+  const rangeUnknown = r.items.find(function (i) { return i.url.indexOf('range-unknown.mp4') >= 0; });
+  eq(rangeUnknown && rangeUnknown.size, 0, 'Meta full URL uses zero when range total is unknown');
+
   // tiny media (< 500KB) is filtered as noise (VDH rule)
   wr({
     statusCode: 200, url: 'https://cdn.example.com/ad.mp4', tabId: 7,
@@ -897,6 +929,98 @@ async function run() {
     await flush(); await flush();
     ok('SERVER_BAD_CONTENT triggers fallback retry',
        c2.__swFetchLog.some(function (u) { return u.indexOf('clip.mp4') >= 0; }));
+  }
+
+  // A video response under an /hls/ path is still direct media when its MIME
+  // says video/mp4; the path alone must not send it through playlist parsing.
+  {
+    const hlsPathVideoUrl = 'https://cdn.example.com/hls/clip.mp4?sig=direct';
+    wr({
+      statusCode: 200, url: hlsPathVideoUrl, tabId: 7,
+      initiator: 'https://site.example.com/', type: 'media',
+      responseHeaders: [
+        { name: 'content-type', value: 'video/mp4' },
+        { name: 'content-length', value: '5000000' },
+      ],
+    });
+    await settle();
+    r = await send(chrome, { type: 'ms-get-items', tabId: 7 });
+    const hlsPathVideo = r.items.find(function (i) { return i.url === hlsPathVideoUrl; });
+    ok(!!hlsPathVideo, '/hls/*.mp4 with video MIME is detected as direct media');
+    eq(hlsPathVideo && hlsPathVideo.kind, 'video', '/hls/*.mp4 remains video kind');
+  }
+
+  // Captured player credentials of any supported kind must bypass the bare
+  // chrome.downloads request from the start, not wait for an interruption.
+  {
+    for (const headerName of ['Referer', 'Origin', 'Authorization']) {
+      const authChrome = makeChrome();
+      const authCtx = makeContext(authChrome);
+      vm.runInContext(logicSrc, authCtx);
+      vm.runInContext(bgSrc, authCtx);
+      const authUrl = 'https://video.example.com/auth-header-' + headerName + '.mp4';
+      const authOrigFetch = authCtx.fetch;
+      authCtx.fetch = function (url, opts) {
+        authChrome.__swFetchLog.push(url);
+        authChrome.__swFetchOpts.push({ url: url, opts: opts || {} });
+        if (url === authUrl) {
+          return Promise.resolve({ ok: true, arrayBuffer: function () { return Promise.resolve(new ArrayBuffer(5000)); } });
+        }
+        return authOrigFetch(url, opts);
+      };
+      authChrome.__listeners.onSendHeaders[0]({
+        url: authUrl, initiator: 'https://site.example.com/',
+        requestHeaders: [{ name: headerName, value: 'captured-' + headerName }],
+      });
+      await send(authChrome, { type: 'ms-download', item: {
+        url: authUrl, kind: 'video', contentType: 'video/mp4', size: 5000000,
+      } }, { tab: { id: 7 } });
+      await flush(); await flush(); await flush();
+      eq(authChrome.downloads.__downloads.length, 1, headerName + ' auth download has one attempt');
+      ok(authChrome.downloads.__downloads[0].opts.url.indexOf('blob:') === 0,
+        headerName + ' auth download starts through offscreen blob');
+      const authFetch = authChrome.__swFetchOpts.find(function (entry) { return entry.url === authUrl; });
+      eq(authFetch && authFetch.opts.headers && authFetch.opts.headers[headerName],
+        'captured-' + headerName, headerName + ' is replayed on first fetch');
+    }
+  }
+
+  // Core regression: DASH MIME wins over an /hls/ path, and an extensionless
+  // DASH item must keep its explicit kind when the save route is selected.
+  {
+    const extensionlessDashUrl = 'https://cdn.example.com/hls/extensionless-stream?sig=1';
+    const extensionlessDashText =
+      '<MPD mediaPresentationDuration="PT1.0S"><Period>' +
+      '<AdaptationSet contentType="video"><Representation id="v" mimeType="video/mp4" bandwidth="1">' +
+      '<SegmentTemplate timescale="1" duration="1" initialization="https://cdn.example.com/hls/extensionless/init.m4s" media="https://cdn.example.com/hls/extensionless/seg$Number$.m4s"/>' +
+      '</Representation></AdaptationSet></Period></MPD>';
+    ctxRef.fetch = function (url, opts) {
+      if (url === extensionlessDashUrl) {
+        return Promise.resolve({ ok: true, text: function () { return Promise.resolve(extensionlessDashText); } });
+      }
+      if (url.indexOf('/hls/extensionless/') >= 0) {
+        return Promise.resolve({ ok: true, arrayBuffer: function () { return Promise.resolve(new ArrayBuffer(8)); } });
+      }
+      return origFetch(url, opts);
+    };
+    const dashBuildCount = chrome.__dashBuilds.length;
+    wr({
+      statusCode: 200, url: extensionlessDashUrl, tabId: 7,
+      initiator: 'https://site.example.com/', type: 'xmlhttprequest',
+      responseHeaders: [{ name: 'content-type', value: 'application/dash+xml' }],
+    });
+    await settle();
+    r = await send(chrome, { type: 'ms-get-items', tabId: 7 });
+    const extensionlessDash = r.items.find(function (i) { return i.url === extensionlessDashUrl; });
+    ok(!!extensionlessDash, 'DASH MIME is not shadowed by /hls/ path heuristic');
+    eq(extensionlessDash && extensionlessDash.kind, 'dash', 'extensionless DASH item keeps dash kind');
+    const extensionlessSave = await send(chrome, {
+      type: 'ms-hls-download', url: extensionlessDashUrl, kind: 'dash',
+      title: 'Extensionless DASH', dashEntry: 0, dashType: 'video',
+    }, { tab: { id: 7 } });
+    ok(extensionlessSave && extensionlessSave.queued, 'extensionless DASH save uses DASH pipeline');
+    ok(chrome.__dashBuilds.length > dashBuildCount, 'extensionless DASH save reached dash builder');
+    ctxRef.fetch = origFetch;
   }
 
   report('background');
