@@ -32,7 +32,8 @@ const MediaSniperSecurity = (function () {
   ]);
   const EXTENSION_INTERNAL_TYPES = new Set(['ms-offscreen-progress', 'ms-hls-progress']);
   const ALLOWED_KINDS = new Set(['video', 'audio', 'hls', 'hls-audio', 'dash', 'ts']);
-  const ALLOWED_VIA = new Set(['element', 'blob-size', 'youtube', 'metadata']);
+  const ALLOWED_VIA = new Set(['element', 'blob-size', 'youtube', 'metadata', 'page-data']);
+  const MANIFEST_EXTENSIONS = /\.(m3u8|mpd)(?:$|[?#])/i;
 
   function originOf(url) {
     try {
@@ -176,6 +177,19 @@ const MediaSniperSecurity = (function () {
     } catch (_) { return false; }
   }
 
+  // A URL the page's own resource timing named: media file or manifest. The
+  // manifest case is why this exists - the reference implementation learns such
+  // URLs from a per-site adapter; here the page tells us itself, without any
+  // host permission beyond the page's own origin.
+  function pageDataReportIsConcrete(raw, url) {
+    if (!raw || raw.via !== 'page-data') return true;
+    if (!isAllowedMediaUrl(url)) return false;
+    try {
+      const path = new URL(String(url)).pathname || '';
+      return MANIFEST_EXTENSIONS.test(path) || MEDIA_EXTENSIONS.test(path);
+    } catch (_) { return false; }
+  }
+
   function metadataReportIsConcrete(raw, url) {
     if (!raw || raw.via !== 'metadata') return true;
     const ct = String(raw.contentType || '').toLowerCase().split(';')[0].trim();
@@ -204,6 +218,7 @@ const MediaSniperSecurity = (function () {
 
     const url = String(raw.url);
     if (!metadataReportIsConcrete(raw, url)) return null;
+    if (!pageDataReportIsConcrete(raw, url)) return null;
 
     if (via === 'youtube') {
       const senderHost = hostOf(senderUrl);

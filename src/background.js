@@ -136,6 +136,8 @@ function normalizeItem(raw, tabId) {
       (!L.isYouTubeMediaUrl(url) || (raw.audioUrl && !L.isYouTubeMediaUrl(raw.audioUrl)))) return null;
   if (raw.via === 'metadata' && typeof L.isConcreteMetadataUrl === 'function' &&
       !L.isConcreteMetadataUrl(url, raw.contentType || null)) return null;
+  if (raw.via === 'page-data' && typeof L.isConcretePageDataUrl === 'function' &&
+      !L.isConcretePageDataUrl(url)) return null;
   // Page-created blob URLs (MSE players, X above all) are revoked by the page
   // the moment playback context changes; downloading one reliably fails with
   // SERVER_CANCELED and Chrome surfaces it as "check your internet

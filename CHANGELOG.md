@@ -1,5 +1,38 @@
 # Changelog
 
+## v0.13.3 (2026-09-16)
+
+### Added
+
+- Media is now detected from the page's own resource timing, which is what
+  replaces a per-site adapter. The reference implementation ships a content
+  script per site (facebook, instagram, vk, ok.ru, bilibili, iq, canva,
+  chaturbate, twitcasting, vimeo, kick) whose job is to learn the URL a player
+  keeps out of the DOM. Two cases made that necessary here: a player feeding a
+  MediaSource never puts its manifest anywhere the DOM scan can see, and a
+  request to a host the user has not granted is invisible to `webRequest` — the
+  reference implementation does not have that limit because it ships
+  `host_permissions: ["<all_urls>"]`. Reading `performance.getEntriesByType(
+  "resource")` (plus a buffered `PerformanceObserver`) names every request the
+  page made, cross-origin included, without touching a single page global.
+
+  Verified in a real browser: a page whose player requests a manifest on an
+  un-granted host now yields that manifest as an item (`via: page-data`, kind
+  `hls`), and saving it offers the host grant as usual.
+
+- A measured site matrix (`scripts/e2e_site_matrix.py`) that reports, per site,
+  what the extension detected, what the page's own player did, and whether the
+  page was a login or bot wall — so a zero result can be attributed instead of
+  guessed at. Current headless results: kick.com 5 items (live HLS included),
+  facebook.com 1 item; vimeo.com is a bot wall and x.com/instagram/bilibili/ok.ru
+  never start a player without a session, so a zero there says nothing about the
+  extension.
+
+### Notes
+
+- Sites whose player only works after login (facebook/instagram/x) cannot be
+  measured headlessly; they are marked as unverified rather than claimed.
+
 ## v0.13.2 (2026-09-16)
 
 ### Fixed

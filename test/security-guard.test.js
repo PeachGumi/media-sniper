@@ -240,4 +240,25 @@ eq(S.responseLooksMedia({ statusCode: 403, url: 'https://a.example/video.mp4', r
   globalThis.fetch = oldFetch;
 }
 
+  // A manifest a player never puts in the DOM arrives as page-data: the sender
+  // is the content script of a real page, and the URL must still be a media file
+  // or a manifest (never a segment).
+  const pageSender = { id: 'extid', tab: { id: 4, url: 'https://page.example.com/watch' }, url: 'https://page.example.com/watch' };
+  const pageDataOk = S.normalizeInboundMessage({
+    type: 'ms-report',
+    items: [{ url: 'https://media.example.net/master.m3u8?sig=1', kind: 'hls', via: 'page-data' }],
+  }, pageSender, 'extid');
+  eq(pageDataOk.ok, true, 'page-data report accepted from a content script');
+  eq((pageDataOk.msg.items || []).length, 1, 'page-data manifest survives sanitising');
+  const pageDataSeg = S.normalizeInboundMessage({
+    type: 'ms-report',
+    items: [{ url: 'https://media.example.net/v/seg0.ts', kind: 'video', via: 'page-data' }],
+  }, pageSender, 'extid');
+  eq((pageDataSeg.msg.items || []).length, 0, 'page-data segment is dropped');
+  const pageDataJunk = S.normalizeInboundMessage({
+    type: 'ms-report',
+    items: [{ url: 'https://page.example.com/app.js', kind: 'video', via: 'page-data' }],
+  }, pageSender, 'extid');
+  eq((pageDataJunk.msg.items || []).length, 0, 'page-data non-media URL is dropped');
+
 report('security-guard');

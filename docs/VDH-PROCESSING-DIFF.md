@@ -189,6 +189,22 @@ media sniper では `ffmpeg job failed: ffmpeg failed (rc=-1)` になった。�
 残る制約: **ライブ playlist** は ffmpeg が再読取する必要があるためストリーム URL のまま渡す。
 ルート相対 URI を使うライブ配信は今回の修正の対象外 (ビルド依存の制約で、いまは検出時にしか直せない)。
 
+## 2026-09-16 に埋めた差 (第4弾: サイト別アダプタの置き換え)
+
+13. **サイト別アダプタ** → VDH は sites ごとの content script (facebook / instagram / vk /
+    ok.ru / bilibili / iq / canva / chaturbate / twitcasting / vimeo / kick / youtube) を持ち、
+    プレイヤーが DOM に出さないメディア URL を拾う。media sniper 側にこれが無い理由は2つ:
+    (a) MSE プレイヤーはマニフェストを DOM に置かない、(b) **許可していないホストへの要求は
+    webRequest に見えない** (VDH は `<all_urls>` なのでこの制約が無い)。
+    対策として、ページ自身の **resource timing** (`performance.getEntriesByType('resource')` +
+    buffered `PerformanceObserver`) を読む汎用経路を追加した。ページのグローバルは一切書き換えない。
+    実測: 許可していないホストのマニフェストが `via: page-data` / kind `hls` として検出され、
+    保存時は従来どおりそのホストの許可を1クリック要求する。
+14. **実測用サイトマトリクス** → `scripts/e2e_site_matrix.py` が「拡張の検出数 / ページの再生状態 /
+    ログイン・bot壁」を並べて出す。ヘッドレス実測 (ログインなし): kick.com 5件 (ライブHLS含む)、
+    facebook.com 1件。vimeo は bot壁、x.com / instagram / bilibili / ok.ru はセッション無しでは
+    プレイヤーが起動しないため、0件は拡張の能力の証拠にならない。
+
 ## 残差
 
 - **字幕 (12)**: 未対応。しかも現行 libav 成果物には **エンコーダが 1 つも入っていない** (`--enable-encoder=...` が configure に無い) ため、`-c:s mov_text` が使えない。実装するには (a) libav を `--enable-encoder=mov_text` (および入力側の webvtt parser/decoder) 付きで再ビルドして PROVENANCE / THIRD_PARTY_NOTICES を更新し、(b) variant の `SUBTITLES` グループ解析 → 字幕レンディションを OPFS の `.vtt` に組み立て → device 入力として `-map 2:s:0 -c:s mov_text -metadata:s:s:0 language=...` を付与する、の 2 段階が必要。VP9/AV1 など他コーデックの再エンコードが必要な用途にも同じ前提が効く。

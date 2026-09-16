@@ -162,7 +162,7 @@ async def find_target(base, predicate, seconds=40):
     return None
 
 
-async def attempt_save(fixture_root, fixture_port, extra_origin, grant_and_retry=False):
+async def attempt_save(fixture_root, fixture_port, extra_origin, grant_and_retry=False, detect_only=False):
     """Launch a browser with the given host grant and try to save the
     cross-origin HLS manifest. Returns a dict describing the outcome.
 
@@ -217,6 +217,23 @@ async def attempt_save(fixture_root, fixture_port, extra_origin, grant_and_retry
             outcome["error"] = "no popup context"
             return outcome
         popup_ws = popup["webSocketDebuggerUrl"]
+
+        if detect_only:
+            # The page plays (or at least requests) a manifest on a host the
+            # extension has NOT been granted: webRequest cannot see that request,
+            # so only the page's own resource timing can name it. That is the
+            # mechanism that replaces a per-site adapter.
+            await asyncio.sleep(8)
+            raw = await evaluate(popup_ws, """
+              (() => new Promise(function (resolve) {
+                chrome.runtime.sendMessage({type: 'ms-get-items', tabId: %d},
+                  function (resp) { resolve(JSON.stringify((resp && resp.items) || [])); });
+              }))()
+            """ % (tab_id or 0), timeout=30)
+            items = json.loads(raw) if raw else []
+            outcome["items"] = items
+            outcome["detected"] = [i for i in items if MEDIA_HOST in str(i.get("url", ""))]
+            return outcome
 
         playlist = f"http://{MEDIA_HOST}:{fixture_port}/hls/media.m3u8"
         started = await evaluate(popup_ws, """
@@ -335,6 +352,18 @@ async def main():
              json.dumps(with_grant.get("download")))
         step("B: artifact has bytes", (with_grant.get("saved") or {}).get("size", 0) > 0,
              json.dumps(with_grant.get("saved")))
+
+        print("=== phase D: detection without a grant (page resource timing) ===", flush=True)
+        detected_run = await attempt_save(fixture_root, fixture_port, None, detect_only=True)
+        detected = detected_run.get("detected") or []
+        step("D: the ungranted-host manifest is detected", bool(detected),
+             json.dumps([i.get("url") for i in (detected_run.get("items") or [])], ensure_ascii=False)[:300])
+        step("D: it arrives as page data, not from webRequest",
+             bool(detected) and detected[0].get("via") == "page-data",
+             json.dumps(detected[:1], ensure_ascii=False)[:200])
+        step("D: it is classified as HLS",
+             bool(detected) and detected[0].get("kind") == "hls",
+             json.dumps(detected[:1], ensure_ascii=False)[:200])
 
         print("=== phase C: the popup offers the grant for the blocked host ===", flush=True)
         blocked_run = await attempt_save(fixture_root, fixture_port, None, grant_and_retry=True)

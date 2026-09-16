@@ -93,6 +93,17 @@ var MediaSniperLogic = globalThis.MediaSniperLogic || (function () {
     return true;
   }
 
+  // A URL observed in the page's own resource timing: a media file or a
+  // manifest (which the metadata rule above deliberately refuses, because a
+  // metadata hint is not allowed to be a manifest).
+  function isConcretePageDataUrl(url) {
+    if (!isSafeMediaUrl(url)) return false;
+    const raw = String(url || '');
+    if (/\.(m3u8|mpd)(?:$|[?#])/i.test(raw)) return !isSegmentUrl(raw);
+    const kind = kindFromContentType(null, raw);
+    return (kind === 'video' || kind === 'audio') && !isSegmentUrl(raw);
+  }
+
   function sanitizeFilename(name, fallback) {
     let s = String(name == null ? '' : name);
     s = s.replace(/[\/\\:*?"<>|]/g, '_').trim();
@@ -971,6 +982,7 @@ var MediaSniperLogic = globalThis.MediaSniperLogic || (function () {
     playlistDuration: playlistDuration,
     isDedicatedSite: isDedicatedSite,
     rewriteHlsUrisAbs: rewriteHlsUrisAbs,
+    isConcretePageDataUrl: isConcretePageDataUrl,
     parseMpdTracks: parseMpdTracks,
     parseMpdSegments: parseMpdSegments,
     MIN_DIRECT_MEDIA_SIZE: MIN_DIRECT_MEDIA_SIZE,

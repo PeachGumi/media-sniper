@@ -3,7 +3,12 @@
  * Injected via content-script <script> injection (web_accessible_resources),
  * runs in the MAIN world.
  *
- * Deliberately does NOT wrap window.fetch or XMLHttpRequest:
+ * Deliberately does NOT wrap window.fetch or XMLHttpRequest: it reads the
+ * page's own resource timing instead, which names every request the page made
+ * (cross-origin included) without changing any page global. That is how a
+ * manifest a player keeps out of the DOM is discovered here - the job the
+ * reference implementation gives a per-site adapter.
+ *
  *  - detection of http(s) media is fully covered by the background
  *    webRequest.onResponseStarted listener (same coverage, zero page risk);
  *  - a fetch wrapper becomes the blamed frame for the page's own failing
@@ -212,6 +217,71 @@
     emit(payload);
   }
 
+  // ---- page resource timing -------------------------------------------------
+  // Players that feed a MediaSource never put the manifest in the DOM, and the
+  // extension cannot see requests to hosts the user has not granted. The page's
+  // own resource timing has both: it lists every subresource URL, cross-origin
+  // included, and reading it touches nothing.
+  var seenResources = Object.create(null);
+  var RESOURCE_REPORT_MAX = 12;
+
+  function mediaFromResourceUrl(url) {
+    var raw = String(url || '');
+    if (!/^https?:/i.test(raw)) return null;
+    // A page fetches hundreds of segments; only the manifest (or a whole file)
+    // is worth reporting. .ts/.m4s already classify as segments, but audio
+    // chunks (.aac) would otherwise look like media.
+    try { if (typeof L.isSegmentUrl === 'function' && L.isSegmentUrl(raw)) return null; } catch (_) { /* ignore */ }
+    if (/\.mpd(?:$|[?#])/i.test(raw)) return 'dash';
+    if (/\.m3u8(?:$|[?#])/i.test(raw)) return 'hls';
+    var classified = null;
+    try { classified = L.classifyUrl(raw); } catch (_) { classified = null; }
+    if (classified && (classified.kind === 'video' || classified.kind === 'audio')) return classified.kind;
+    return null;
+  }
+
+  function reportResourceUrl(url, pageTitle) {
+    if (Object.keys(seenResources).length >= RESOURCE_REPORT_MAX) return;
+    if (seenResources[url]) return;
+    var kind = mediaFromResourceUrl(url);
+    if (!kind) return;
+    seenResources[url] = true;
+    emit({
+      source: MARKER,
+      type: 'media',
+      url: url,
+      kind: kind,
+      via: 'page-data',
+      pageUrl: location.href,
+      title: pageTitle || document.title || null,
+    });
+  }
+
+  function scanResourceTiming() {
+    var entries = null;
+    try {
+      if (typeof performance === 'undefined' || typeof performance.getEntriesByType !== 'function') return;
+      entries = performance.getEntriesByType('resource');
+    } catch (_) { return; }
+    for (var i = 0; i < (entries || []).length; i++) {
+      try { reportResourceUrl(entries[i].name, null); } catch (_) { /* ignore */ }
+    }
+  }
+
+  function watchResourceTiming() {
+    try {
+      if (typeof PerformanceObserver !== 'function') return;
+      var observer = new PerformanceObserver(function (list) {
+        var items = list.getEntries ? list.getEntries() : [];
+        for (var i = 0; i < items.length; i++) {
+          try { reportResourceUrl(items[i].name, null); } catch (_) { /* ignore */ }
+        }
+      });
+      // buffered: entries recorded before the observer existed still arrive.
+      observer.observe({ type: 'resource', buffered: true });
+    } catch (_) { /* older engine: the interval scan still runs */ }
+  }
+
   function scanPageMetadata(force) {
     if (!PM || typeof PM.collect !== 'function') {
       scanVideoEls(force, '', null);
@@ -238,7 +308,10 @@
   try {
     // Do not wait two seconds for the first pass after injection/navigation.
     scanPageMetadata(false);
-    var iv = setInterval(function () { scanPageMetadata(false); }, 2000);
+    scanResourceTiming();
+    watchResourceTiming();
+    setTimeout(scanResourceTiming, 1500);
+    var iv = setInterval(function () { scanPageMetadata(false); scanResourceTiming(); }, 2000);
     setTimeout(function () { clearInterval(iv); }, 5 * 60 * 1000);
   } catch (e) { /* ignore */ }
 

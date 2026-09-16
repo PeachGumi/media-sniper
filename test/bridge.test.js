@@ -128,6 +128,58 @@ async function run() {
   });
   eq(posted.length, beforeLen, 'foreign messages ignored');
 
+  // ---- page resource timing -------------------------------------------------
+  // A player that feeds a MediaSource never shows the manifest in the DOM, and
+  // requests to hosts the user has not granted are invisible to webRequest. The
+  // page's own resource timing has both, which is what replaces a per-site
+  // adapter here. A fresh context is built so the entries exist at injection.
+  const rtPosted = [];
+  const rtCtx = {
+    posted: rtPosted,
+    elements: [],
+    console,
+    URL,
+    Promise,
+    document: { querySelectorAll: function () { return []; }, title: 'RT page' },
+    location: { href: 'https://page.example.com/watch/9' },
+    performance: {
+      getEntriesByType: function (type) {
+        if (type !== 'resource') return [];
+        return [
+          { name: 'https://media.example.net/stream/master.m3u8?token=abc' },
+          { name: 'https://media.example.net/stream/seg0.ts' },
+          { name: 'https://media.example.net/audio/chunk_1_0_a.aac' },
+          { name: 'https://media.example.net/movie.mp4' },
+          { name: 'https://page.example.com/app.js' },
+          { name: 'blob:https://page.example.com/uuid-9' },
+          { name: 'https://media.example.net/manifest.mpd' },
+        ];
+      },
+    },
+    setTimeout: function (fn) { if (typeof fn === 'function') fn(); return 1; },
+    setInterval: function () { return 1; },
+    clearInterval: function () {},
+    addEventListener: function () {},
+    postMessage: function (data) { rtPosted.push(data); },
+  };
+  rtCtx.window = rtCtx;
+  rtCtx.globalThis = rtCtx;
+  vm.createContext(rtCtx);
+  vm.runInContext(logicSrc, rtCtx);
+  vm.runInContext(bridgeSrc, rtCtx);
+  const rtMedia = rtPosted.filter(function (m) { return m && m.type === 'media'; });
+  eq(rtMedia.length, 3, 'resource timing reports manifest and whole-file media only');
+  eq(rtMedia.some(function (m) { return m.url.indexOf('master.m3u8') >= 0 && m.kind === 'hls' && m.via === 'page-data'; }), true,
+    'an HLS manifest found in resource timing is reported as page data');
+  eq(rtMedia.some(function (m) { return m.url.indexOf('manifest.mpd') >= 0 && m.kind === 'dash'; }), true,
+    'a DASH manifest found in resource timing is reported as page data');
+  eq(rtMedia.some(function (m) { return m.url.indexOf('movie.mp4') >= 0 && m.kind === 'video'; }), true,
+    'a whole media file found in resource timing is reported');
+  eq(rtMedia.some(function (m) { return /\.ts$|\.aac$/.test(m.url); }), false,
+    'segments never become items');
+  eq(rtMedia.some(function (m) { return m.url.indexOf('blob:') === 0; }), false,
+    'blob handles are not items');
+
   report('bridge');
 }
 
