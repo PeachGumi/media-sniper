@@ -24,6 +24,8 @@ class FakeFile extends FakeBlob {
   }
 }
 
+const ttlCallbacks = [];
+
 let nextUrl = 1;
 const revoked = [];
 let pagehide = null;
@@ -58,7 +60,7 @@ const context = vm.createContext({
       body: { cancel: async function () { cancelled = true; } },
     };
   },
-  setTimeout: function () { return 123; },
+  setTimeout: function (fn) { if (typeof fn === 'function') ttlCallbacks.push(fn); return 123; },
   clearTimeout: function () {},
   addEventListener: function (type, fn) { if (type === 'pagehide') pagehide = fn; },
   module: { exports: {} },
@@ -105,6 +107,28 @@ eq(runtimeListeners.length, 1, 'policy installs explicit revoke listener');
   let residentUrlThrew = false;
   try { context.URL.createObjectURL(resident); } catch (e) { residentUrlThrew = e && e.name === 'RangeError'; }
   ok(residentUrlThrew, 'in-memory Blob above the ceiling gets no URL');
+}
+
+// The TTL is the last line of defence for an artifact whose download never
+// settles. It must release through the *current* revoke path: layers above the
+// policy delete their temporary file there, so revoking natively left the file
+// on disk until the document was torn down.
+{
+  const seen = [];
+  const previousRevoke = context.URL.revokeObjectURL;
+  context.URL.revokeObjectURL = function (url) {
+    seen.push(url);
+    return previousRevoke.call(context.URL, url);
+  };
+  const url = context.URL.createObjectURL(new context.Blob([new Uint8Array(8)]));
+  eq(context.MediaSniperMemoryPolicy.ownsUrl(url), true, 'TTL case owns its URL');
+  const ttl = ttlCallbacks[ttlCallbacks.length - 1];
+  eq(typeof ttl, 'function', 'TTL timer is registered for the artifact URL');
+  ttl();
+  ok(seen.indexOf(url) >= 0, 'TTL expiry goes through the current revoke path so disk cleanup runs');
+  eq(context.MediaSniperMemoryPolicy.ownsUrl(url), false, 'TTL expiry drops ownership');
+  ok(revoked.indexOf(url) >= 0, 'TTL expiry still revokes the native URL');
+  context.URL.revokeObjectURL = previousRevoke;
 }
 
 {

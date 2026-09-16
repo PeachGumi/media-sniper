@@ -18,12 +18,33 @@
 - An in-memory artifact is now capped at 768 MiB only when the disk-backed path
   is unavailable; OPFS Files are exempt because the storage quota, not the JS
   heap, governs them.
+- A save that can never complete (interrupted blob artifact, or a restored job
+  whose download state is gone) now releases its artifact URL, which is what
+  deletes the temporary OPFS file. Previously a failed save of a multi-gigabyte
+  item kept that file until the offscreen document went away, and the artifact
+  URL's 30-minute expiry revoked natively without running that cleanup.
+- A tick of the progress timer no longer relies on an API the bundled libav
+  build does not have, so the popup can no longer sit at "0s / 0B" for the whole
+  job.
 
 ### Changed
 
 - DASH video+audio muxing writes its result through the same disk-backed sink.
 - Segment assembly keeps an in-memory (typed) artifact only up to 256 MiB;
   larger assemblies stay disk-backed instead of being read back into the heap.
+- The disk-backed writer fails explicitly when the file system stops draining
+  its queue (queued writes exceeding 512 MiB) or reports an unusable output
+  offset, instead of queueing the artifact in the renderer's heap.
+- Contiguous muxer chunks are merged into one file-system write per 8 MiB. One
+  write call per muxer chunk could not keep up with a 1.2 GB remux (it backlogged
+  hundreds of megabytes); merging keeps the queue near a single batch again.
+
+### Notes
+
+- Assembly paths that still need one in-memory artifact keep their documented
+  limits: audio-only ADTS concat / remote fallback / single-track DASH up to
+  768 MiB, DASH video+audio mux input up to 384 MiB combined. These are now
+  described accurately in README and docs/MEMORY.md.
 
 ## v0.12.4 (2026-09-15)
 

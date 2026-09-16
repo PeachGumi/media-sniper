@@ -20,6 +20,7 @@ class FakeHandle {
     const self = this;
     return {
       async write(chunk) {
+        if (stallWrites) return new Promise(function () { /* file system never drains */ });
         if (chunk && chunk.type === 'write') {
           self.writes.push({ position: chunk.position, data: Uint8Array.from(chunk.data) });
           const end = Number(chunk.position) + chunk.data.byteLength;
@@ -47,6 +48,8 @@ class FakeHandle {
 // A "big" artifact is only counted, never materialized: sparse mode keeps the
 // fake browser process from allocating the equivalent of the real file.
 let sparseWrites = false;
+// A stalled file system: writes never settle, so the sink's queue grows.
+let stallWrites = false;
 
 const files = new Map();
 const removed = [];
@@ -285,7 +288,9 @@ function dispatch(msg) {
   // Artifacts far beyond the in-memory guard stream through untouched. Only
   // offsets are tracked, so this asserts the accounting without allocating.
   sparseWrites = true;
-  const bigSink = await policy.createOutputSink('mp4');
+  // The 900 MiB artifact is accounted for with tiny chunks, so this sink gets an
+  // explicit budget instead of the production queue cap.
+  const bigSink = await policy.createOutputSink('mp4', 2048 * 1024 * 1024);
   const chunk = new Uint8Array(1024 * 1024);
   for (let i = 0; i < 900; i++) bigSink.write('out.mp4', i * chunk.byteLength, chunk);
   eq(bigSink.bytes(), 900 * 1024 * 1024, 'sink tracks a 900 MiB artifact');
@@ -294,6 +299,47 @@ function dispatch(msg) {
   eq(bigFinished.size, 900 * 1024 * 1024, 'oversized artifact is finalized from disk, not from a Blob');
   sparseWrites = false;
   context.URL.revokeObjectURL(bigFinished.url);
+
+  // A stalled file system must fail the job instead of queueing the artifact in
+  // the heap. The budget is injectable so the test can trip it without
+  // allocating hundreds of megabytes.
+  stallWrites = true;
+  const cappedSink = await policy.createOutputSink('mp4', 4096);
+  cappedSink.write('out.mp4', 0, new Uint8Array(1024));
+  eq(cappedSink.pendingBytes(), 1024, 'queued write bytes are accounted for');
+  cappedSink.write('out.mp4', 1024, new Uint8Array(4096));
+  ok(cappedSink.pendingBytes() > 4096, 'pending bytes can exceed the budget');
+  let capError = null;
+  try { await cappedSink.finish(); } catch (e) { capError = e; }
+  ok(capError && /cannot keep up/.test(capError.message), 'a stalled writer fails the job instead of hanging');
+  ok(removed.indexOf(cappedSink.name) >= 0, 'stalled artifact is discarded from OPFS');
+  stallWrites = false;
+
+  // An offset that cannot be trusted must be reported, never guessed.
+  const offsetSink = await policy.createOutputSink('mp4');
+  offsetSink.write('out.mp4', NaN, new Uint8Array(4));
+  eq(offsetSink.bytes(), 0, 'an invalid offset writes nothing');
+  let offsetError = null;
+  try { await offsetSink.finish(); } catch (e) { offsetError = e; }
+  ok(offsetError && /invalid output offset/.test(offsetError.message), 'an invalid muxer offset fails the job');
+
+  // Muxer chunks are merged into one file-system write per contiguous run: one
+  // round trip per muxer chunk could not keep up with a real 1.2 GB remux.
+  const batchSink = await policy.createOutputSink('mp4');
+  const batchHandle = files.get(batchSink.name);
+  batchSink.write('out.mp4', 0, new Uint8Array([1, 2]));
+  batchSink.write('out.mp4', 2, new Uint8Array([3, 4, 5]));
+  eq(batchHandle.writes.length, 0, 'contiguous chunks are merged instead of written one by one');
+  batchSink.write('out.mp4', 1000, new Uint8Array([9]));
+  await new Promise(function (resolve) { setImmediate(resolve); });
+  eq(batchHandle.writes.length, 1, 'a non-contiguous offset flushes the merged run first');
+  eq(batchHandle.writes[0].position, 0, 'merged run keeps its start offset');
+  eq(Array.from(batchHandle.writes[0].data).join(','), '1,2,3,4,5', 'merged run holds every chunk in order');
+  const batchFinished = await batchSink.finish();
+  eq(batchHandle.writes.length, 2, 'the tail of the artifact is flushed on finish');
+  eq(batchHandle.writes[1].position, 1000, 'flushed tail keeps its offset');
+  eq(batchFinished.size, 1001, 'batched artifact reports its final size');
+  context.URL.revokeObjectURL(batchFinished.url);
 
   report('offscreen-streaming');
 })().catch(function (e) {

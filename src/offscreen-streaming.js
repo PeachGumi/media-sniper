@@ -24,6 +24,14 @@
   // Attaching a MIME type to a disk-backed artifact costs a full heap copy.
   // Above this the artifact is handed to Downloads as the OPFS File itself.
   const MAX_TYPED_BLOB_BYTES = 256 * MiB;
+  // Queued-but-unwritten bytes for the ffmpeg output sink. The file system
+  // drains every queued write in order, so this only trips when it cannot keep
+  // up with the muxer (exhausted quota, stalled disk); failing loudly there is
+  // better than quietly queueing the whole artifact in the renderer's heap.
+  const MAX_PENDING_WRITE_BYTES = 512 * MiB;
+  // Contiguous muxer writes are merged up to this size before being handed to
+  // the file system: one round trip per 8 MiB instead of one per muxer chunk.
+  const FLUSH_BYTES = 8 * MiB;
   const TEMP_PREFIX = 'media-sniper-';
 
   const nativeAddListener = chrome.runtime.onMessage.addListener.bind(chrome.runtime.onMessage);
@@ -321,23 +329,56 @@
   //
   // ffmpeg's writer device reports every write as (name, position, bytes), so
   // the same writes can be handed to the file system as they are produced.
-  // Peak memory stays at one chunk, the artifact never has to be materialized,
-  // and the resulting File URL is a disk-backed object that
+  // Heap use is bounded by the queued-write budget (writes drain in order, so a
+  // healthy file system keeps the queue near one chunk; a stalled one trips the
+  // budget and fails the job instead of hoarding the artifact in memory).
+  // The artifact never has to be materialized, and the resulting File URL is a
+  // disk-backed object that
   // chrome.downloads.download streams without reading it back into the heap
   // (verified in real Brave with a 900 MiB OPFS file).
   // -------------------------------------------------------------------------
-  async function createOutputSink(ext) {
+  async function createOutputSink(ext, pendingBudget) {
     if (!hasOpfs()) return null;
     const temp = await createTemp(ext);
     const writable = await temp.handle.createWritable();
-    const state = { highest: 0, writes: 0, pending: 0, maxPending: 0, error: null, closed: false };
+    const maxPendingBytes = Number(pendingBudget) > 0 ? Number(pendingBudget) : MAX_PENDING_WRITE_BYTES;
+    const state = { highest: 0, writes: 0, pending: 0, maxPending: 0, pendingBytes: 0, error: null, closed: false };
     let chain = Promise.resolve();
     let aborted = false;
+    let batch = null; // { at, bytes, parts } - contiguous writes not yet handed over
+
+    // Each write() to a FileSystemWritableFileStream is a round trip to the
+    // browser process. The muxer emits far smaller chunks than that cadence can
+    // absorb (a 1.2 GB remux outpaced a per-chunk queue badly enough to backlog
+    // hundreds of megabytes), so contiguous writes are merged and handed over
+    // as one write per FLUSH_BYTES. Absolute offsets make the merge safe: the
+    // mp4 muxer rewrites its header with a non-contiguous offset, which simply
+    // flushes the current batch first.
+    function flushBatch() {
+      if (!batch) return chain;
+      const current = batch;
+      batch = null;
+      const merged = new Uint8Array(current.bytes);
+      let offset = 0;
+      for (const part of current.parts) {
+        merged.set(part, offset);
+        offset += part.byteLength;
+      }
+      chain = chain.then(function () {
+        return writable.write({ type: 'write', position: current.at, data: merged });
+      }).catch(function (err) {
+        if (!state.error) state.error = err;
+      }).then(function () {
+        state.pendingBytes -= merged.byteLength;
+      });
+      return chain;
+    }
 
     async function abort() {
       if (aborted) return true;
       aborted = true;
       state.closed = true;
+      batch = null;
       try { await writable.abort(); } catch (_) { /* stream already gone */ }
       await removeTemp(temp.name);
       return true;
@@ -347,26 +388,52 @@
       name: temp.name,
       write: function (name, position, data) {
         if (state.closed || state.error) return;
+        const at = Number(position);
+        if (!Number.isFinite(at) || at < 0) {
+          // Guessing an offset here would silently corrupt the artifact.
+          if (!state.error) state.error = new RangeError('media writer received an invalid output offset');
+          return;
+        }
         // Detach from the emscripten heap: libav reuses that memory as soon as
         // the callback returns, and the file-system write is asynchronous.
         const copy = new Uint8Array(data);
-        const at = Number(position) || 0;
+        state.pendingBytes += copy.byteLength;
+        if (state.pendingBytes > maxPendingBytes) {
+          if (!state.error) {
+            state.error = new RangeError(
+              'disk writer cannot keep up with the muxer (queued writes exceed ' +
+              Math.round(maxPendingBytes / MiB) + ' MiB)'
+            );
+          }
+          return;
+        }
         if (at + copy.byteLength > state.highest) state.highest = at + copy.byteLength;
         state.writes++;
-        state.pending++;
-        if (state.pending > state.maxPending) state.maxPending = state.pending;
-        chain = chain.then(function () {
-          return writable.write({ type: 'write', position: at, data: copy });
-        }).catch(function (err) {
-          if (!state.error) state.error = err;
-        }).then(function () {
-          state.pending--;
-        });
+        if (batch && batch.at + batch.bytes === at && batch.bytes + copy.byteLength <= FLUSH_BYTES) {
+          batch.parts.push(copy);
+          batch.bytes += copy.byteLength;
+          return;
+        }
+        flushBatch();
+        batch = { at: at, bytes: copy.byteLength, parts: [copy] };
+        if (batch.bytes >= FLUSH_BYTES) flushBatch();
       },
       bytes: function () { return state.highest; },
       writes: function () { return state.writes; },
-      maxPending: function () { return state.maxPending; },
+      maxPending: function () {
+        const queued = batch ? batch.bytes : 0;
+        return state.maxPending = Math.max(state.maxPending, state.pendingBytes - queued, 0);
+      },
+      pendingBytes: function () { return state.pendingBytes; },
       finish: async function () {
+        // A capped or failed sink must not wait for a queue that the file system
+        // is no longer draining: report the failure instead of hanging the job.
+        if (state.error) {
+          const pendingError = state.error;
+          await abort();
+          throw pendingError;
+        }
+        flushBatch();
         await chain;
         if (state.error) {
           const err = state.error;

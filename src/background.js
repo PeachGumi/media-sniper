@@ -317,17 +317,41 @@ function startOne(entry) {
   startDirect(entry);
 }
 
+// Release an extension-owned artifact URL (a blob URL the offscreen document
+// created for a finished conversion). The offscreen streaming layer deletes the
+// temporary OPFS file behind that URL when it is revoked, so releasing is the
+// only way a save that can no longer complete stops holding gigabytes on disk.
+function releaseArtifactUrl(url) {
+  // Only extension-owned blob URLs carry a temporary OPFS artifact. The
+  // offscreen document re-verifies ownership before releasing anything, so
+  // matching the scheme and host is enough here.
+  if (typeof url !== 'string' || url.indexOf('blob:chrome-extension://') !== 0) return null;
+  try {
+    const sent = chrome.runtime.sendMessage({ type: 'ms-offscreen-revoke-url', url: url });
+    if (sent && typeof sent.catch === 'function') {
+      sent.catch(function () { /* offscreen document already gone: file is cleaned with it */ });
+    }
+  } catch (e) { /* offscreen document already gone */ }
+  return url;
+}
+
 function failDownloadEntry(entry, error) {
   if (!entry || entry.status === 'failed' || entry.status === 'complete') return;
   entry.status = 'failed';
   entry.error = String(error && error.message || error || 'download failed');
   state.active.delete(entry.id);
   if (entry.downloadId != null) state.downloadToItem.delete(entry.downloadId);
+  // A permanently failed save can no longer consume its artifact, and that
+  // artifact is a temporary OPFS file behind an extension-owned blob URL.
+  // Releasing the URL is what deletes the file; without this a failed save of a
+  // multi-gigabyte item kept its file until the offscreen document went away.
+  const released = releaseArtifactUrl(entry.item && entry.item.url);
   if (entry.hlsUrl) {
     const j = state.hlsJobs.get(entry.hlsUrl);
     if (j && (!j.queueEntryId || j.queueEntryId === entry.id)) {
       j.status = 'failed';
       j.error = entry.error;
+      if (released && j.blobUrl === released) j.blobUrl = null;
     }
   }
   pump();

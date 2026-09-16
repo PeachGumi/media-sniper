@@ -79,7 +79,11 @@
     }
     const url = nativeCreateObjectURL(blob);
     const timer = setTimeout(function () {
-      try { nativeRevokeObjectURL(url); } catch (_) { /* already gone */ }
+      // Release through the *current* revoke path, not the native function:
+      // later layers hang their own cleanup off URL.revokeObjectURL (the OPFS
+      // artifact sink deletes its temporary file there), so revoking natively
+      // here left multi-gigabyte artifacts on disk until the document died.
+      try { URL.revokeObjectURL(url); } catch (_) { /* already gone */ }
       ownedUrls.delete(url);
     }, BLOB_URL_TTL_MS);
     ownedUrls.set(url, timer);

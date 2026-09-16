@@ -79,6 +79,10 @@ function makeChrome(sharedStorage, sharedDownloads) {
       lastError: null,
       onMessage: { addListener: function (fn) { listeners.onMessage.push(fn); } },
       sendMessage: function (msg) {
+        if (msg && msg.type === 'ms-offscreen-revoke-url') {
+          chrome.__revokeMessages.push(msg);
+          return Promise.resolve({ ok: true, released: true });
+        }
         // emulate the offscreen document: it fetches bytes ITSELF (the real
         // one never receives bytes over messaging — Brave drops them)
         if (msg && msg.type === 'ms-offscreen-fetch-blob') {
@@ -192,6 +196,7 @@ function makeChrome(sharedStorage, sharedDownloads) {
     __swFetchOpts: swFetchOpts,
     __ffmpegRuns: [],
     __leaseMessages: [],
+    __revokeMessages: [],
     __dashBuilds: [],
     __ffmpegDone: null,
     __ffmpegLiveResolve: null,
@@ -659,6 +664,26 @@ async function run() {
   ok(!!progressJob, 'converting job is listed for other tabs');
   eq(progressJob && progressJob.bytes, 943718400, 'global jobs list reports the same artifact size');
   eq(progressJob && progressJob.fetches, 42, 'global jobs list reports the same fetch activity');
+  // A conversion artifact is a temporary OPFS file behind an extension-owned
+  // blob URL. A save that can never complete must release that URL, otherwise
+  // the file survives until the offscreen document goes away.
+  chrome.__revokeMessages.length = 0;
+  await send(chrome, {
+    type: 'ms-download',
+    item: { url: 'blob:chrome-extension://testextensionid/ffmpeg-remux', kind: 'video', ext: 'mp4', contentType: 'video/mp4', title: 'Big artifact' },
+    tabId: 7,
+  });
+  const artifactDownload = chrome.downloads.__downloads[chrome.downloads.__downloads.length - 1];
+  chrome.__listeners.onChanged.forEach(function (fn) {
+    fn({ id: artifactDownload.id, state: { current: 'interrupted' }, error: { current: 'NETWORK_FAILED' } });
+  });
+  await flush();
+  ok(chrome.__revokeMessages.some(function (m) { return String(m.url).indexOf('blob:chrome-extension://') === 0; }),
+    'a failed save releases its disk-backed artifact so the temporary file is deleted');
+  const artifactQueue = await send(chrome, { type: 'ms-queue-status' });
+  const failedArtifact = artifactQueue.queue.find(function (q) { return String(q.filename).indexOf('Big artifact') >= 0; });
+  eq(failedArtifact && failedArtifact.status, 'failed',
+    'a disk-backed artifact that cannot be re-fetched fails instead of retrying a dead URL');
   // queued download is the blob, with title-based filename
   qs = await send(chrome, { type: 'ms-queue-status' });
   const hlsQ = qs.queue.filter(function (q) { return q.filename.indexOf('HLS Test Video') >= 0; });

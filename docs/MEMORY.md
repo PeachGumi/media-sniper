@@ -42,13 +42,29 @@ Some operations still require the bundled ffmpeg/libav.js runtime:
 These operations are intentionally bounded because libav.js's MEMFS / CLI
 interface can require full local inputs or output chunks in JavaScript memory.
 
+**Exception — ffmpeg output is disk-backed.** HLS remuxes and live recordings
+write every muxer chunk straight into an OPFS file (positional writes, merged
+into one file-system write per `FLUSH_BYTES` = 8 MiB and drained in order) and
+the finished artifact is handed to Downloads as that disk-backed File, so
+artifact size is bounded by storage rather than by heap. The only memory bound
+on that path is the queued-write budget (`MAX_PENDING_WRITE_BYTES`, 512 MiB):
+if the file system stops draining, the job fails explicitly instead of queueing
+the artifact in the renderer.
+
 For DASH, OPFS assembly occurs first and **combined video+audio input must not
 exceed 384 MiB** before entering the local mux stage.
+
+Segment assembly that produces a user-facing artifact (audio-only ADTS concat,
+remote fallback, single-track DASH) writes to OPFS but keeps an in-memory typed
+Blob up to 256 MiB; beyond `MAX_DISK_ASSEMBLY_BYTES` (768 MiB) it fails
+explicitly.
 
 The general offscreen safety policy additionally limits:
 
 - one declared network response: 512 MiB;
-- one in-memory output Blob: 768 MiB.
+- one in-memory output Blob: 768 MiB. Disk-backed `File` artifacts (an OPFS
+  file) are exempt: they are not resident heap bytes, and the storage quota
+  governs them instead.
 
 These are product limits, not estimates. Inputs beyond the supported processing
 budget should produce an explicit error rather than rely on the browser to OOM.
@@ -60,10 +76,11 @@ operation is size-unbounded. The browser Downloads API is appropriate for very
 large direct files. Media transformations that require WebAssembly/MEMFS have a
 smaller documented support envelope.
 
-A future architecture may move ffmpeg I/O to asynchronous/device-backed storage
-and raise these limits. Until that work is proven with browser stress tests,
-Media Sniper intentionally chooses deterministic limits over optimistic memory
-usage.
+Device-backed storage now covers the ffmpeg *output* path; the remaining limits
+above are for assembly paths that still need a single in-memory artifact or
+whole inputs. Until input-side streaming (readahead/file-backed demuxer inputs)
+is proven with browser stress tests, Media Sniper intentionally chooses
+deterministic limits over optimistic memory usage.
 
 ## Cleanup guarantees
 
