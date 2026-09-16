@@ -490,6 +490,42 @@ function allText(el) { return (el.textContent || '') + (el.children || []).map(a
   eq(retryMessages.length, 2, 'a refused retry can be attempted again');
   ok(elements.status.textContent.indexOf('failedPrefix') === 0, 'a refused retry is reported: ' + elements.status.textContent);
 
+  // --- a blocked-host fix survives a re-render and retries as a new save ----
+  // render() wipes every row (textContent = '') while a save is active, and the
+  // failure path clears the save operation. Both used to leave the row claiming
+  // "retrying" while showing no progress and re-arming an operation that every
+  // later response was dropped against.
+  vm.runInContext("pendingHostFix = { itemKey: 'hls-1', jobKey: 'hls-1', patterns: ['https://media-cdn.example.net/*'] }", ctx);
+  ctx.testHlsItem = hlsItem;
+  vm.runInContext("activeSaveCount = 0; renderPending = false; items = [testHlsItem]; render()", ctx);
+  const fixRow = elements.list.children[0];
+  const fixSave = fixRow.children[3];
+  const fixBtn = fixRow.children.find(function (child) {
+    return String(child.className || '').indexOf('host-access') !== -1;
+  });
+  ok(fixBtn, 'a blocked host is offered again after a re-render');
+
+  const intervalsBefore = intervals.length;
+  retryAnswers.push({ started: true });
+  fixBtn.dispatch('click');
+  await flush(); await flush();
+  eq(chrome.permissions.requestCalls[chrome.permissions.requestCalls.length - 1],
+    ['https://media-cdn.example.net/*'], 'the retry asks for exactly the blocked host');
+  eq(retryMessages[retryMessages.length - 1].jobKey, 'hls-1', 'the retry targets the failed job');
+  eq(fixSave.dataset.operation !== '' && fixSave.dataset.operation != null, true,
+    'the retry starts a fresh save operation');
+  eq(fixSave.disabled, true, 'the retry marks the row busy again');
+  eq(fixSave.dataset.jobKey, 'hls-1', 'the retry re-attaches the row to the job');
+  ok(intervals.length > intervalsBefore, 'the retry re-arms progress polling');
+  eq(vm.runInContext('pendingHostFix', ctx), null, 'the fix is consumed once it is retried');
+
+  // a fresh save for the same item drops a stale fix instead of resurrecting it
+  vm.runInContext("pendingHostFix = { itemKey: 'hls-1', jobKey: 'hls-1', patterns: ['https://ignored.example/*'] }", ctx);
+  hlsCallback = null;
+  vm.runInContext("activeSaveCount = 0; items = [testHlsItem]; render()", ctx);
+  elements.list.children[0].children[3].dispatch('click');
+  eq(vm.runInContext('pendingHostFix', ctx), null, 'starting a new save clears the old fix');
+
   report('popup-save-feedback');
 })().catch(function (error) {
   console.error(error);

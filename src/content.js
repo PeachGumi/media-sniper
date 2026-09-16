@@ -67,7 +67,10 @@
   // fetch) returns null and the popup keeps the type badge alone.
   const THUMB_W = 160;
   const THUMB_H = 90;
-  const MAX_IMAGE_BYTES = 512 * 1024;
+  // The worker accepts a data URL up to 600k characters (base64 inflates by
+  // ~4/3), so anything inlined here must stay below ~430 KiB. A larger still is
+  // handed over as a URL instead of being fetched, converted and then dropped.
+  const MAX_IMAGE_BYTES = 384 * 1024;
 
   function mediaElements() {
     try {
@@ -109,13 +112,21 @@
       for (const candidate of elementUrls(el)) if (sameMedia(candidate, url)) return el;
     }
     // No URL match: the page's main player is still the best guess for an HLS
-    // or DASH manifest (the element holds a MediaSource blob URL).
+    // or DASH manifest (the element holds a MediaSource blob URL). Compare
+    // numbers, not a joined string: '1:90' sorts above '1:100' as text.
     let best = null;
     for (const el of list) {
-      const area = (el.videoWidth || 0) * (el.videoHeight || 0);
       const playing = el.paused === false || el.currentTime > 0 ? 1 : 0;
-      const score = [playing, area, el.duration || 0].join(':');
-      if (!best || score > best.score) best = { el: el, score: score };
+      const area = (el.videoWidth || 0) * (el.videoHeight || 0);
+      const duration = el.duration || 0;
+      function better(candidate, current) {
+        if (!current) return true;
+        if (candidate.playing !== current.playing) return candidate.playing > current.playing;
+        if (candidate.area !== current.area) return candidate.area > current.area;
+        return candidate.duration > current.duration;
+      }
+      const candidate = { el: el, playing: playing, area: area, duration: duration };
+      if (better(candidate, best)) best = candidate;
     }
     return best ? best.el : null;
   }

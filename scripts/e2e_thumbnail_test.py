@@ -302,7 +302,8 @@ async def main():
             return JSON.stringify(out);
           })()
         """ % (tab_id or -1, tab_id or -1, json.dumps(video.get("url"))), timeout=40)
-        step("content script is reachable in the fixture tab", "scanError" not in str(diag), str(diag)[:300])
+        step("content script answers both messages in the fixture tab",
+             "scanError" not in str(diag) and "thumbError" not in str(diag), str(diag)[:300])
 
         raw_item = await evaluate(popup_ws, """
           (() => new Promise(function (resolve) {
@@ -312,7 +313,8 @@ async def main():
               });
           }))()
         """ % (json.dumps(video.get("url")), json.dumps(video.get("key")), tab_id or -1), timeout=40)
-        step("ms-item-thumb round trip", "\"thumb\"" in str(raw_item) or "lastError" in str(raw_item), str(raw_item)[:400])
+        step("ms-item-thumb round trip returns a still",
+             '"thumb":"data:image' in str(raw_item) and 'lastError":null' in str(raw_item), str(raw_item)[:400])
 
         thumb = await thumb_for(popup_ws, video.get("url"), video.get("key"), tab_id)
         step("the page supplies the thumbnail",

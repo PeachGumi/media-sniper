@@ -261,6 +261,11 @@ function hostAccessFields() {
   return pending.length ? { needsHosts: pending } : {};
 }
 
+function resetHostAccessPending() {
+  const api = globalThis.MediaSniperHostAccess;
+  if (api && typeof api.takePending === 'function') api.takePending();
+}
+
 function hostAccessError(message) {
   return Object.assign({ error: message == null ? '' : String(message) }, hostAccessFields());
 }
@@ -321,6 +326,7 @@ async function runFfmpegJob(msg, sendResponse) {
   // keeping two wasm instances out of this document, and the wasm boot +
   // ffmpeg run are long awaits — a late-arriving job must see us as busy.
   current = { libav: null, jobId: jobId, chunks: null, abortRequested: false };
+  resetHostAccessPending();
   activeHeaders = msg.headers || {};
   lastDone = null;
   resetFetchStats();
@@ -527,9 +533,28 @@ function abortFfmpegJob(msg, sendResponse) {
 // Legacy/fallback paths (no ffmpeg needed)
 // ---------------------------------------------------------------------------
 async function fetchBuf(url, headers) {
-  const res = await fetch(url, { credentials: 'include', headers: headers || {} });
+  let res = null;
+  try {
+    res = await fetch(url, { credentials: 'include', headers: headers || {} });
+  } catch (err) {
+    // A host the extension may not read is a permission problem, not a network
+    // one: record it so the job can offer the grant instead of a dead end (this
+    // path feeds the YouTube mux and the ADTS concat).
+    await noteFetchFailure(url, err);
+    throw err;
+  }
   if (!res.ok) throw new Error('http ' + res.status);
   return res.arrayBuffer();
+}
+
+// Record a blocked-host failure for the running job. The pattern travels back
+// with the job's error response (hostAccessFields), which is the only channel
+// the worker has to turn it into a one-click grant.
+async function noteFetchFailure(url, err) {
+  const api = globalThis.MediaSniperHostAccess;
+  if (api && typeof api.describeFetchFailure === 'function') {
+    try { await api.describeFetchFailure(url, err); } catch (_) { /* best effort */ }
+  }
 }
 
 async function handleFetchBlob(msg) {
@@ -606,7 +631,13 @@ async function fetchTrack(track, headers, onProgress) {
     while (queue.length && !failed) {
       const entry = queue.shift();
       try {
-        const res = await fetch(entry.url, { credentials: 'include', headers: headers || {} });
+        let res = null;
+        try {
+          res = await fetch(entry.url, { credentials: 'include', headers: headers || {} });
+        } catch (fetchErr) {
+          await noteFetchFailure(entry.url, fetchErr);
+          throw fetchErr;
+        }
         if (!res.ok) throw new Error('http ' + res.status);
         results.push({ i: entry.i, buf: await res.arrayBuffer() });
         onProgress();
@@ -633,6 +664,7 @@ async function handleDashBuild(msg, sendResponse) {
   // Reserve before the long segment-fetch awaits (same reason as runFfmpegJob)
   const jobId = msg.playlistUrl || 'dash';
   current = { libav: null, jobId: jobId, chunks: null };
+  resetHostAccessPending();
   let done = 0;
   const progress = function () {
     done++;

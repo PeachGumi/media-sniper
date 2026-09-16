@@ -234,8 +234,15 @@ function makeContext(chrome) {
     ArrayBuffer,
     Uint8Array,
     URL_createObjectURL_count: 0,
+    __fetchFailSuffix: [],
     fetch: function (url, opts) {
       chrome.__swFetchLog.push(url);
+      // Simulate the one case the preflight cannot see: a URL whose origin is
+      // skipped because it matches the page origin, but which the browser still
+      // refuses (transient activeTab grant, restored job, iframe page).
+      if ((chrome.__fetchFailSuffix || []).some(function (s) { return String(url).indexOf(s) !== -1; })) {
+        return Promise.reject(new TypeError('Failed to fetch'));
+      }
       chrome.__swFetchOpts.push({ url: url, opts: opts || {} });
       if (url.indexOf('master.m3u8') >= 0) {
         return Promise.resolve({ ok: true, text: function () {
@@ -1533,6 +1540,37 @@ async function run() {
       'the retry actually fetches the newly granted host');
     const afterRetry = await send(hostChrome, { type: 'ms-hls-status', url: blockedUrl, jobKey: started.jobKey });
     eq(afterRetry && afterRetry.needsHosts, null, 'a cleared failure no longer asks for hosts');
+  }
+
+  // --- a blocked fetch the preflight could not see must still be actionable --
+  // The page's own origin is deliberately not gated (a transient activeTab
+  // grant is invisible to permissions.contains), so the failure only shows up
+  // when the fetch runs. The worker cannot drain the offscreen pending list, so
+  // the mapped host has to travel with the thrown error: before this was fixed,
+  // the job reported a bare "Failed to fetch" and offered no grant.
+  {
+    const pageOnlyUrl = 'https://page-only.example.net/hls/master.m3u8';
+    const runtimeChrome = makeChrome();
+    runtimeChrome.permissions.granted = ['https://granted.example/*'];
+    runtimeChrome.__fetchFailSuffix = ['page-only.example.net'];
+    const runtimeCtx = makeContext(runtimeChrome);
+    vm.runInContext(logicSrc, runtimeCtx);
+    vm.runInContext(hostAccessSrc, runtimeCtx);
+    vm.runInContext(bgSrc, runtimeCtx);
+    for (let i = 0; i < 4; i++) await flush();
+
+    const started = await send(runtimeChrome, {
+      type: 'ms-hls-download', url: pageOnlyUrl, kind: 'hls', tabId: 21,
+      title: 'Runtime blocked host', pageUrl: 'https://page-only.example.net/watch',
+    }, { tab: { id: 21 } });
+    ok(started && started.started, 'save accepted');
+    for (let i = 0; i < 10; i++) await flush();
+    const job = await send(runtimeChrome, { type: 'ms-hls-status', url: pageOnlyUrl, jobKey: started.jobKey });
+    eq(job && job.status, 'failed', 'the blocked fetch fails the job');
+    ok(/page-only\.example\.net/.test(String(job && job.error)),
+      'a runtime-blocked host is named, not a bare fetch error: ' + (job && job.error));
+    eq(job && job.needsHosts, ['https://page-only.example.net/*'],
+      'the runtime failure exposes the pattern for the popup grant');
   }
 
   report('background');

@@ -1,5 +1,49 @@
 # Changelog
 
+## v0.13.1 (2026-09-16)
+
+Follow-up to v0.13.0 from an independent review of that change (commit
+e3fe990). The review's one blocking finding was correct: the "a blocked host is
+named at runtime too" claim was not implemented.
+
+### Fixed
+
+- The runtime host mapping now works. The worker re-threw the original
+  `TypeError` after checking it, so a fetch the preflight could not see (the
+  page's own origin is deliberately not gated, because a transient activeTab
+  grant is invisible to `permissions.contains`) still ended as a bare
+  "Failed to fetch" with no way forward. Verified with a rejecting fetch in the
+  worker test: before the fix it reports `Failed to fetch` and no hosts, after
+  it names the host and exposes the pattern for the grant.
+- A master playlist that points at a variant on another host is gated before
+  that fetch, not after it.
+- The offscreen document maps the same way for its remaining fetches (the
+  YouTube mux input and the ADTS concat through `fetchBuf`, DASH segments
+  through `fetchTrack`), and clears any recorded pattern when a job reserves the
+  engine, so a stale host cannot attach to an unrelated error response.
+- "配信元を許可して再試行" now starts a fresh save operation. The failure path
+  had already cleared the row's operation, so the retry re-armed a poll that
+  dropped every response: the row sat on "retrying" with no progress while the
+  job actually finished (visible only in the Jobs tab). The grant button is also
+  re-applied after a re-render instead of being wiped by the deferred render
+  that `resetSaveButton` schedules.
+- Retrying a YouTube mux job validates its audio track before clearing the job
+  state, instead of leaving a queued job that could never run.
+- Removed two unreachable host-grant branches from the save path: a media save
+  is acknowledged before any fetch, so preflight failures only surface through
+  job polling.
+
+### Fixed (thumbnails)
+
+- Size limits are aligned: the content script inlines up to 384 KiB, which is
+  ~524k base64 characters, inside the worker's 600k acceptance limit. A poster
+  between the old 400k-character limit and 512 KiB was fetched, converted and
+  then dropped, with no fallback.
+- The page's main player is chosen by numeric score. The score was compared as
+  a joined string, so '1:90:0' beat '1:100:0' and a smaller element could win.
+- The worker's still cache is capped at 40 entries and a tab's stills are
+  dropped when that tab closes.
+
 ## v0.13.0 (2026-09-16)
 
 ### Added

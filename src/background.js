@@ -536,7 +536,9 @@ async function hostAccessGate(urls, job, pageUrl) {
 // element poster > page social image) and the worker keeps it in memory for the
 // popup. Nothing is persisted: a reloaded extension simply asks again.
 // ---------------------------------------------------------------------------
-const MAX_THUMB_CHARS = 400000;
+// base64 of the content script's largest inline image (384 KiB) is ~524k chars;
+// the extra headroom keeps a valid still from being dropped after it was built.
+const MAX_THUMB_CHARS = 600000;
 const thumbCache = new Map(); // 'tabId:itemKey' -> { thumb, source }
 
 function thumbCacheKey(tabId, item) {
@@ -578,9 +580,10 @@ async function itemThumbnail(tabId, itemKey, url) {
   if (!thumb) return {};
   const source = resp.source || null;
   thumbCache.set(cacheKey, { thumb: thumb, source: source });
-  if (thumbCache.size > 60) {
+  while (thumbCache.size > 40) {
     const oldest = thumbCache.keys().next();
-    if (!oldest.done) thumbCache.delete(oldest.value);
+    if (oldest.done) break;
+    thumbCache.delete(oldest.value);
   }
   return { thumb: thumb, thumbSource: source };
 }
@@ -880,10 +883,19 @@ function swFetchText(url, headers) {
 
 // Re-throw a failed fetch as a named host problem when the host is simply not
 // granted, so the popup can offer the grant instead of "Failed to fetch".
+// The worker has no pending list to drain (that one belongs to the offscreen
+// document), so the mapped result is what has to travel: throwing the original
+// TypeError here would lose the host and the popup would show a dead end.
 async function missingHostFetchError(url, err) {
   const api = globalThis.MediaSniperHostAccess;
   if (api && typeof api.describeFetchFailure === 'function') {
-    try { await api.describeFetchFailure(url, err); } catch (_) { /* best effort */ }
+    let mapped = null;
+    try { mapped = await api.describeFetchFailure(url, err); } catch (_) { /* best effort */ }
+    if (mapped && mapped.patterns && mapped.patterns.length) {
+      const typed = api.error(mapped.patterns);
+      typed.needsHosts = mapped.patterns;
+      throw typed;
+    }
   }
   throw err;
 }
@@ -927,6 +939,11 @@ async function runHlsJob(jobKey, playlistUrl) {
     mediaUrl = withToken(variant.url, variant.token);
     if (!job.audioUrl) job.audioUrl = pickAudioUrl(masterParsed, variant);
     job.status = 'fetching';
+    // The variant playlist can live on another host than the master (the master
+    // is often served from the page origin while the media comes from a CDN):
+    // gate it before fetching, not after.
+    const variantGate = await hostAccessGate([mediaUrl], job, job.pageUrl);
+    if (variantGate) throw variantGate;
     mediaText = await swFetchText(mediaUrl, headersFor(mediaUrl, hdrs, playlistUrl));
   }
 
@@ -1179,6 +1196,30 @@ async function retryHostAccess(jobKey) {
   const gate = await hostAccessGate(patterns, job);
   if (gate) return { error: gate.message, needsHosts: patterns };
 
+  const url = job.sourceUrl;
+  const isYtMux = job.mode === 'mux' || /^yt-mux:/.test(jobKey) || job.variantKey === 'yt-mux';
+  let runner = null;
+  if (isYtMux) {
+    // Validate before touching the job state: bailing out after clearing
+    // needsHosts left a 'queued' job behind that could never run.
+    const audioUrl = job.audioUrl || null;
+    if (!audioUrl) return { error: '音声トラックのURLがないため再試行できません', needsHosts: patterns };
+    const item = {
+      url: itemRefFromJob(job),
+      key: job.itemKey || null,
+      audioUrl: audioUrl,
+      headers: job.headers || null,
+      pageUrl: job.pageUrl || null,
+      title: job.title || null,
+      via: 'youtube',
+    };
+    runner = function () { return runYtMuxJob(jobKey, item); };
+  } else if (job.dashEntry != null || /\.mpd(\?|$)/i.test(url || '')) {
+    runner = function () { return runDashJob(jobKey, url); };
+  } else {
+    runner = function () { return runHlsJob(jobKey, url); };
+  }
+
   job.needsHosts = null;
   job.error = null;
   job.status = 'queued';
@@ -1187,26 +1228,6 @@ async function retryHostAccess(jobKey) {
   job.seconds = 0;
   persistActiveJobs();
 
-  const url = job.sourceUrl;
-  const isYtMux = job.mode === 'mux' || /^yt-mux:/.test(jobKey) || job.variantKey === 'yt-mux';
-  let runner = null;
-  if (isYtMux) {
-    const item = {
-      url: itemRefFromJob(job),
-      key: job.itemKey || null,
-      audioUrl: job.audioUrl || null,
-      headers: job.headers || null,
-      pageUrl: job.pageUrl || null,
-      title: job.title || null,
-      via: 'youtube',
-    };
-    if (!item.audioUrl) return { error: '音声トラックのURLがないため再試行できません' };
-    runner = function () { return runYtMuxJob(jobKey, item); };
-  } else if (job.dashEntry != null || /\.mpd(\?|$)/i.test(url || '')) {
-    runner = function () { return runDashJob(jobKey, url); };
-  } else {
-    runner = function () { return runHlsJob(jobKey, url); };
-  }
   scheduleMediaExecution(jobKey, runner).catch(function (err) {
     const j = state.hlsJobs.get(jobKey);
     if (j) applyJobFailure(j, err);
@@ -1837,6 +1858,16 @@ if (chrome.runtime.onConnect && typeof chrome.runtime.onConnect.addListener === 
     port.onMessage.addListener(function () { /* heartbeat only */ });
   });
 }
+
+// Thumbnails are per tab and view-only: drop them with the tab so a long
+// session cannot accumulate stills for pages that are gone.
+try {
+  chrome.tabs.onRemoved.addListener(function (closedTabId) {
+    for (const key of Array.from(thumbCache.keys())) {
+      if (key.indexOf(closedTabId + ':') === 0) thumbCache.delete(key);
+    }
+  });
+} catch (_) { /* tabs API unavailable in this context */ }
 
 chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
   if (!msg || typeof msg.type !== 'string') return false;

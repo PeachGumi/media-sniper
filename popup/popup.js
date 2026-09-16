@@ -13,6 +13,10 @@ let jobsRequestSequence = 0;
 const hlsTimers = new Map();
 let saveOperationSequence = 0;
 let activeSaveCount = 0;
+// A failed save that needs a host grant. Kept outside the row because render()
+// rebuilds every row (textContent = ''), which used to drop the button while
+// the status text stayed behind.
+let pendingHostFix = null; // { itemKey, jobKey, patterns }
 let renderPending = false;
 
 function L() { return globalThis.MediaSniperLogic; }
@@ -416,6 +420,7 @@ function render() {
     row.appendChild(dl);
     row.appendChild(thumb);
     list.appendChild(row);
+    applyHostFix(row, item, dl);
     reconnectActiveJob(item, dl);
   }
 }
@@ -477,6 +482,24 @@ function retryJobHostAccess(jobKey, after) {
   });
 }
 
+// The grant button belongs to a failed item, not to one DOM node: after a save
+// fails with a blocked host, the row (re)build re-applies it.
+function applyHostFix(row, item, btn) {
+  if (!pendingHostFix || !row || !item || pendingHostFix.itemKey !== item.key) return;
+  addHostAccessButton(row, pendingHostFix.patterns, function () {
+    // Retrying is a new save as far as the popup is concerned: the old
+    // operation was cleared when the row failed, and reusing it made every
+    // status response be dropped as stale.
+    const operation = beginSave(btn);
+    const jobKey = pendingHostFix.jobKey || item.jobKey || item.url;
+    pendingHostFix = null;
+    retryJobHostAccess(jobKey, function () {
+      btn.dataset.jobKey = jobKey;
+      pollHls(Object.assign({}, item, { jobKey: jobKey }), btn, operation);
+    });
+  });
+}
+
 function loadThumbnail(item, img) {
   if (!item || !img) return;
   chrome.runtime.sendMessage({ type: 'ms-item-thumb', itemKey: item.key || null, url: item.url, tabId: item.tabId }, function (resp) {
@@ -492,6 +515,7 @@ function loadThumbnail(item, img) {
 
 function save(item, btn) {
   if (btn.dataset.stopping === '1') return;
+  if (pendingHostFix && pendingHostFix.itemKey === item.key) pendingHostFix = null;
   if (btn.dataset.recording === '1') {
     const operation = btn.dataset.operation;
     const jobKey = btn.dataset.jobKey || item.jobKey || null;
@@ -544,14 +568,6 @@ function save(item, btn) {
           setStatus(message, true);
           setActionStatus(btn, message, true);
           resetSaveButton(btn);
-          if (resp.needsHosts && resp.needsHosts.length) {
-            setActionStatus(btn, message + ' ' + t('hostAccessHint', [hostsLabel(resp.needsHosts)]), true);
-            addHostAccessButton(btn.parentNode, resp.needsHosts, function () {
-              retryJobHostAccess(resp.jobKey || item.jobKey || item.url, function () {
-                pollHls(Object.assign({}, item, { jobKey: resp.jobKey || item.url }), btn, operation);
-              });
-            });
-          }
           return;
         }
         if (resp && resp.alreadyRunning) {
@@ -596,14 +612,6 @@ function save(item, btn) {
         setStatus(message, true);
         setActionStatus(btn, message, true);
         resetSaveButton(btn);
-        if (resp.needsHosts && resp.needsHosts.length) {
-          setActionStatus(btn, message + ' ' + t('hostAccessHint', [hostsLabel(resp.needsHosts)]), true);
-          addHostAccessButton(btn.parentNode, resp.needsHosts, function () {
-            retryJobHostAccess(resp.jobKey || '', function () {
-              pollHls({ key: resp.jobKey, jobKey: resp.jobKey, url: resp.jobKey, dashEntry: null }, btn, operation);
-            });
-          });
-        }
         return;
       }
       if (resp && resp.alreadyRunning) {
@@ -818,9 +826,14 @@ function pollHls(item, btn, operation) {
         if (job.needsHosts && job.needsHosts.length) {
           const hint = failed + ' ' + t('hostAccessHint', [hostsLabel(job.needsHosts)]);
           setActionStatus(btn, hint, true);
-          addHostAccessButton(btn.parentNode, job.needsHosts, function () {
-            retryJobHostAccess(item.jobKey || item.url, function () { pollHls(item, btn, operation); });
-          });
+          pendingHostFix = {
+            itemKey: item.key,
+            jobKey: item.jobKey || item.url,
+            patterns: job.needsHosts.slice(),
+          };
+          applyHostFix(btn.parentNode, item, btn);
+        } else {
+          pendingHostFix = null;
         }
       } else if (Date.now() - started > 30 * 60 * 1000) {
         clearInterval(timer);
