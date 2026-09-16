@@ -305,11 +305,39 @@
     }
   }
 
+  // A player that appears after load (lazy players, SPAs) used to be found only
+  // when something else asked for a scan, so a video inserted later simply never
+  // showed up. Watch the DOM for new media elements and rescan, debounced.
+  function watchForMediaNodes() {
+    try {
+      if (typeof MutationObserver !== 'function') return;
+      var pending = null;
+      var observer = new MutationObserver(function (records) {
+        var relevant = false;
+        for (var i = 0; i < records.length && !relevant; i++) {
+          var nodes = records[i].addedNodes || [];
+          for (var j = 0; j < nodes.length; j++) {
+            var node = nodes[j];
+            if (!node || node.nodeType !== 1) continue;
+            var tag = String(node.tagName || '').toLowerCase();
+            if (tag === 'video' || tag === 'audio' || tag === 'source') { relevant = true; break; }
+            if (node.querySelector && node.querySelector('video, audio, source')) { relevant = true; break; }
+          }
+        }
+        if (!relevant) return;
+        if (pending) clearTimeout(pending);
+        pending = setTimeout(function () { pending = null; try { scanVideoEls(true, '', null); } catch (_) {} }, 400);
+      });
+      observer.observe(document.documentElement || document, { childList: true, subtree: true });
+    } catch (_) { /* no observer: the interval scan still runs */ }
+  }
+
   try {
     // Do not wait two seconds for the first pass after injection/navigation.
     scanPageMetadata(false);
     scanResourceTiming();
     watchResourceTiming();
+    watchForMediaNodes();
     setTimeout(scanResourceTiming, 1500);
     var iv = setInterval(function () { scanPageMetadata(false); scanResourceTiming(); }, 2000);
     setTimeout(function () { clearInterval(iv); }, 5 * 60 * 1000);

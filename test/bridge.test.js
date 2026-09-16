@@ -180,6 +180,51 @@ async function run() {
   eq(rtMedia.some(function (m) { return m.url.indexOf('blob:') === 0; }), false,
     'blob handles are not items');
 
+  // ---- a player inserted after load ----------------------------------------
+  // Lazy players and SPAs add the <video> later; without an observer the media
+  // only appeared when something else happened to request a scan.
+  const latePosted = [];
+  let lateObserver = null;
+  const lateElements = [];
+  const lateCtx = {
+    posted: latePosted,
+    console,
+    URL,
+    Promise,
+    document: {
+      title: 'Late page',
+      documentElement: {},
+      querySelectorAll: function () { return lateElements; },
+    },
+    location: { href: 'https://late.example.com/watch' },
+    setInterval: function () { return 1; },
+    clearInterval: function () {},
+    setTimeout: function (fn) { if (typeof fn === 'function') fn(); return 1; },
+    clearTimeout: function () {},
+    addEventListener: function () {},
+    postMessage: function (data) { latePosted.push(data); },
+    MutationObserver: function (cb) {
+      lateObserver = cb;
+      this.observe = function () {};
+      this.disconnect = function () {};
+    },
+  };
+  lateCtx.window = lateCtx;
+  lateCtx.globalThis = lateCtx;
+  vm.createContext(lateCtx);
+  vm.runInContext(logicSrc, lateCtx);
+  vm.runInContext(bridgeSrc, lateCtx);
+  eq(typeof lateObserver, 'function', 'the bridge watches for media nodes');
+  const lateVideo = { nodeType: 1, tagName: 'VIDEO', currentSrc: 'https://cdn.example.com/late/movie.mp4', src: '', duration: 9 };
+  lateElements.push(lateVideo);
+  lateObserver([{ addedNodes: [lateVideo] }]);
+  const lateMedia = latePosted.filter(function (m) { return m && m.type === 'media'; });
+  eq(lateMedia.length >= 1, true, 'a video inserted after load is reported without an external scan');
+  eq(lateMedia.some(function (m) { return m.url.indexOf('movie.mp4') >= 0; }), true, 'the late element URL is reported');
+  const lateIgnored = latePosted.length;
+  lateObserver([{ addedNodes: [{ nodeType: 1, tagName: 'DIV' }] }]);
+  eq(latePosted.length, lateIgnored, 'unrelated DOM churn does not rescan');
+
   report('bridge');
 }
 

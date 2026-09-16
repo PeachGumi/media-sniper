@@ -548,6 +548,32 @@ function thumbCacheKey(tabId, item) {
   return tabId + ':' + key;
 }
 
+// The video may live in a subframe (embedded players, some site layouts): ask
+// the top frame first, then every other frame the tab has.
+async function askFrameForThumbnail(tabId, url) {
+  const message = { type: 'ms-thumbnail', url: url };
+  try {
+    const answer = await chrome.tabs.sendMessage(tabId, message);
+    if (answer && answer.thumb) return answer;
+  } catch (_) { /* no content script in the top frame */ }
+  let frames = [];
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId: tabId, allFrames: true },
+      func: function () { return true; },
+    });
+    frames = (results || []).map(function (entry) { return entry.frameId; })
+      .filter(function (id) { return typeof id === 'number' && id !== 0; });
+  } catch (_) { return null; }
+  for (const frameId of frames) {
+    try {
+      const answer = await chrome.tabs.sendMessage(tabId, message, { frameId: frameId });
+      if (answer && answer.thumb) return answer;
+    } catch (_) { /* frame gone */ }
+  }
+  return null;
+}
+
 async function itemThumbnail(tabId, itemKey, url) {
   let items = state.itemsByTab.get(tabId) || [];
   let item = items.find(function (x) {
@@ -568,14 +594,7 @@ async function itemThumbnail(tabId, itemKey, url) {
   const cacheKey = thumbCacheKey(tabId, item);
   const cached = thumbCache.get(cacheKey);
   if (cached) return { thumb: cached.thumb, thumbSource: cached.source || null, cached: true };
-  let resp = null;
-  try {
-    resp = await chrome.tabs.sendMessage(tabId, { type: 'ms-thumbnail', url: item.url });
-  } catch (_) {
-    // No content script: the site is not granted, the tab is gone, or the page
-    // replaced the document. The popup keeps the type badge.
-    return {};
-  }
+  const resp = await askFrameForThumbnail(tabId, item.url);
   const thumb = resp && typeof resp.thumb === 'string' && resp.thumb && resp.thumb.length <= MAX_THUMB_CHARS
     ? resp.thumb
     : null;

@@ -151,6 +151,14 @@ function renderJobs() {
     row.appendChild(head);
     row.appendChild(state);
     row.appendChild(progress);
+    if (typeof job.jobKey === 'string' && /^https?:/i.test(job.jobKey)) {
+      const jobThumb = document.createElement('img');
+      jobThumb.className = 'thumb';
+      jobThumb.alt = '';
+      jobThumb.src = 'data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==';
+      loadThumbnail({ key: job.itemKey || job.jobKey, url: job.jobKey, tabId: job.tabId }, jobThumb);
+      row.appendChild(jobThumb);
+    }
     if (job.status === 'failed' && job.needsHosts && job.needsHosts.length) {
       state.textContent = progressState.text + ' ' + t('hostAccessHint', [hostsLabel(job.needsHosts)]);
       addHostAccessButton(row, job.needsHosts, function () {
@@ -500,10 +508,20 @@ function applyHostFix(row, item, btn) {
   });
 }
 
-function loadThumbnail(item, img) {
+// A player often appears (and only then sets its poster) a moment after the
+// popup opens, and the worker only caches hits, so a single attempt left the row
+// on the placeholder forever. Retry a couple of times before giving up.
+const THUMB_RETRY_DELAYS = [1500, 4000, 8000];
+
+function loadThumbnail(item, img, attempt) {
   if (!item || !img) return;
+  const tries = attempt || 0;
   chrome.runtime.sendMessage({ type: 'ms-item-thumb', itemKey: item.key || null, url: item.url, tabId: item.tabId }, function (resp) {
     if (chrome.runtime.lastError || !resp || !resp.thumb) {
+      if (tries < THUMB_RETRY_DELAYS.length) {
+        setTimeout(function () { loadThumbnail(item, img, tries + 1); }, THUMB_RETRY_DELAYS[tries]);
+        return;
+      }
       img.classList.add('empty');
       return;
     }

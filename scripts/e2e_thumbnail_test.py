@@ -28,6 +28,10 @@ except ImportError as exc:  # pragma: no cover - environment check
     raise SystemExit("websockets is required for E2E: pip install websockets") from exc
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# Two origins on the same fixture server: the page, and the "CDN" the poster /
+# manifest live on (ungranted in the harness, like pbs.twimg.com for a tweet).
+PAGE_HOST = "127.0.0.1"
+MEDIA_HOST = "localhost"
 verdict = {"steps": [], "pass": False}
 
 
@@ -115,6 +119,36 @@ def make_fixture():
         "-f", "lavfi", "-i", "color=c=0x22aa55:s=160x90", "-frames:v", "1",
         os.path.join(page, "cover.png"),
     ], check=True, timeout=120)
+    subprocess.run([
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+        "-f", "lavfi", "-i", "color=c=0xaa3355:s=320x180", "-frames:v", "1",
+        os.path.join(page, "xs_poster.jpg"),
+    ], check=True, timeout=120)
+    # The shape a tweet has: media, poster and the page's og:image all live on
+    # another origin than the page, and the player cannot give a readable frame.
+    # Same-origin fixtures missed this shape entirely.
+    with open(os.path.join(page, "xtweet.html"), "w", encoding="utf-8") as handle:
+        handle.write(
+            "<!DOCTYPE html><html><head><meta charset='utf-8'><title>Thumb x-shape</title>"
+            f"<meta property='og:image' content='http://{MEDIA_HOST}/thumb/cover.png'>"
+            "</head><body>"
+            "<article><img src='cover.png' width='48' height='48' alt='avatar'>"
+            f"<video controls width='320' poster='http://{MEDIA_HOST}/thumb/xs_poster.jpg' "
+            f"src='http://{MEDIA_HOST}/thumb/stream.m3u8'></video></article>"
+            "</body></html>\n"
+        )
+    # A player that only exists seconds after the popup opened: the first
+    # thumbnail request finds nothing, so the popup has to retry.
+    with open(os.path.join(page, "late.html"), "w", encoding="utf-8") as handle:
+        handle.write(
+            "<!DOCTYPE html><html><head><meta charset='utf-8'><title>Thumb late</title></head><body>"
+            "<div id='slot'></div><script>"
+            "setTimeout(function(){"
+            "var v=document.createElement('video');v.controls=true;"
+            "v.poster='poster.jpg';v.src='clip.mp4';"
+            "document.getElementById('slot').appendChild(v);},6000);"
+            "</script></body></html>\n"
+        )
     subprocess.run([
         "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
         "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=12", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
@@ -361,7 +395,8 @@ async def main():
         empty_video = next((i for i in empty_items if "stream.m3u8" in str(i.get("url", ""))), None)
         empty_thumb = await thumb_for(popup_ws, empty_video.get("url"), empty_video.get("key"), empty_tab) if empty_video else {"thumb": None}
         empty_rows = await hydrate_popup(popup_ws, empty_url)
-        await asyncio.sleep(2)
+        # the popup retries a few times before it settles on the placeholder
+        await asyncio.sleep(17)
         empty_rendered = await popup_thumbs(popup_ws)
         step("popup keeps the placeholder without a source",
              isinstance(empty_rows, int) and empty_rows > 0
@@ -369,6 +404,45 @@ async def main():
              json.dumps(empty_rendered)[:200])
         step("no source means no thumbnail (popup keeps the placeholder)", not (empty_thumb or {}).get("thumb"),
              json.dumps({k: v for k, v in (empty_thumb or {}).items() if k != "thumb"})[:200])
+
+        # --- the tweet shape: cross-origin poster, no readable frame ---------
+        print("=== x-shaped page: poster on a second origin ===", flush=True)
+        x_url = f"http://{PAGE_HOST}:{fixture_port}/thumb/xtweet.html"
+        open_tab(base, x_url)
+        await find_target(base, lambda t: t.get("type") == "page" and "thumb/xtweet.html" in t.get("url", ""))
+        await asyncio.sleep(3)
+        x_items = await items_for(popup_ws, await evaluate(sw_ws, f"chrome.tabs.query({{url: '{x_url}'}}).then(t => t[0] && t[0].id)", timeout=20))
+        x_video = next((i for i in x_items if "stream.m3u8" in str(i.get("url", ""))), None)
+        step("x-shape: the manifest is detected", bool(x_video), json.dumps([i.get("url") for i in x_items])[:200])
+        if x_video:
+            x_thumb = await thumb_for(popup_ws, x_video.get("url"), x_video.get("key"), x_video.get("tabId"))
+            step("x-shape: a thumbnail is produced (poster on another origin)",
+                 bool(x_thumb) and bool((x_thumb or {}).get("thumb")),
+                 json.dumps({"source": (x_thumb or {}).get("thumbSource"), "len": len(str((x_thumb or {}).get("thumb") or ""))})[:200])
+            await hydrate_popup(popup_ws, x_url)
+            await asyncio.sleep(3)
+            x_rows = await popup_thumbs(popup_ws)
+            step("x-shape: the popup renders it",
+                 bool(x_rows) and all(str(r.get("src") or "") not in ("", "None") for r in x_rows),
+                 json.dumps(x_rows)[:300])
+            step("x-shape: the popup did not fall back to the placeholder",
+                 bool(x_rows) and all(not r.get("empty") for r in x_rows),
+                 json.dumps(x_rows)[:300])
+
+        # --- a player that appears late (the popup must retry) --------------
+        print("=== late player: detection and the popup retry ===", flush=True)
+        late_url = f"http://{PAGE_HOST}:{fixture_port}/thumb/late.html"
+        open_tab(base, late_url)
+        await find_target(base, lambda t: t.get("type") == "page" and "thumb/late.html" in t.get("url", ""))
+        await asyncio.sleep(9)
+        late_hydrated = await hydrate_popup(popup_ws, late_url)
+        step("late player: the item is detected once the player appears",
+             isinstance(late_hydrated, int) and late_hydrated > 0, repr(late_hydrated))
+        await asyncio.sleep(12)
+        late_rows = await popup_thumbs(popup_ws)
+        step("late player: a thumbnail appears after a retry",
+             bool(late_rows) and all(not r.get("empty") and str(r.get("src") or "").startswith("data:image") for r in late_rows),
+             json.dumps(late_rows)[:300])
 
         verdict["pass"] = all(item["ok"] for item in verdict["steps"])
     finally:

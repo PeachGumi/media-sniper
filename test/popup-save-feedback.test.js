@@ -16,9 +16,18 @@ function makeElement(tag, id) {
     tagName: String(tag).toUpperCase(), id: id || '', children: [], dataset: {}, value: '',
     title: '', className: '', disabled: false,
     classList: {
-      add: function (name) { classes.add(name); el.className = Array.from(classes).join(' '); },
-      remove: function (name) { classes.delete(name); el.className = Array.from(classes).join(' '); },
-      contains: function (name) { return classes.has(name); },
+      add: function (name) {
+        const parts = String(el.className || '').split(/\s+/).filter(Boolean);
+        if (parts.indexOf(name) === -1) parts.push(name);
+        el.className = parts.join(' ');
+        classes.add(name);
+      },
+      remove: function (name) {
+        const parts = String(el.className || '').split(/\s+/).filter(function (part) { return part && part !== name; });
+        el.className = parts.join(' ');
+        classes.delete(name);
+      },
+      contains: function (name) { return String(el.className || '').split(/\s+/).indexOf(name) !== -1; },
     },
     appendChild: function (child) { el.children.push(child); child.parentElement = el; return child; },
     addEventListener: function (type, fn) { listeners[type] = fn; },
@@ -83,6 +92,7 @@ function allText(el) { return (el.textContent || '') + (el.children || []).map(a
           if (holdHlsStatus) pendingHlsStatus.push(callback);
           else callback(hlsState);
         }
+        else if (message.type === 'ms-item-thumb') callback({ thumb: chrome.__thumb || null, thumbSource: chrome.__thumb ? 'frame' : null });
         else if (message.type === 'ms-queue-status') callback({ queue: [queueState] });
         else if (callback) callback({ ok: true });
       },
@@ -525,6 +535,22 @@ function allText(el) { return (el.textContent || '') + (el.children || []).map(a
   vm.runInContext("activeSaveCount = 0; items = [testHlsItem]; render()", ctx);
   elements.list.children[0].children[3].dispatch('click');
   eq(vm.runInContext('pendingHostFix', ctx), null, 'starting a new save clears the old fix');
+
+  // --- a media job row shows the still too ---------------------------------
+  chrome.__thumb = 'data:image/jpeg;base64,JOBS';
+  elements.jobsTab.dispatch('click'); // the jobs view only renders while it is selected
+  jobsState = [{
+    id: 'media:thumb-job', jobKey: 'https://cdn.example/hls/master.m3u8', type: 'media', status: 'complete',
+    tabId: 9, title: 'Thumbnailed job', filename: 'Thumbnailed job.mp4', itemKey: 'https://cdn.example/hls/master.m3u8',
+  }];
+  ctx.loadJobs();
+  await flush(); await flush();
+  const jobRow = elements.jobsList.children[0];
+  const jobImg = jobRow.children.find(function (child) {
+    return String(child.className || '').indexOf('thumb') !== -1;
+  });
+  ok(jobImg, 'a media job row has a thumbnail slot');
+  eq(jobImg && jobImg.src, 'data:image/jpeg;base64,JOBS', 'the job row shows the still the page produced');
 
   report('popup-save-feedback');
 })().catch(function (error) {

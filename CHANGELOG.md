@@ -1,5 +1,28 @@
 # Changelog
 
+## v0.13.5 (2026-09-16)
+
+### Fixed
+
+- Thumbnails now survive the shapes real pages have. The first version was only
+  verified on same-origin fixtures with a player that existed at popup time, so
+  the cases below were all unchecked:
+  - A player that appears after the popup opened (lazy players, SPAs) left the
+    row on the placeholder forever, because the thumbnail was requested once. The
+    popup now retries (1.5 s / 4 s / 8 s) before it gives up, and the worker only
+    caches hits, so a later attempt still succeeds.
+  - Media inserted into the page after load was not detected at all unless
+    something else happened to request a scan; the page-world bridge now watches
+    for new `video`/`audio`/`source` nodes and rescans (debounced 400 ms).
+  - A player inside a subframe was asked for nothing, because the thumbnail
+    request only reached the top frame. The worker now walks the tab's frames.
+  - The jobs list had no thumbnails: a media job row (whose key is the playlist
+    URL) now shows the same still as the media row.
+- The verification gap itself is closed: `scripts/e2e_thumbnail_test.py` now
+  pins the tweet shape (poster, manifest and page image on a second, un-granted
+  origin with no readable frame) and a player that only appears six seconds after
+  load, including that the item is detected without an external scan trigger.
+
 ## v0.13.4 (2026-09-16)
 
 ### Added
