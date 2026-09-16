@@ -59,6 +59,137 @@
   }
 
   // ---- page metadata + SPA navigation ---------------------------------------
+  // ---- thumbnails ----------------------------------------------------------
+  // The reference implementation shows a thumbnail per media entry. This is the
+  // clean-room equivalent: prefer a frame from the element that is actually
+  // playing the item, fall back to its poster, then to the page's own social
+  // image. Anything that cannot be shown (tainted canvas, no element, blocked
+  // fetch) returns null and the popup keeps the type badge alone.
+  const THUMB_W = 160;
+  const THUMB_H = 90;
+  const MAX_IMAGE_BYTES = 512 * 1024;
+
+  function mediaElements() {
+    try {
+      return Array.prototype.slice.call(document.querySelectorAll('video, audio'));
+    } catch (_) { return []; }
+  }
+
+  function elementUrls(el) {
+    const urls = [];
+    if (el.currentSrc) urls.push(el.currentSrc);
+    if (el.src) urls.push(el.src);
+    try {
+      Array.prototype.forEach.call(el.querySelectorAll('source'), function (s) {
+        if (s.src) urls.push(s.src);
+      });
+    } catch (_) { /* ignore */ }
+    return urls;
+  }
+
+  function sameMedia(a, b) {
+    if (!a || !b) return false;
+    if (a === b) return true;
+    try {
+      const ua = new URL(a, location.href);
+      const ub = new URL(b, location.href);
+      if (ua.origin !== ub.origin) return false;
+      if (ua.pathname === ub.pathname) return true;
+      // HLS/DASH items keep a manifest name while the element plays a variant.
+      const an = ua.pathname.split('/').pop() || '';
+      const bn = ub.pathname.split('/').pop() || '';
+      return !!an && an === bn;
+    } catch (_) { return false; }
+  }
+
+  function pickElement(url) {
+    const list = mediaElements();
+    if (!list.length) return null;
+    for (const el of list) {
+      for (const candidate of elementUrls(el)) if (sameMedia(candidate, url)) return el;
+    }
+    // No URL match: the page's main player is still the best guess for an HLS
+    // or DASH manifest (the element holds a MediaSource blob URL).
+    let best = null;
+    for (const el of list) {
+      const area = (el.videoWidth || 0) * (el.videoHeight || 0);
+      const playing = el.paused === false || el.currentTime > 0 ? 1 : 0;
+      const score = [playing, area, el.duration || 0].join(':');
+      if (!best || score > best.score) best = { el: el, score: score };
+    }
+    return best ? best.el : null;
+  }
+
+  function frameFrom(el) {
+    if (!el || !el.videoWidth || !el.videoHeight) return null;
+    try {
+      const canvas = document.createElement('canvas');
+      canvas.width = THUMB_W;
+      canvas.height = THUMB_H;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return null;
+      const scale = Math.max(THUMB_W / el.videoWidth, THUMB_H / el.videoHeight);
+      const w = el.videoWidth * scale;
+      const h = el.videoHeight * scale;
+      ctx.drawImage(el, (THUMB_W - w) / 2, (THUMB_H - h) / 2, w, h);
+      // A cross-origin frame without CORS taints the canvas; toDataURL throws
+      // SecurityError, which is exactly the "cannot show" case.
+      return canvas.toDataURL('image/jpeg', 0.55);
+    } catch (_) { return null; }
+  }
+
+  function metaImageUrl() {
+    const selectors = [
+      'meta[property="og:image:secure_url"]', 'meta[property="og:image"]',
+      'meta[name="twitter:image"]', 'meta[name="twitter:image:src"]',
+    ];
+    for (const selector of selectors) {
+      let node = null;
+      try { node = document.querySelector(selector); } catch (_) { node = null; }
+      const content = node && node.content ? String(node.content) : '';
+      if (content) {
+        try { return new URL(content, location.href).href; } catch (_) { return content; }
+      }
+    }
+    return null;
+  }
+
+  function toDataUrl(url) {
+    // Read the bytes through the page session (cookies included) and inline
+    // them, so the popup is not blocked by hotlink protection or a Referer
+    // policy. Oversized images stay as absolute URLs.
+    return fetch(url, { credentials: 'include' }).then(function (res) {
+      if (!res.ok) return null;
+      const declared = Number(res.headers && res.headers.get ? res.headers.get('content-length') : NaN);
+      if (Number.isFinite(declared) && declared > MAX_IMAGE_BYTES) return null;
+      return res.blob();
+    }).then(function (blob) {
+      if (!blob || !blob.size || blob.size > MAX_IMAGE_BYTES) return null;
+      return new Promise(function (resolve) {
+        const reader = new FileReader();
+        reader.onload = function () { resolve(typeof reader.result === 'string' ? reader.result : null); };
+        reader.onerror = function () { resolve(null); };
+        reader.readAsDataURL(blob);
+      });
+    }).catch(function () { return null; });
+  }
+
+  function thumbnailFor(url) {
+    const el = pickElement(url);
+    const frame = frameFrom(el);
+    if (frame) return Promise.resolve({ thumb: frame, source: 'frame' });
+    const poster = el && el.poster ? el.poster : null;
+    const pageImage = metaImageUrl();
+    const candidate = poster || pageImage;
+    if (!candidate) return Promise.resolve(null);
+    const source = poster ? 'poster' : 'page';
+    return toDataUrl(candidate).then(function (data) {
+      if (data) return { thumb: data, source: source };
+      // Still useful: the popup can load the URL itself.
+      return { thumb: candidate, source: source + '-url' };
+    });
+  }
+
   function sendMeta(after) {
     if (!topFrame) {
       if (after) after();
@@ -169,6 +300,10 @@
       requestDomScan();
       sendResponse({ ok: true });
       return false;
+    }
+    if (msg.type === 'ms-thumbnail') {
+      thumbnailFor(msg.url).then(function (result) { sendResponse(result || {}); }, function () { sendResponse({}); });
+      return true; // async response
     }
     return false;
   });

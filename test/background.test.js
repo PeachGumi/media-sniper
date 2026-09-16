@@ -5,6 +5,7 @@ const vm = require('vm');
 const { eq, ok, report } = require('./harness.js');
 
 const logicSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'logic.js'), 'utf8');
+const hostAccessSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'host-access.js'), 'utf8');
 const bgSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'background.js'), 'utf8');
 
 function flush() {
@@ -22,6 +23,22 @@ function makeChrome(sharedStorage, sharedDownloads) {
   const swFetchOpts = [];
 
   const chrome = {
+    // Host permissions are configurable per context: Media Sniper ships no
+    // host_permissions and asks at runtime, so the tests need to model both the
+    // granted and the blocked case.
+    permissions: {
+      granted: ['http://127.0.0.1/*'],
+      contains: function (opts) {
+        const wanted = (opts && opts.origins) || [];
+        return Promise.resolve(wanted.every(function (o) { return chrome.permissions.granted.indexOf(o) !== -1; }));
+      },
+      request: function (opts) {
+        const wanted = (opts && opts.origins) || [];
+        wanted.forEach(function (o) { if (chrome.permissions.granted.indexOf(o) === -1) chrome.permissions.granted.push(o); });
+        return Promise.resolve(true);
+      },
+      getAll: function () { return Promise.resolve({ origins: chrome.permissions.granted.slice(), permissions: [] }); },
+    },
     storage: {
       session: {
         get: function (k) {
@@ -1468,6 +1485,54 @@ async function run() {
     const behindJobs = await send(restartedChrome, { type: 'ms-get-jobs' });
     const behind = behindJobs.jobs.find(function (job) { return job.title === 'Behind live'; });
     eq(behind && behind.status, 'queued', 'save behind a recovered recording stays queued instead of failing busy');
+  }
+
+  // --- host access: media on an origin the user has not granted -------------
+  // VDH ships <all_urls>, so this case does not exist for it. Here the fetch is
+  // blocked, and the job must name the host (instead of "Failed to fetch") and
+  // offer a retry once the grant exists.
+  {
+    const blockedUrl = 'https://media-cdn.example.net/hls/master.m3u8?sig=abc123';
+    const hostChrome = makeChrome();
+    hostChrome.permissions.granted = ['https://page.example/*'];
+    const hostCtx = makeContext(hostChrome);
+    vm.runInContext(logicSrc, hostCtx);
+    vm.runInContext(hostAccessSrc, hostCtx);
+    vm.runInContext(bgSrc, hostCtx);
+    for (let i = 0; i < 4; i++) await flush();
+
+    const started = await send(hostChrome, {
+      type: 'ms-hls-download', url: blockedUrl, kind: 'hls', tabId: 7,
+      title: 'Blocked host', pageUrl: 'https://page.example/watch',
+    }, { tab: { id: 7 } });
+    ok(started && started.started, 'blocked-host save is accepted before the preflight runs');
+    for (let i = 0; i < 8; i++) await flush();
+
+    const job = await send(hostChrome, { type: 'ms-hls-status', url: blockedUrl, jobKey: started.jobKey });
+    eq(job && job.status, 'failed', 'cross-origin media job fails');
+    ok(/media-cdn\.example\.net/.test(String(job && job.error)), 'the failure names the blocked host: ' + (job && job.error));
+    ok(String(job && job.error).indexOf('abc123') === -1, 'the failure leaks no signature');
+    eq(job && job.needsHosts, ['https://media-cdn.example.net/*'], 'the blocked pattern is exposed for the popup');
+    eq(hostChrome.__swFetchLog.filter(function (u) { return u.indexOf('media-cdn.example.net') >= 0; }).length, 0,
+      'no fetch is attempted for a host the extension may not read');
+
+    const blockedJobs = (await send(hostChrome, { type: 'ms-get-jobs' })).jobs;
+    const blocked = blockedJobs.find(function (j) { return j.needsHosts && j.needsHosts.length; });
+    ok(blocked, 'the jobs list exposes the blocked host');
+    eq(blocked && blocked.needsHosts, ['https://media-cdn.example.net/*'], 'jobs list patterns');
+
+    const denied = await send(hostChrome, { type: 'ms-retry-host-access', jobKey: blocked.jobKey });
+    ok(denied && denied.error, 'retrying without the grant is refused');
+    ok(denied && /media-cdn\.example\.net/.test(String(denied.error)), 'refusal still names the host: ' + (denied && denied.error));
+
+    hostChrome.permissions.granted = ['https://page.example/*', 'https://media-cdn.example.net/*'];
+    const retried = await send(hostChrome, { type: 'ms-retry-host-access', jobKey: blocked.jobKey });
+    ok(retried && retried.started, 'retry after the grant is accepted: ' + JSON.stringify(retried));
+    for (let i = 0; i < 8; i++) await flush();
+    ok(hostChrome.__swFetchLog.some(function (u) { return u.indexOf('media-cdn.example.net') >= 0; }),
+      'the retry actually fetches the newly granted host');
+    const afterRetry = await send(hostChrome, { type: 'ms-hls-status', url: blockedUrl, jobKey: started.jobKey });
+    eq(afterRetry && afterRetry.needsHosts, null, 'a cleared failure no longer asks for hosts');
   }
 
   report('background');

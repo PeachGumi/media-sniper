@@ -258,6 +258,19 @@ def browser_run(browser, root, functional=False, fixture_root=None):
             if dash.returncode!=0:
                 log.flush(); print_log_tail(log_path)
                 return False
+        # Opt-in: media on a host the extension has not been granted (VDH ships
+        # <all_urls>, this build asks at runtime).
+        if os.environ.get("MEDIA_SNIPER_E2E_HOST_ACCESS") == "1":
+            host_access=subprocess.run([sys.executable,os.path.join(REPO_ROOT,"scripts","e2e_host_access_test.py")],env=os.environ.copy())
+            if host_access.returncode!=0:
+                log.flush(); print_log_tail(log_path)
+                return False
+        # Opt-in: per-entry thumbnails taken from the page.
+        if os.environ.get("MEDIA_SNIPER_E2E_THUMB") == "1":
+            thumb=subprocess.run([sys.executable,os.path.join(REPO_ROOT,"scripts","e2e_thumbnail_test.py")],env=os.environ.copy())
+            if thumb.returncode!=0:
+                log.flush(); print_log_tail(log_path)
+                return False
         return True
     finally:
         teardown()

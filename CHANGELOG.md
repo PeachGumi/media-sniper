@@ -1,5 +1,29 @@
 # Changelog
 
+## v0.13.0 (2026-09-16)
+
+### Added
+
+- Every detected entry now shows a thumbnail, like the reference
+  implementation. It is taken from the page: a frame from the element that is
+  playing the item when the pixels are readable, otherwise that element's
+  poster, otherwise the page's own social image (`og:image` / `twitter:image`);
+  a page with none of those keeps a quiet placeholder rather than a broken
+  image. The still is produced by the content script, cached in the worker for
+  the session, and never persisted.
+
+### Fixed
+
+- Media hosted on an origin the extension has not been granted no longer dies
+  as `TypeError: Failed to fetch`. The reference implementation ships
+  `host_permissions: ["<all_urls>"]`, so this case cannot happen for it; this
+  build asks for site access at runtime, and a CDN or separate media host was
+  simply unreachable. A job now names the blocked host before it fetches
+  ("配信元へのアクセス許可がありません: cdn.example"), the popup offers
+  "配信元を許可して再試行", and the same job is rerun once the grant exists
+  (one click, same media item, no need to find it again). Runtime failures
+  (a redirect to an ungranted CDN) map to the same actionable error.
+
 ## v0.12.5 (2026-09-16)
 
 ### Fixed

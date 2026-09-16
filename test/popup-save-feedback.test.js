@@ -6,6 +6,7 @@ const { eq, ok, report } = require('./harness.js');
 const L = require('../src/logic.js');
 
 const popupSrc = fs.readFileSync(path.join(__dirname, '..', 'popup', 'popup.js'), 'utf8');
+const hostAccessSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'host-access.js'), 'utf8');
 
 function makeElement(tag, id) {
   const listeners = {};
@@ -25,6 +26,12 @@ function makeElement(tag, id) {
     setAttribute: function (name, value) { el[name] = String(value); },
     removeAttribute: function (name) { delete el[name]; },
     getAttribute: function (name) { return el[name]; },
+    querySelector: function (selector) {
+      const wanted = String(selector).replace(/^button\./, '').replace(/^\./, '');
+      return el.children.find(function (child) {
+        return String(child.className || '').split(/\s+/).indexOf(wanted) !== -1;
+      }) || null;
+    },
     __listeners: listeners,
   };
   Object.defineProperty(el, 'textContent', {
@@ -104,8 +111,40 @@ function allText(el) { return (el.textContent || '') + (el.children || []).map(a
   };
   ctx.globalThis = ctx;
   vm.createContext(ctx);
+  // A blocked media host needs the same helper the popup ships with.
+  vm.runInContext(hostAccessSrc, ctx);
   vm.runInContext(popupSrc, ctx);
   await flush();
+
+  // Host grants: the popup asks for the exact patterns a failed job reported.
+  chrome.__grantAnswer = false;
+  chrome.permissions = {
+    granted: [],
+    requestCalls: [],
+    contains: function (opts) {
+      return Promise.resolve(((opts && opts.origins) || []).every(function (o) { return chrome.permissions.granted.indexOf(o) !== -1; }));
+    },
+    request: function (opts) {
+      const origins = (opts && opts.origins) || [];
+      chrome.permissions.requestCalls.push(origins.slice());
+      if (chrome.__grantAnswer) origins.forEach(function (o) {
+        if (chrome.permissions.granted.indexOf(o) === -1) chrome.permissions.granted.push(o);
+      });
+      return Promise.resolve(!!chrome.__grantAnswer);
+    },
+  };
+  const retryMessages = [];
+  const retryAnswers = [];
+  const originalSendMessage = chrome.runtime.sendMessage;
+  chrome.runtime.sendMessage = function (message) {
+    if (message && message.type === 'ms-retry-host-access') {
+      retryMessages.push(message);
+      const callback = arguments[1];
+      if (callback) callback(retryAnswers.length ? retryAnswers.shift() : { started: true });
+      return;
+    }
+    return originalSendMessage.apply(null, arguments);
+  };
 
   eq(elements.jobsList.children.length, 1, 'global jobs render separately from detected media');
   ok(allText(elements.jobsList.children[0]).indexOf('Other tab video') >= 0, 'job from another page tab is visible');
@@ -386,6 +425,70 @@ function allText(el) { return (el.textContent || '') + (el.children || []).map(a
   const resumedDirectSave = elements.list.children[0].children[3];
   eq(resumedDirectSave.disabled, true, 'reopened popup reconnects to an active direct download');
   eq(resumedDirectSave.textContent, 'saving', 'reopened popup immediately shows direct download activity');
+
+  // --- host access: a blocked media host becomes one click ------------------
+  eq(vm.runInContext("hostsLabel(['https://a.example/*','https://b.example/*','https://c.example/*','https://d.example/*'])" , ctx),
+    'a.example, b.example, c.example +1', 'host label lists hosts, not patterns');
+  eq(vm.runInContext("hostsLabel(['https://only.example/*'])", ctx), 'only.example', 'host label for one host');
+
+  const hostBox = makeElement('div');
+  let grantedRuns = 0;
+  const hostBtn = vm.runInContext('addHostAccessButton', ctx)(hostBox, ['https://media-cdn.example.net/*'], function () { grantedRuns++; });
+  ok(hostBtn && hostBtn.className === 'host-access', 'blocked host renders a grant button');
+  eq(allText(hostBtn), 'grantHosts', 'grant button carries the localized label');
+  eq(vm.runInContext('addHostAccessButton', ctx)(hostBox, ['https://media-cdn.example.net/*'], null), null,
+    'the same container never shows two grant buttons');
+
+  hostBtn.dispatch('click');
+  await flush(); await flush();
+  eq(chrome.permissions.requestCalls.length, 1, 'clicking asks the browser for the blocked host');
+  eq(chrome.permissions.requestCalls[0], ['https://media-cdn.example.net/*'], 'the exact pattern from the failure is requested');
+  eq(grantedRuns, 0, 'a denied grant does not retry the save');
+  eq(hostBtn.disabled, false, 'a denied grant re-enables the button');
+  eq(elements.status.textContent, 'accessDenied', 'a denied grant says so');
+
+  chrome.__grantAnswer = true;
+  hostBtn.dispatch('click');
+  await flush(); await flush();
+  eq(grantedRuns, 1, 'a granted host retries the same save');
+  eq(elements.status.textContent === 'hostAccessGranted', true, 'a granted host is acknowledged');
+
+  // the Jobs view: a failed job that names the host it could not reach
+  jobsState = [{
+    id: 'media:blocked', jobKey: 'blocked-job', type: 'media', status: 'failed', tabId: 5,
+    title: 'Blocked host video', error: '配信元へのアクセス許可がありません: media-cdn.example.net',
+    needsHosts: ['https://media-cdn.example.net/*'],
+  }];
+  ctx.loadJobs();
+  await flush(); await flush();
+  const blockedJobRow = elements.jobsList.children[0];
+  ok(allText(blockedJobRow).indexOf('hostAccessHint') >= 0, 'blocked-host job explains what is missing');
+  const jobGrant = blockedJobRow.children.find(function (child) {
+    return String(child.className || '').indexOf('host-access') !== -1;
+  });
+  ok(jobGrant, 'blocked-host job offers the grant button');
+  jobGrant.dispatch('click');
+  await flush(); await flush();
+  eq(retryMessages.length, 1, 'granting from the jobs list retries that job');
+  eq(retryMessages[0].jobKey, 'blocked-job', 'the retry targets the failed job');
+  eq(chrome.permissions.requestCalls[chrome.permissions.requestCalls.length - 1], ['https://media-cdn.example.net/*'],
+    'the jobs list requests the reported pattern');
+
+  retryAnswers.push({ error: 'まだ許可されていません' });
+  jobsState = [{
+    id: 'media:blocked', jobKey: 'blocked-job', type: 'media', status: 'failed', tabId: 5,
+    title: 'Blocked host video', error: '配信元へのアクセス許可がありません: media-cdn.example.net',
+    needsHosts: ['https://media-cdn.example.net/*'],
+  }];
+  ctx.loadJobs();
+  await flush(); await flush();
+  const secondGrant = elements.jobsList.children[0].children.find(function (child) {
+    return String(child.className || '').indexOf('host-access') !== -1;
+  });
+  secondGrant.dispatch('click');
+  await flush(); await flush();
+  eq(retryMessages.length, 2, 'a refused retry can be attempted again');
+  ok(elements.status.textContent.indexOf('failedPrefix') === 0, 'a refused retry is reported: ' + elements.status.textContent);
 
   report('popup-save-feedback');
 })().catch(function (error) {

@@ -147,6 +147,12 @@ function renderJobs() {
     row.appendChild(head);
     row.appendChild(state);
     row.appendChild(progress);
+    if (job.status === 'failed' && job.needsHosts && job.needsHosts.length) {
+      state.textContent = progressState.text + ' ' + t('hostAccessHint', [hostsLabel(job.needsHosts)]);
+      addHostAccessButton(row, job.needsHosts, function () {
+        retryJobHostAccess(job.jobKey, loadJobs);
+      });
+    }
     list.appendChild(row);
   }
 }
@@ -344,6 +350,15 @@ function render() {
     badge.className = 'badge ' + item.kind;
     badge.textContent = labelFor(item);
 
+    // View-only: the page produces the thumbnail, so it arrives after the row.
+    // Appended last and positioned with CSS `order` so the row's child order
+    // (badge, info, copy, save) stays as the rest of the popup expects.
+    const thumb = document.createElement('img');
+    thumb.className = 'thumb';
+    thumb.alt = '';
+    thumb.src = 'data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==';
+    loadThumbnail(item, thumb);
+
     const info = document.createElement('div');
     info.className = 'info';
     const name = document.createElement('div');
@@ -399,9 +414,80 @@ function render() {
     row.appendChild(info);
     row.appendChild(copy);
     row.appendChild(dl);
+    row.appendChild(thumb);
     list.appendChild(row);
     reconnectActiveJob(item, dl);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Host access. VDH ships host_permissions: ['<all_urls>']; Media Sniper asks
+// for site access at runtime, so media on a second origin (a CDN, a separate
+// media host) is unreachable until that host is granted. A job that dies on
+// such a host carries the patterns, and the popup turns them into one click:
+// grant, then rerun the same job.
+// ---------------------------------------------------------------------------
+function hostsLabel(patterns) {
+  const api = globalThis.MediaSniperHostAccess;
+  const hosts = api ? api.hostsFor(patterns) : (patterns || []).map(String);
+  if (!hosts.length) return String(patterns || '');
+  return hosts.slice(0, 3).join(', ') + (hosts.length > 3 ? ' +' + (hosts.length - 3) : '');
+}
+
+function addHostAccessButton(container, patterns, onGranted) {
+  if (!container || !patterns || !patterns.length) return null;
+  if (container.querySelector && container.querySelector('button.host-access')) return null;
+  const btn = document.createElement('button');
+  btn.className = 'host-access';
+  btn.textContent = t('grantHosts');
+  btn.title = t('hostAccessHint', [hostsLabel(patterns)]);
+  btn.addEventListener('click', async function () {
+    btn.disabled = true;
+    try {
+      const granted = await chrome.permissions.request({ origins: patterns.slice() });
+      if (!granted) {
+        setStatus(t('accessDenied'), true);
+        btn.disabled = false;
+        return;
+      }
+      setStatus(t('hostAccessGranted'));
+      if (typeof onGranted === 'function') onGranted();
+    } catch (e) {
+      setStatus(t('accessFailed'), true);
+      btn.disabled = false;
+    }
+  });
+  container.appendChild(btn);
+  return btn;
+}
+
+function retryJobHostAccess(jobKey, after) {
+  chrome.runtime.sendMessage({ type: 'ms-retry-host-access', jobKey: jobKey }, function (resp) {
+    if (chrome.runtime.lastError || !resp) {
+      setStatus(t('noResponse'), true);
+      return;
+    }
+    if (resp.error) {
+      setStatus(t('failedPrefix', [String(resp.error)]), true);
+      return;
+    }
+    setStatus(t('hostAccessRetrying'));
+    if (typeof after === 'function') after();
+    else loadJobs();
+  });
+}
+
+function loadThumbnail(item, img) {
+  if (!item || !img) return;
+  chrome.runtime.sendMessage({ type: 'ms-item-thumb', itemKey: item.key || null, url: item.url, tabId: item.tabId }, function (resp) {
+    if (chrome.runtime.lastError || !resp || !resp.thumb) {
+      img.classList.add('empty');
+      return;
+    }
+    img.src = resp.thumb;
+    img.classList.remove('empty');
+    if (resp.thumbSource) img.dataset.source = resp.thumbSource;
+  });
 }
 
 function save(item, btn) {
@@ -454,9 +540,18 @@ function save(item, btn) {
           return;
         }
         if (resp && resp.error) {
-          setStatus(t('failedPrefix', [String(resp.error)]), true);
-          setActionStatus(btn, t('failedPrefix', [String(resp.error)]), true);
+          const message = t('failedPrefix', [String(resp.error)]);
+          setStatus(message, true);
+          setActionStatus(btn, message, true);
           resetSaveButton(btn);
+          if (resp.needsHosts && resp.needsHosts.length) {
+            setActionStatus(btn, message + ' ' + t('hostAccessHint', [hostsLabel(resp.needsHosts)]), true);
+            addHostAccessButton(btn.parentNode, resp.needsHosts, function () {
+              retryJobHostAccess(resp.jobKey || item.jobKey || item.url, function () {
+                pollHls(Object.assign({}, item, { jobKey: resp.jobKey || item.url }), btn, operation);
+              });
+            });
+          }
           return;
         }
         if (resp && resp.alreadyRunning) {
@@ -497,9 +592,18 @@ function save(item, btn) {
         return;
       }
       if (resp && resp.error) {
-        setStatus(t('failedPrefix', [String(resp.error)]), true);
-        setActionStatus(btn, t('failedPrefix', [String(resp.error)]), true);
+        const message = t('failedPrefix', [String(resp.error)]);
+        setStatus(message, true);
+        setActionStatus(btn, message, true);
         resetSaveButton(btn);
+        if (resp.needsHosts && resp.needsHosts.length) {
+          setActionStatus(btn, message + ' ' + t('hostAccessHint', [hostsLabel(resp.needsHosts)]), true);
+          addHostAccessButton(btn.parentNode, resp.needsHosts, function () {
+            retryJobHostAccess(resp.jobKey || '', function () {
+              pollHls({ key: resp.jobKey, jobKey: resp.jobKey, url: resp.jobKey, dashEntry: null }, btn, operation);
+            });
+          });
+        }
         return;
       }
       if (resp && resp.alreadyRunning) {
@@ -710,6 +814,14 @@ function pollHls(item, btn, operation) {
         const failed = t('failedPrefix', [job.error || 'unknown']);
         setStatus(failed, true);
         setActionStatus(btn, failed, true);
+        // The media host is not granted yet; offer the grant and rerun this job.
+        if (job.needsHosts && job.needsHosts.length) {
+          const hint = failed + ' ' + t('hostAccessHint', [hostsLabel(job.needsHosts)]);
+          setActionStatus(btn, hint, true);
+          addHostAccessButton(btn.parentNode, job.needsHosts, function () {
+            retryJobHostAccess(item.jobKey || item.url, function () { pollHls(item, btn, operation); });
+          });
+        }
       } else if (Date.now() - started > 30 * 60 * 1000) {
         clearInterval(timer);
         resetSaveButton(btn);

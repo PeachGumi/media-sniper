@@ -26,6 +26,9 @@ const MediaSniperSecurity = (function () {
     'ms-get-items', 'ms-get-jobs', 'ms-get-settings', 'ms-set-settings', 'ms-download-all',
     'ms-yt-mux-download', 'ms-clear', 'ms-download', 'ms-download-blob',
     'ms-hls-download', 'ms-hls-stop', 'ms-hls-status', 'ms-queue-status', 'ms-select-quality',
+    // Extension UI only: granting a blocked host reruns a job, and a thumbnail
+    // is a privileged read of the page. A content script must not reach either.
+    'ms-retry-host-access', 'ms-item-thumb',
   ]);
   const EXTENSION_INTERNAL_TYPES = new Set(['ms-offscreen-progress', 'ms-hls-progress']);
   const ALLOWED_KINDS = new Set(['video', 'audio', 'hls', 'hls-audio', 'dash', 'ts']);

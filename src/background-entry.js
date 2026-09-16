@@ -8,6 +8,10 @@
 // top-level worker evaluation.
 importScripts('install.js');
 importScripts('site-access.js');
+// Media on a second origin needs that host granted before the worker/offscreen
+// can fetch it; this names the missing host instead of failing with a bare
+// "Failed to fetch".
+importScripts('host-access.js');
 importScripts('security-bootstrap.js');
 MediaSniperSecurityBootstrap.install(chrome);
 importScripts('security-guard.js');

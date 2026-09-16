@@ -159,7 +159,17 @@
   }
 
   async function appendUrl(writable, url, headers, budget, state) {
-    const response = await fetch(url, { credentials: 'include', headers: headers || {} });
+    let response;
+    try {
+      response = await fetch(url, { credentials: 'include', headers: headers || {} });
+    } catch (err) {
+      // Same reasoning as the worker's fetch: an ungranted host must be named.
+      const api = globalThis.MediaSniperHostAccess;
+      if (api && typeof api.describeFetchFailure === 'function') {
+        try { await api.describeFetchFailure(url, err); } catch (_) { /* best effort */ }
+      }
+      throw err;
+    }
     return streamResponseInto(writable, response, budget, state);
   }
 

@@ -480,6 +480,111 @@ function mediaJobByPublicId(publicId) {
   return found;
 }
 
+// A blocked host has to be actionable, not just an error string. The popup
+// grants the pattern and retries the same item, so the patterns travel with the
+// failure as data (the message stays user-facing text).
+function applyJobFailure(job, err, resp) {
+  if (!job) return null;
+  const api = globalThis.MediaSniperHostAccess;
+  let patterns = null;
+  if (api) {
+    const info = api.info(err);
+    if (info && info.patterns.length) patterns = info.patterns;
+    const fromErr = err && Array.isArray(err.needsHosts) ? err.needsHosts : null;
+    if (!patterns && fromErr && fromErr.length) patterns = fromErr;
+    if (!patterns && resp && Array.isArray(resp.needsHosts) && resp.needsHosts.length) patterns = resp.needsHosts;
+    if (!patterns && resp) {
+      const fromResp = api.info(resp.error);
+      if (fromResp && fromResp.patterns.length) patterns = fromResp.patterns;
+    }
+    if (patterns) patterns = api.uniquePatterns(patterns);
+  }
+  job.status = 'failed';
+  job.error = String((resp && resp.error) || (err && err.message) || err || 'download failed');
+  if (patterns && patterns.length) job.needsHosts = patterns;
+  persistActiveJobs();
+  return patterns;
+}
+
+// Preflight for a fetch the worker or the offscreen document is about to make.
+// The reference implementation never needs this (it ships <all_urls>); here the
+// host must be granted, and saying so beats a bare "Failed to fetch".
+//
+// The page's own origin is deliberately not gated: it may be covered by a
+// transient activeTab grant that `permissions.contains` does not report, so a
+// same-origin save is allowed to try and is mapped to the same actionable error
+// at runtime if the fetch really is blocked.
+async function hostAccessGate(urls, job, pageUrl) {
+  const api = globalThis.MediaSniperHostAccess;
+  if (!api || typeof api.missing !== 'function') return null;
+  const pagePattern = pageUrl ? api.patternFor(pageUrl) : null;
+  const wanted = (urls || []).filter(function (url) {
+    const pattern = api.patternFor(url);
+    return !!pattern && pattern !== pagePattern;
+  });
+  const missing = await api.missing(wanted);
+  if (!missing.length) return null;
+  if (job) job.needsHosts = missing;
+  const err = api.error(missing);
+  err.needsHosts = missing;
+  return err;
+}
+
+// ---------------------------------------------------------------------------
+// Thumbnails (view-only). The reference implementation shows one per media
+// entry; here the content script produces it from the page (playing frame >
+// element poster > page social image) and the worker keeps it in memory for the
+// popup. Nothing is persisted: a reloaded extension simply asks again.
+// ---------------------------------------------------------------------------
+const MAX_THUMB_CHARS = 400000;
+const thumbCache = new Map(); // 'tabId:itemKey' -> { thumb, source }
+
+function thumbCacheKey(tabId, item) {
+  const key = (item && item.key) || (item && item.url) || '';
+  return tabId + ':' + key;
+}
+
+async function itemThumbnail(tabId, itemKey, url) {
+  let items = state.itemsByTab.get(tabId) || [];
+  let item = items.find(function (x) {
+    return (itemKey && x.key === itemKey) || (url && x.url === url);
+  });
+  if (!item) {
+    // The caller may not know which tab reported the item (or the tab id may be
+    // stale after a reload); the item itself records where it came from.
+    state.itemsByTab.forEach(function (list, candidateTabId) {
+      if (item) return;
+      const found = (list || []).find(function (x) {
+        return (itemKey && x.key === itemKey) || (url && x.url === url);
+      });
+      if (found) { item = found; tabId = candidateTabId; }
+    });
+  }
+  if (!item || !tabId) return {};
+  const cacheKey = thumbCacheKey(tabId, item);
+  const cached = thumbCache.get(cacheKey);
+  if (cached) return { thumb: cached.thumb, thumbSource: cached.source || null, cached: true };
+  let resp = null;
+  try {
+    resp = await chrome.tabs.sendMessage(tabId, { type: 'ms-thumbnail', url: item.url });
+  } catch (_) {
+    // No content script: the site is not granted, the tab is gone, or the page
+    // replaced the document. The popup keeps the type badge.
+    return {};
+  }
+  const thumb = resp && typeof resp.thumb === 'string' && resp.thumb && resp.thumb.length <= MAX_THUMB_CHARS
+    ? resp.thumb
+    : null;
+  if (!thumb) return {};
+  const source = resp.source || null;
+  thumbCache.set(cacheKey, { thumb: thumb, source: source });
+  if (thumbCache.size > 60) {
+    const oldest = thumbCache.keys().next();
+    if (!oldest.done) thumbCache.delete(oldest.value);
+  }
+  return { thumb: thumb, thumbSource: source };
+}
+
 function publicQueueEntry(q) {
   return {
     id: q.id, status: q.status, filename: q.filename, error: publicError(q.error),
@@ -501,6 +606,7 @@ function publicJobs() {
       totalBytes: job.totalBytes || 0, startedAt: job.startedAt || 0,
       fetches: job.fetches || 0, fetchedBytes: job.fetchedBytes || 0,
       mode: job.mode || null, error: publicError(job.error),
+      needsHosts: job.needsHosts || null,
     });
   });
   state.queue.forEach(function (entry) {
@@ -636,7 +742,7 @@ async function makeBlobUrlFromRemote(url, mime, headers) {
     mime: mime || 'application/octet-stream',
     headers: headers || {},
   });
-  if (!resp || !resp.url) throw new Error('offscreen fetch failed' + (resp && resp.error ? ': ' + resp.error : ''));
+  if (!resp || !resp.url) throw offscreenFailure('offscreen fetch failed', resp);
   return { url: resp.url, size: resp.size || 0 };
 }
 
@@ -654,7 +760,7 @@ async function offscreenHlsBuild(req, job) {
     mime: req.mime,
   });
   if (job) job.done = job.total; // message may race; final state is authoritative
-  if (!resp || !resp.url) throw new Error('offscreen hls build failed' + (resp && resp.error ? ': ' + resp.error : ''));
+  if (!resp || !resp.url) throw offscreenFailure('offscreen hls build failed', resp);
   return { url: resp.url, size: resp.size || 0 };
 }
 
@@ -699,8 +805,16 @@ async function offscreenFfmpegRun(req) {
     headers: req.headers || {},
     pageUrl: req.pageUrl || null,
   });
-  if (!resp || !resp.url) throw new Error('ffmpeg job failed' + (resp && resp.error ? ': ' + resp.error : ''));
+  if (!resp || !resp.url) throw offscreenFailure('ffmpeg job failed', resp);
   return { url: resp.url, size: resp.size || 0, partial: !!resp.partial };
+}
+
+// An offscreen failure carries the host patterns it could not fetch (when that
+// is why it failed) so the popup can offer one grant-and-retry.
+function offscreenFailure(prefix, resp) {
+  const err = new Error(prefix + (resp && resp.error ? ': ' + resp.error : ''));
+  if (resp && Array.isArray(resp.needsHosts) && resp.needsHosts.length) err.needsHosts = resp.needsHosts;
+  return err;
 }
 
 function responseHeader(res, name) {
@@ -756,7 +870,22 @@ function swFetchText(url, headers) {
   return fetch(url, { credentials: 'include', headers: headers || {} }).then(function (res) {
     if (!res.ok) throw new Error('http ' + res.status);
     return boundedResponseText(res, L.MAX_HLS_PLAYLIST_CHARS);
+  }).catch(function (err) {
+    // A cross-origin redirect (media host on a CDN the user has not granted)
+    // fails as a bare TypeError. Preflight catches the hosts we know about
+    // before the request; this covers the ones we only learn here.
+    return missingHostFetchError(url, err);
   });
+}
+
+// Re-throw a failed fetch as a named host problem when the host is simply not
+// granted, so the popup can offer the grant instead of "Failed to fetch".
+async function missingHostFetchError(url, err) {
+  const api = globalThis.MediaSniperHostAccess;
+  if (api && typeof api.describeFetchFailure === 'function') {
+    try { await api.describeFetchFailure(url, err); } catch (_) { /* best effort */ }
+  }
+  throw err;
 }
 
 function withToken(url, token) {
@@ -771,6 +900,9 @@ function withToken(url, token) {
 async function runHlsJob(jobKey, playlistUrl) {
   const job = state.hlsJobs.get(jobKey);
   if (!job) throw new Error('no job');
+
+  const playlistGate = await hostAccessGate([playlistUrl], job, job.pageUrl);
+  if (playlistGate) throw playlistGate;
 
   // Replay the headers the page's player used for this playlist (X's CDN
   // requires Authorization: Bearer *** playlists AND segments alike).
@@ -801,6 +933,19 @@ async function runHlsJob(jobKey, playlistUrl) {
   const media = L.parseM3u8(mediaText, mediaUrl);
   if (media.type !== 'media') throw new Error('not a media playlist');
   if (!media.segments.length) throw new Error('playlist has no segments');
+
+  // The playlist may live on the page's origin while the segments (or the fMP4
+  // init segment) live on a CDN: gate them too, or the job dies mid-download
+  // with a bare fetch error. A few representative URLs keep this to one round
+  // trip per host; permission is per origin, not per URL.
+  const segmentGate = await hostAccessGate(
+    [mediaUrl, job.audioUrl, media.initUrl]
+      .concat(media.segments.slice(0, 3).map(function (s) { return s.url; }))
+      .filter(Boolean),
+    job,
+    job.pageUrl
+  );
+  if (segmentGate) throw segmentGate;
 
   job.mediaUrl = mediaUrl;
   const audioOnly = L.isAudioOnlyPlaylist(media);
@@ -865,10 +1010,8 @@ async function runHlsJob(jobKey, playlistUrl) {
       job.title = (job.title || 'stream') + ' [' + fmtClock(secs) + ']';
       return finishMediaJob(jobKey, made, job.ext, audioOnly ? 'audio' : 'video');
     }).catch(function (err) {
-      job.status = 'failed';
-      job.error = String(err && err.message || err);
-      persistActiveJobs();
-      return { error: job.error };
+      applyJobFailure(job, err);
+      return { error: job.error, needsHosts: job.needsHosts || null };
     });
   }
 
@@ -1022,6 +1165,60 @@ function reconcileRestoredQueueEntry(entry) {
   });
 }
 
+// After the user grants a blocked host, re-run the SAME job rather than asking
+// them to find the media item again. The job record already carries everything
+// the runner needs (source URL, variant, DASH entry, audio track).
+async function retryHostAccess(jobKey) {
+  const resolved = jobKey ? (state.hlsJobs.get(jobKey) ? { key: jobKey, job: state.hlsJobs.get(jobKey) } : mediaJobByPublicId(jobKey)) : null;
+  const job = resolved ? resolved.job : null;
+  jobKey = resolved ? resolved.key : jobKey;
+  if (!job) return { error: 'ジョブが見つかりません' };
+  if (isMediaJobRunning(job)) return { alreadyRunning: true, jobKey: jobKey };
+  const patterns = Array.isArray(job.needsHosts) ? job.needsHosts : [];
+  if (!patterns.length) return { error: '再試行できるアクセス許可がありません' };
+  const gate = await hostAccessGate(patterns, job);
+  if (gate) return { error: gate.message, needsHosts: patterns };
+
+  job.needsHosts = null;
+  job.error = null;
+  job.status = 'queued';
+  job.done = 0;
+  job.bytes = 0;
+  job.seconds = 0;
+  persistActiveJobs();
+
+  const url = job.sourceUrl;
+  const isYtMux = job.mode === 'mux' || /^yt-mux:/.test(jobKey) || job.variantKey === 'yt-mux';
+  let runner = null;
+  if (isYtMux) {
+    const item = {
+      url: itemRefFromJob(job),
+      key: job.itemKey || null,
+      audioUrl: job.audioUrl || null,
+      headers: job.headers || null,
+      pageUrl: job.pageUrl || null,
+      title: job.title || null,
+      via: 'youtube',
+    };
+    if (!item.audioUrl) return { error: '音声トラックのURLがないため再試行できません' };
+    runner = function () { return runYtMuxJob(jobKey, item); };
+  } else if (job.dashEntry != null || /\.mpd(\?|$)/i.test(url || '')) {
+    runner = function () { return runDashJob(jobKey, url); };
+  } else {
+    runner = function () { return runHlsJob(jobKey, url); };
+  }
+  scheduleMediaExecution(jobKey, runner).catch(function (err) {
+    const j = state.hlsJobs.get(jobKey);
+    if (j) applyJobFailure(j, err);
+  });
+  return { started: true, jobKey: jobKey };
+}
+
+// The media URL of a job whose item may no longer be in the tab list.
+function itemRefFromJob(job) {
+  return job.sourceUrl || job.blobUrl || null;
+}
+
 function recoverRestoredWork() {
   return Promise.all(state.queue.map(reconcileRestoredQueueEntry)).then(function () {
     recoverRestoredMediaJobs();
@@ -1042,6 +1239,8 @@ function recoverRestoredWork() {
 async function runDashJob(jobKey, url) {
   const job = state.hlsJobs.get(jobKey);
   if (!job) throw new Error('no job');
+  const manifestGate = await hostAccessGate([url], job, job.pageUrl);
+  if (manifestGate) throw manifestGate;
   const hdrs = headersFor(url, null, job.pageUrl);
   job.status = 'fetching';
   const mpdText = await swFetchText(url, hdrs);
@@ -1054,6 +1253,16 @@ async function runDashJob(jobKey, url) {
   }
   if (!track) track = parsed.tracks.find(function (t) { return t.type === job.dashType; }) || parsed.tracks[0];
   if (!track || !track.segments.length) throw new Error('トラックのセグメントを解決できませんでした');
+
+  // Tracks usually live on a CDN that is not the page origin (googlevideo-style
+  // hosts): check before the build starts streaming rather than mid-track.
+  const trackGate = await hostAccessGate(
+    [track.initUrl, parsed.tracks.length > 1 ? (parsed.tracks.find(function (t) { return t.type !== track.type; }) || {}).initUrl : null]
+      .concat(track.segments.slice(0, 3).map(function (s) { return s.url; })),
+    job,
+    job.pageUrl
+  );
+  if (trackGate) throw trackGate;
 
   job.mode = 'concat';
   job.status = 'combining';
@@ -1088,7 +1297,7 @@ async function offscreenDashBuild(req, job) {
     audio: req.audio ? { initUrl: req.audio.initUrl || null, segments: req.audio.segments } : null,
     headers: req.headers,
   });
-  if (!resp || !resp.url) throw new Error('DASHビルド失敗' + (resp && resp.error ? ': ' + resp.error : ''));
+  if (!resp || !resp.url) throw offscreenFailure('DASHビルド失敗', resp);
   return { url: resp.url, size: resp.size || 0 };
 }
 
@@ -1209,11 +1418,8 @@ function resumeRestoredMediaJob(jobKey, job) {
   persistActiveJobs();
   scheduleMediaExecution(jobKey, runner).catch(function (err) {
     const j = state.hlsJobs.get(jobKey);
-    if (j && isMediaJobRunning(j)) {
-      j.status = 'failed';
-      j.error = String(err && err.message || err);
-    }
-    persistActiveJobs();
+    if (j && isMediaJobRunning(j)) applyJobFailure(j, err);
+    else persistActiveJobs();
   });
 }
 
@@ -1247,8 +1453,8 @@ function startHls(tabId, jobKey, url, title, pageUrl, dashEntry, dashType, audio
     return result;
   }).catch(function (err) {
     const j = state.hlsJobs.get(jobKey);
-    if (j) { j.status = 'failed'; j.error = String(err && err.message || err); persistActiveJobs(); }
-    return { error: j && j.error, jobKey: jobKey };
+    if (j) applyJobFailure(j, err);
+    return { error: j && j.error, needsHosts: (j && j.needsHosts) || null, jobKey: jobKey };
   });
 }
 
@@ -1783,7 +1989,7 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
       persistActiveJobs();
       scheduleMediaExecution(jobKey, function () { return runYtMuxJob(jobKey, item); }).catch(function (err) {
         const j = state.hlsJobs.get(jobKey);
-        if (j) { j.status = 'failed'; j.error = String(err && err.message || err); persistActiveJobs(); }
+        if (j) applyJobFailure(j, err);
       });
       sendResponse({ started: true, jobKey: jobKey });
       return false;
@@ -1837,6 +2043,20 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
       stopLiveRecording(msg.url, msg.jobKey || null).then(sendResponse);
       return true;
     }
+    case 'ms-retry-host-access': {
+      // The user granted the blocked host in the popup: run the same job again.
+      retryHostAccess(msg.jobKey || null).then(sendResponse).catch(function (err) {
+        sendResponse({ error: String(err && err.message || err) });
+      });
+      return true;
+    }
+    case 'ms-item-thumb': {
+      // View-only data: the page holds the best thumbnail (a playing frame, its
+      // poster, or the page's social image), so it is produced on request and
+      // kept in memory — never in the persisted item list.
+      itemThumbnail(tabId, msg.itemKey || null, msg.url || null).then(sendResponse).catch(function () { sendResponse({}); });
+      return true;
+    }
     case 'ms-hls-status': {
       // jobKey form is used by yt-mux jobs (their key is not the media URL)
       const jobKey = msg.jobKey || buildMediaJobKey(msg.url, msg.dashEntry, msg.variantKey || null);
@@ -1852,6 +2072,7 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
         fetches: job.fetches || 0, fetchedBytes: job.fetchedBytes || 0,
         elapsedSeconds: job.startedAt ? Math.max(0, Math.floor((Date.now() - job.startedAt) / 1000)) : 0,
         receivedBytes: job.receivedBytes || 0, totalBytes: job.totalBytes || 0,
+        needsHosts: job.needsHosts || null,
       } : null); });
       return true;
     }

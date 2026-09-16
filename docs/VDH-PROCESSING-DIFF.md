@@ -148,6 +148,11 @@ Sniper の実装を**処理単位ごと**に対比した棚卸しです。目的
 | Media Sniper | 既定は `activeTab`、必要時にユーザー操作で `http(s)://*/*` を要求 (`docs/PERMISSIONS.md`) |
 | 判定 | **意図的な差** (能力差ではない) |
 
+## 2026-09-16 に埋めた差 (第2弾: 取得成功とサムネイル)
+
+7. **配信元ホストのアクセス許可** → VDH は `host_permissions: ["<all_urls>"]` を持つため、CDN や別ホストのメディアも最初から取得できる。Media Sniper は実行時にサイトアクセスを求める設計なので、許可していないホストの fetch が `TypeError: Failed to fetch` で落ちていた (実測: ページのみ許可した状態で別ホストの HLS を保存 → `error: Failed to fetch`、両方許可 → 同じジョブが 2,178,043 バイトで complete)。ジョブ開始前に必要ホストを検査し、`配信元へのアクセス許可がありません: <host>` とホスト名で失敗させ、ポップアップに「配信元を許可して再試行」を出す (許可後は同じジョブを再実行)。リダイレクト等で後から判明したホストも runtime で同じ形に変換する。E2E: `scripts/e2e_host_access_test.py`。
+8. **サムネイル表示** → ページから取得する (再生中要素のフレーム → その要素の poster → ページの og:image / twitter:image)。読めない場合 (cross-origin の taint、要素なし、取得失敗) はプレースホルダのまま。content script が生成し、worker がメモリ内にキャッシュ (永続化しない)。E2E: `scripts/e2e_thumbnail_test.py`。
+
 ## 2026-09-16 に埋めた差
 
 1. **出力のメモリ組み立て** → OPFS sink (連続書き込みの 8 MiB バッチ、disk-backed `File` URL を Downloads へ)。実測 1,192,552,190 バイトの保存に成功。

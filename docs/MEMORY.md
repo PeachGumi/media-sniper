@@ -3,6 +3,17 @@
 Media Sniper is designed to fail predictably instead of allowing an extension
 process to exhaust all available browser memory.
 
+## 配信元ホストのアクセス許可 (2026-09-16)
+
+- リリース版は `host_permissions` を持たず、`optional_host_permissions` + 実行時の許可で動く。VDH は `<all_urls>` なので、**CDN や別ホストのメディアは VDH では落ちて media sniper では落ちない**という差が出る。許可外ホストへの fetch は `TypeError: Failed to fetch` になり、原因が分からない。
+- 対策は2段: (1) ジョブ開始前の preflight `hostAccessGate(urls, job, pageUrl)` (ページ自身のオリジンは除外 — activeTab の一時許可を `permissions.contains` が報告しないため)、 (2) 実行時マッピング `MediaSniperHostAccess.describeFetchFailure(url, err)` (リダイレクト先など後から判明するホスト用)。どちらも `needsHosts: ['https://host/*']` をジョブに載せ、ポップアップが「配信元を許可して再試行」→ `ms-retry-host-access` で**同じジョブ**を再実行する。
+- 失敗理由に署名付きクエリを載せない (host のみ)。
+
+## サムネイル (2026-09-16)
+
+- ページから生成する: 再生中要素のフレーム (canvas, taint なら失敗) → 要素の poster → ページの og:image / twitter:image。content script が data URL 化し、worker がメモリ内 (最大60件) にキャッシュ。**永続化しない**。
+- 画像はページセッションで fetch して data URL 化する (hotlink 保護や Referer ポリシーを回避)。大きすぎる画像は URL のまま渡す。
+
 ## Supported processing model
 
 ### Direct browser downloads

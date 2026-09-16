@@ -219,6 +219,13 @@ globalThis.FetchWithRetry = async function (url, headers, attempts, fetchTimeout
     } catch (e) {
       clearTimeout(timer);
       if (e && e.name === 'AbortError') return (signal && signal.aborted) ? { aborted: true } : { timeout: true };
+      // "Failed to fetch" for a host the extension may not read is a permission
+      // problem, not a network problem: record the pattern so the job can offer
+      // the grant instead of showing a dead end.
+      const api = globalThis.MediaSniperHostAccess;
+      if (api && typeof api.describeFetchFailure === 'function') {
+        try { await api.describeFetchFailure(url, e); } catch (_) { /* best effort */ }
+      }
       lastErr = e;
     } finally {
       clearTimeout(timer);
@@ -245,6 +252,19 @@ let lastDone = null; // result of the most recent finished job (SW-restart recov
 // HLS emits one "Opening ..." line per segment, so Brave records a successful
 // download as hundreds of extension errors. Actual failure is determined from
 // ffmpeg's return code below; keep routine stdout/stderr out of DevTools.
+// A failed offscreen job must say which host was blocked: the fetch that failed
+// is what jsfetch reports to libav, so the pattern is recorded where the fetch
+// happened and handed to the worker with the error.
+function hostAccessFields() {
+  const api = globalThis.MediaSniperHostAccess;
+  const pending = api && typeof api.takePending === 'function' ? api.takePending() : [];
+  return pending.length ? { needsHosts: pending } : {};
+}
+
+function hostAccessError(message) {
+  return Object.assign({ error: message == null ? '' : String(message) }, hostAccessFields());
+}
+
 function discardLibavLog() {}
 
 function beginMediaJobKeepalive() {
@@ -270,7 +290,7 @@ function beginMediaJobKeepalive() {
 function respondWithMediaKeepalive(work, sendResponse) {
   const releaseKeepalive = beginMediaJobKeepalive();
   Promise.resolve().then(work).then(sendResponse).catch(function (err) {
-    sendResponse({ error: String(err && err.message || err) });
+    sendResponse(hostAccessError(String(err && err.message || err)));
   }).finally(releaseKeepalive);
 }
 
@@ -295,7 +315,7 @@ function releaseKeepaliveLease(leaseId) {
 }
 
 async function runFfmpegJob(msg, sendResponse) {
-  if (current) { sendResponse({ error: '別のffmpegジョブが実行中です' }); return; }
+  if (current) { sendResponse(hostAccessError('別のffmpegジョブが実行中です')); return; }
   const jobId = msg.jobId || msg.url;
   // Reserve synchronously BEFORE any await: the guard above is the only thing
   // keeping two wasm instances out of this document, and the wasm boot +
@@ -321,7 +341,7 @@ async function runFfmpegJob(msg, sendResponse) {
     current.libav = libav;
     current.chunks = chunks;
     if (current.abortRequested) {
-      sendResponse({ error: 'recording stopped before ffmpeg startup completed' });
+      sendResponse(hostAccessError('recording stopped before ffmpeg startup completed'));
       return;
     }
 
@@ -339,7 +359,7 @@ async function runFfmpegJob(msg, sendResponse) {
     await libav.mkwriterdev(OUT);
     if (current.abortRequested) {
       if (sink) await sink.abort();
-      sendResponse({ error: 'recording stopped during ffmpeg writer setup' });
+      sendResponse(hostAccessError('recording stopped during ffmpeg writer setup'));
       return;
     }
     if (sink) {
@@ -417,7 +437,7 @@ async function runFfmpegJob(msg, sendResponse) {
 
     if (rc !== 0 && !msg.live) {
       if (sink) await sink.abort();
-      sendResponse({ error: 'ffmpeg failed (rc=' + rc + ')' });
+      sendResponse(hostAccessError('ffmpeg failed (rc=' + rc + ')'));
       return;
     }
 
@@ -425,7 +445,7 @@ async function runFfmpegJob(msg, sendResponse) {
       const written = sink.bytes();
       if (!written) {
         await sink.abort();
-        sendResponse({ error: 'ffmpeg produced no output' + (rc ? ' (rc=' + rc + ')' : '') });
+        sendResponse(hostAccessError('ffmpeg produced no output' + (rc ? ' (rc=' + rc + ')' : '')));
         return;
       }
       // A recording that ended without anyone pressing Stop and produced a
@@ -434,7 +454,7 @@ async function runFfmpegJob(msg, sendResponse) {
       // (interrupted) or a mid-recording input failure keeps its partial file.
       if (msg.live && !interrupted && rc !== 0 && written < MIN_RECORDING_BYTES) {
         await sink.abort();
-        sendResponse({ error: 'ffmpeg failed (rc=' + rc + ')' });
+        sendResponse(hostAccessError('ffmpeg failed (rc=' + rc + ')'));
         return;
       }
       // Wait for the queued file-system writes, close the file and hand the
@@ -454,7 +474,7 @@ async function runFfmpegJob(msg, sendResponse) {
     for (const c of chunks) buf.set(c.data, c.pos);
 
     if (total === 0) {
-      sendResponse({ error: 'ffmpeg produced no output' + (rc ? ' (rc=' + rc + ')' : '') });
+      sendResponse(hostAccessError('ffmpeg produced no output' + (rc ? ' (rc=' + rc + ')' : '')));
       return;
     }
     const mime = (msg.ext === 'aac') ? 'audio/aac' : 'video/mp4';
@@ -463,7 +483,7 @@ async function runFfmpegJob(msg, sendResponse) {
     sendResponse({ url: blobUrl, size: total, partial: lastDone.partial });
   } catch (e) {
     if (sink) { try { await sink.abort(); } catch (err) { /* best effort */ } }
-    sendResponse({ error: String(e && e.message || e) });
+    sendResponse(hostAccessError(String(e && e.message || e)));
   } finally {
     if (current && current.timer) clearInterval(current.timer);
     current = null;
@@ -606,10 +626,10 @@ async function fetchTrack(track, headers, onProgress) {
 }
 
 async function handleDashBuild(msg, sendResponse) {
-  if (current) { sendResponse({ error: '別のffmpegジョブが実行中です' }); return; }
+  if (current) { sendResponse(hostAccessError('別のffmpegジョブが実行中です')); return; }
   const video = msg.video || null;
   const audio = msg.audio || null;
-  if (!video && !audio) { sendResponse({ error: 'DASHトラックがありません' }); return; }
+  if (!video && !audio) { sendResponse(hostAccessError('DASHトラックがありません')); return; }
   // Reserve before the long segment-fetch awaits (same reason as runFfmpegJob)
   const jobId = msg.playlistUrl || 'dash';
   current = { libav: null, jobId: jobId, chunks: null };
@@ -662,21 +682,21 @@ async function handleDashBuild(msg, sendResponse) {
     }
 
     if (rc !== 0) {
-      sendResponse({ error: 'ffmpeg出力に失敗しました (rc=' + rc + ')' });
+      sendResponse(hostAccessError('ffmpeg出力に失敗しました (rc=' + rc + ')'));
       return;
     }
 
     let total = 0;
     for (const c of chunks) total = Math.max(total, c.pos + c.data.length);
     if (total === 0) {
-      sendResponse({ error: 'ffmpeg出力が空です' + (rc ? ' (rc=' + rc + ')' : '') });
+      sendResponse(hostAccessError('ffmpeg出力が空です' + (rc ? ' (rc=' + rc + ')' : '')));
       return;
     }
     const buf = new Uint8Array(total);
     for (const c of chunks) buf.set(c.data, c.pos);
     sendResponse({ url: URL.createObjectURL(new Blob([buf], { type: 'video/mp4' })), size: total });
   } catch (e) {
-    sendResponse({ error: String(e && e.message || e) });
+    sendResponse(hostAccessError(String(e && e.message || e)));
   } finally {
     if (current && current.timer) clearInterval(current.timer);
     current = null;
@@ -731,8 +751,8 @@ function installFileInputs(libav, reader, entries) {
 // proven: jsfetch never enters the picture, so no deadlock).
 // ---------------------------------------------------------------------------
 async function handleMuxLocal(msg, sendResponse) {
-  if (current) { sendResponse({ error: '別のffmpegジョブが実行中です' }); return; }
-  if (!msg.videoUrl || !msg.audioUrl) { sendResponse({ error: '映像と音声のURLが必要です' }); return; }
+  if (current) { sendResponse(hostAccessError('別のffmpegジョブが実行中です')); return; }
+  if (!msg.videoUrl || !msg.audioUrl) { sendResponse(hostAccessError('映像と音声のURLが必要です')); return; }
   // Reserve before awaits (same busy-guard discipline as the other runners)
   const jobId = msg.jobId || 'mux-local';
   current = { libav: null, jobId: jobId, chunks: null };
@@ -806,14 +826,14 @@ async function handleMuxLocal(msg, sendResponse) {
 
     if (rc !== 0) {
       if (sink) await sink.abort();
-      sendResponse({ error: 'muxに失敗しました (rc=' + rc + ')' });
+      sendResponse(hostAccessError('muxに失敗しました (rc=' + rc + ')'));
       return;
     }
 
     if (sink) {
       if (!sink.bytes()) {
         await sink.abort();
-        sendResponse({ error: 'mux出力が空です' + (rc ? ' (rc=' + rc + ')' : '') });
+        sendResponse(hostAccessError('mux出力が空です' + (rc ? ' (rc=' + rc + ')' : '')));
         return;
       }
       const made = await sink.finish();
@@ -825,7 +845,7 @@ async function handleMuxLocal(msg, sendResponse) {
     let total = 0;
     for (const c of chunks) total = Math.max(total, c.pos + c.data.length);
     if (total === 0) {
-      sendResponse({ error: 'mux出力が空です' + (rc ? ' (rc=' + rc + ')' : '') });
+      sendResponse(hostAccessError('mux出力が空です' + (rc ? ' (rc=' + rc + ')' : '')));
       return;
     }
     const buf = new Uint8Array(total);
@@ -833,7 +853,7 @@ async function handleMuxLocal(msg, sendResponse) {
     sendResponse({ url: URL.createObjectURL(new Blob([buf], { type: 'video/mp4' })), size: total });
   } catch (e) {
     if (sink) { try { await sink.abort(); } catch (err) { /* best effort */ } }
-    sendResponse({ error: String(e && e.message || e) });
+    sendResponse(hostAccessError(String(e && e.message || e)));
   } finally {
     if (current && current.timer) clearInterval(current.timer);
     current = null;
