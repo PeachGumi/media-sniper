@@ -1,5 +1,30 @@
 # Changelog
 
+## v0.13.6 (2026-09-16)
+
+### Fixed
+
+- DASH uploads that use a **SegmentList** (an explicit list of segment URLs; this
+  is what ffmpeg's own dash muxer writes with `-use_template 0`) could not be
+  downloaded at all. The parser never looked for `SegmentURL`, so the shape fell
+  through to the single-file branch and produced "one segment = the manifest URL
+  itself" - the job then fetched the `.mpd` as if it were media. `Initialization`
+  and `SegmentURL` entries are now resolved (relative and absolute), inherited
+  from Representation, AdaptationSet or Period, and `mediaRange` byte-range lists
+  collapse to the one file they point into.
+- The same branch no longer invents a segment for a directory-only BaseURL, while
+  a BaseURL that names a file (`.../movie.mp4` plus `SegmentBase`) still becomes
+  the whole-file segment it is.
+
+### Notes
+
+- Still unsupported, verified in this pass and documented in
+  docs/VDH-PROCESSING-DIFF.md: live DASH (`type="dynamic"`), the reference
+  implementation's preview-clip downloads, format conversion (mp3/mkv/webm/ogg/
+  flv and subtitle muxing - the bundled libav enables no encoders at all), and
+  its YouTube throttling countermeasure. Everything else in the processing sweep
+  is either equivalent or verified by test.
+
 ## v0.13.5 (2026-09-16)
 
 ### Fixed

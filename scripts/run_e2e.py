@@ -107,6 +107,24 @@ def make_fixture_harness():
         os.path.join(hls,"media.m3u8"),
     ],check=True,timeout=60)
 
+    # A SegmentList DASH upload: ffmpeg's dash muxer emits SegmentTemplate by
+    # default, so -use_template 0 is what produces the shape this test needs.
+    dash_dir=os.path.join(hls,"dash")
+    os.makedirs(dash_dir,exist_ok=True)
+    subprocess.run([
+        ffmpeg,"-hide_banner","-loglevel","error","-y",
+        "-f","lavfi","-i","testsrc2=size=320x180:rate=24",
+        "-f","lavfi","-i","sine=frequency=770:sample_rate=48000",
+        "-t","6","-c:v","libx264","-preset","ultrafast","-pix_fmt","yuv420p","-g","48",
+        "-c:a","aac","-b:a","96k",
+        "-f","dash","-use_template","0","-use_timeline","0","-single_file","0",
+        "-seg_duration","2",
+        os.path.join(dash_dir,"stream.mpd"),
+    ],check=True,timeout=200)
+    with open(os.path.join(dash_dir,"index.html"),"w",encoding="utf-8") as f:
+        f.write("<!DOCTYPE html><html><head><meta charset='utf-8'><title>DASH SegmentList</title></head>"
+                "<body><script>fetch('stream.mpd').then(function(r){return r.text();}).catch(function(){});</script></body></html>\n")
+
     # Root-relative segment URIs (what X's manifests use) and a master with a
     # separate audio rendition: two shapes that used to fail as a bare
     # `ffmpeg failed (rc=-1)`. See scripts/verify_hls_nested.py.

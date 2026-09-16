@@ -82,6 +82,13 @@
     return { attrs: attrsToObject(m[1]), body: m[2] || '' };
   }
 
+  // A SegmentList may live on the Representation, the AdaptationSet or the
+  // Period; whichever scope declares it applies to the representation.
+  function segmentListFrom(scope) {
+    const m = /<SegmentList\b([^>]*?)(?:\/>|>([\s\S]*?)<\/SegmentList>)/i.exec(String(scope || ''));
+    return m ? (m[2] || '') : null;
+  }
+
   function segmentBaseFrom(scope) {
     const m = /<SegmentBase\b([^>]*?)(?:\/>|>)/i.exec(String(scope || ''));
     return m ? attrsToObject(m[1]) : null;
@@ -246,9 +253,49 @@
           }
           segments = buildSegments(effectiveAttrs, timeline, best, totalDur, repBase);
         } else {
-          const sb = segmentBaseFrom(best.body) || segmentBaseFrom(asPrefix) || segmentBaseFrom(periodPrefix);
-          const src = sb && sb.sourceURL;
-          segments = [resolveUrl(src || '', repBase)];
+          // SegmentList: an explicit list of segment URLs with an optional
+          // Initialization. Falling through to the SegmentBase branch made
+          // "one segment out of the manifest URL", so a SegmentList manifest
+          // could not be downloaded at all (the fetch used the .mpd itself).
+          const listBody = segmentListFrom(best.body) || segmentListFrom(asPrefix) || segmentListFrom(periodPrefix);
+          if (listBody != null) {
+            const init = /<Initialization\b([^>]*?)(?:\/>|>)/i.exec(listBody);
+            if (init) {
+              const ia = attrsToObject(init[1]);
+              const initSrc = ia.sourceURL || ia.initialisation;
+              if (initSrc) initUrl = resolveUrl(initSrc, repBase);
+            }
+            const urlRe = /<SegmentURL\b([^>]*?)(?:\/>|>)/gi;
+            let um;
+            const seenRangeFiles = Object.create(null);
+            while ((um = urlRe.exec(listBody)) !== null && segments.length < MAX_SEGMENTS) {
+              const a = attrsToObject(um[1]);
+              if (!a.media) continue;
+              if (a.mediaRange) {
+                // Byte ranges into a single file: fetch that file once rather
+                // than treating a range as a URL.
+                const resolved = resolveUrl(a.media, repBase);
+                if (!seenRangeFiles[resolved]) {
+                  seenRangeFiles[resolved] = true;
+                  segments.push(resolved);
+                }
+                continue;
+              }
+              segments.push(resolveUrl(a.media, repBase));
+            }
+          } else {
+            // SegmentBase / plain: one whole file, and only when it names one
+            // (a BaseURL chain can end in a directory; the manifest URL is
+            // never a segment).
+            const sb = segmentBaseFrom(best.body) || segmentBaseFrom(asPrefix) || segmentBaseFrom(periodPrefix);
+            const src = sb && sb.sourceURL;
+            // Without a sourceURL the composed BaseURL chain is the file itself
+            // when it names one (".../movie.mp4"), and never when it is a
+            // directory or the manifest.
+            const whole = src ? resolveUrl(src, repBase)
+              : (/[^/]$/.test(repBase) && !/\.mpd($|\?)/i.test(repBase) ? repBase : null);
+            segments = whole ? [whole] : [];
+          }
         }
 
         out.tracks.push({

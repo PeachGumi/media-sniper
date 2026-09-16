@@ -221,6 +221,39 @@ media sniper では `ffmpeg job failed: ffmpeg failed (rc=-1)` になった。�
 - 実行: `python3 scripts/e2e_detection_coverage.py`
   (パッケージ成果物に対しては `MEDIA_SNIPER_E2E_COVERAGE=1` で `scripts/run_e2e.py` 経由)。
 
+## 2026-09-16 に埋めた差 (第5弾: 処理単位の横断チェック)
+
+VDH のバンドルから処理分岐を機械的に抜き出し (`m3u8_*` / `youtube_*` / `-f hls|dash|webvtt` /
+muxer 名)、こちらの経路と突き合わせた。見つかった実害は1件。
+
+15. **SegmentList 形式の DASH** → VDH は ffmpeg の dash demuxer に任せるので通る。media sniper の
+    自前 MPD パーサは `<SegmentURL>` を見ておらず、SegmentTemplate が無い manifest は
+    「1セグメント = マニフェストURL自身」になっていた (実際に `.mpd` をメディアとして取得しようとする)。
+    修正: `Initialization` / `SegmentURL` を Representation / AdaptationSet / Period から継承して解決し、
+    `mediaRange` (1ファイルへのバイト範囲) はその1ファイルに畳む。ついでに「ディレクトリだけの BaseURL」が
+    セグメントになる問題も修正。回帰テスト: `test/dash-inheritance.test.js` (21)、検出は
+    `scripts/e2e_detection_coverage.py` の DASH ケース、保存は `scripts/verify_hls_nested.py` の
+    DASH ケース。
+    注: 本番で動くのは `src/dash-inheritance.js` が差し替える `parseMpdSegments` で、`logic.js` 側は
+    フォールバック (検出用)。両方に同じ規則を入れてある。
+
+このパスで「同等」と確認した処理単位 (実測/テスト根拠つき):
+
+- HLS: master/media、`EXT-X-MEDIA` の AUDIO 選択 (DEFAULT)、AES-128 + `EXT-X-KEY` ローテーション
+  (ffmpeg 任せ)、`EXT-X-MAP`、`EXT-X-BYTERANGE`、`EXT-X-PART` (LL-HLS)、相対/ルート相対/絶対 URI
+- DASH: SegmentTemplate `$Number$` / `$Time$` (SegmentTimeline `r=-1` 含む) / `$Bandwidth$` /
+  `$RepresentationID$`、BaseURL 階層継承、multi-Period、SegmentBase 単一ファイル、SegmentList
+- 出力: MP4 / M4A / AAC、disk-backed 大容量 (1.19GB 実測)
+
+このパスで「未対応」と確定したもの (VDH にあり):
+
+- **live DASH** (`type="dynamic"`) — 自前パーサが 0 セグメント。ライブは HLS のみ対応。
+- **プレビュー用の短いクリップ** (`m3u8_video_preview` / `youtube_video_preview`) — VDH のダウンロード前確認用。
+- **形式変換** (mp3 / mkv / webm / ogg / flv、字幕 mux `-f webvtt`、`libmp3lame` 等) — 現行 libav は
+  エンコーダを1つも有効にしていないため原理的に不可 (字幕と同じ根)。
+- **YouTube のスロットリング対策** (`youtube_throttle`) — こちらは直接取得。速度差はあり得るが取得は可能。
+- UI 面 (履歴・詳細・サイドパネル・スマート命名・字幕翻訳・コンパニオンアプリ連携)。
+
 ## 残差
 
 - **字幕 (12)**: 未対応。しかも現行 libav 成果物には **エンコーダが 1 つも入っていない** (`--enable-encoder=...` が configure に無い) ため、`-c:s mov_text` が使えない。実装するには (a) libav を `--enable-encoder=mov_text` (および入力側の webvtt parser/decoder) 付きで再ビルドして PROVENANCE / THIRD_PARTY_NOTICES を更新し、(b) variant の `SUBTITLES` グループ解析 → 字幕レンディションを OPFS の `.vtt` に組み立て → device 入力として `-map 2:s:0 -c:s mov_text -metadata:s:s:0 language=...` を付与する、の 2 段階が必要。VP9/AV1 など他コーデックの再エンコードが必要な用途にも同じ前提が効く。

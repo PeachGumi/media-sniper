@@ -908,10 +908,50 @@ var MediaSniperLogic = globalThis.MediaSniperLogic || (function () {
           }
         }
       } else {
-        // SegmentBase / plain: one segment = the whole resolved source
-        const sb = /<SegmentBase\b([^>]*?)(?:\/>|>)/i.exec(best.body);
-        const src = (sb && xmlAttr(sb[1], 'sourceURL')) || null;
-        segments.push(dashResolve(src || '', base));
+        // SegmentList: an explicit list of segment URLs (with an optional
+        // Initialization). Left unhandled it fell through to the SegmentBase
+        // branch and became "one segment = the manifest URL", so a SegmentList
+        // manifest could not be downloaded at all. The list may also be
+        // inherited from the AdaptationSet.
+        const segList = /<SegmentList\b([^>]*?)(?:\/>|>([\s\S]*?)<\/SegmentList>)/i.exec(best.body)
+          || /<SegmentList\b([^>]*?)(?:\/>|>([\s\S]*?)<\/SegmentList>)/i.exec(asBody);
+        if (segList) {
+          const listBody = segList[2] || '';
+          const init = /<Initialization\b([^>]*?)(?:\/>|>)/i.exec(listBody);
+          const initSrc = init ? (xmlAttr(init[1], 'sourceURL') || xmlAttr(init[1], 'initialisation')) : null;
+          if (initSrc) initUrl = dashResolve(initSrc, base);
+          const urlRe = /<SegmentURL\b([^>]*?)(?:\/>|>)/gi;
+          let um;
+          const seenRangeFiles = Object.create(null);
+          while ((um = urlRe.exec(listBody)) !== null && segments.length < DASH_MAX_SEGMENTS) {
+            const media = xmlAttr(um[1], 'media');
+            if (!media) continue;
+            const range = xmlAttr(um[1], 'mediaRange');
+            if (range) {
+              // Byte ranges into a single file: fetch that file once instead of
+              // treating a range as a URL. base is the composed BaseURL chain,
+              // so a bare media attribute resolves to the file itself.
+              const resolved = dashResolve(media, base);
+              if (!seenRangeFiles[resolved]) {
+                seenRangeFiles[resolved] = true;
+                segments.push(resolved);
+              }
+              continue;
+            }
+            segments.push(dashResolve(media, base));
+          }
+        } else {
+          // SegmentBase / plain: one segment = the whole resolved source, but
+          // only when it actually names a file (a BaseURL chain may end in a
+          // directory, and the manifest URL is never a segment).
+          const sb = /<SegmentBase\b([^>]*?)(?:\/>|>)/i.exec(best.body);
+          const src = (sb && xmlAttr(sb[1], 'sourceURL')) || null;
+          // Without a sourceURL the composed BaseURL chain is the file itself
+          // when it names one, never a directory and never the manifest.
+          const whole = src ? dashResolve(src, base)
+            : (/[^/]$/.test(base) && !/\.mpd($|\?)/i.test(base) ? base : null);
+          if (whole) segments.push(whole);
+        }
       }
 
       out.tracks.push({

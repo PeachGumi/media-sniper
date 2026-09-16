@@ -39,8 +39,11 @@ ALL = ["http://*/*", "https://*/*"]
 PREGRANTED = os.environ.get("MEDIA_SNIPER_E2E_PREGRANTED") == "1"
 
 CASES = [
-    ("RootRel HLS", FIX + "/hls/rootrel.m3u8", ["video"]),
-    ("Two Source HLS", FIX + "/hls/twosource.m3u8", ["video", "audio"]),
+    ("RootRel HLS", FIX + "/hls/rootrel.m3u8", ["video"], "hls"),
+    ("Two Source HLS", FIX + "/hls/twosource.m3u8", ["video", "audio"], "hls"),
+    # SegmentList DASH: this shape used to resolve to "one segment = the .mpd
+    # itself", so the job could not produce anything at all.
+    ("DASH SegmentList", FIX + "/hls/dash/stream.mpd", ["video", "audio"], "dash"),
 ]
 
 # Real-site check: MEDIA_SNIPER_E2E_CASES='[{"title":...,"url":...,"expect":["video","audio"]}]'
@@ -48,7 +51,7 @@ CASES = [
 _extra = os.environ.get("MEDIA_SNIPER_E2E_CASES")
 if _extra:
     try:
-        CASES = [(c["title"], c["url"], c.get("expect") or ["video"]) for c in json.loads(_extra)]
+        CASES = [(c["title"], c["url"], c.get("expect") or ["video"], c.get("kind") or "hls") for c in json.loads(_extra)]
     except Exception as exc:  # pragma: no cover
         raise SystemExit("MEDIA_SNIPER_E2E_CASES is not valid JSON: " + str(exc))
 
@@ -145,10 +148,13 @@ async def main():
     tab_id = int(tab_raw) if isinstance(tab_raw, (int, float)) else 0
 
     failures = []
-    for title, url, expect in CASES:
+    for title, url, expect, kind in CASES:
+        # a dash job needs its entry: startHls(tab, key, url, title, page, dashEntry, dashType)
+        entry = "0" if kind == "dash" else "null"
+        dtype = json.dumps("video") if kind == "dash" else "null"
         expr = (
             "startHls(" + str(tab_id) + "," + json.dumps(url) + "," + json.dumps(url) + "," +
-            json.dumps(title) + "," + json.dumps(PAGE) + ",null,null)"
+            json.dumps(title) + "," + json.dumps(PAGE) + "," + entry + "," + dtype + ")"
             ".then(r=>JSON.stringify(r)).catch(e=>JSON.stringify({error:String(e)}))"
         )
         started = json.loads(await eval_ws(sw_url, expr, timeout=90) or "{}")

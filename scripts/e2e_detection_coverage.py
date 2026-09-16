@@ -175,6 +175,12 @@ def make_fixture():
         ),
         "audio.html": "<audio controls src='audio.m3u8'></audio>",
         "mp4.html": "<video controls width='320' src='direct.mp4'></video>",
+        "dash.html": (
+            "<video id='v' controls></video><script>"
+            "var ms=new MediaSource();document.getElementById('v').src=URL.createObjectURL(ms);"
+            "fetch('stream.mpd').then(function(r){return r.text();}).catch(function(){});"
+            "</script>"
+        ),
         "bigmp4.html": "<video controls width='320' src='big.mp4'></video>",
     }
     for name, body in pages.items():
@@ -396,6 +402,7 @@ async def main():
             ("MSE-fed HLS", f"http://127.0.0.1:{fixture_port}/hls/mse.html"),
             ("manifest in page config", f"http://127.0.0.1:{fixture_port}/hls/config.html"),
             ("audio-only HLS", f"http://127.0.0.1:{fixture_port}/hls/audio.html"),
+            ("DASH manifest (SegmentList)", f"http://127.0.0.1:{fixture_port}/hls/dash.html"),
             ("whole mp4 below the size setting", f"http://127.0.0.1:{fixture_port}/hls/mp4.html"),
             ("whole mp4 above the size setting", f"http://127.0.0.1:{fixture_port}/hls/bigmp4.html"),
         ]

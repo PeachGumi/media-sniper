@@ -74,4 +74,66 @@ require('../src/dash-inheritance.js');
   ok(tracks[0].segments === undefined, 'detection view omits segment list');
 }
 
+// SegmentList: an explicit list of segment URLs. Before this was handled it
+// fell through to the SegmentBase branch and produced "one segment = the
+// manifest URL", so such a manifest could not be downloaded at all.
+{
+  const mpd = [
+    '<MPD mediaPresentationDuration="PT6S"><Period duration="PT6S">',
+    '<AdaptationSet contentType="video" mimeType="video/mp4"><Representation id="v" bandwidth="800000">',
+    '<SegmentList timescale="1" duration="2"><Initialization sourceURL="init.mp4"/>',
+    '<SegmentURL media="seg-1.m4s"/><SegmentURL media="seg-2.m4s"/><SegmentURL media="https://cdn.other/x.m4s"/>',
+    '</SegmentList></Representation></AdaptationSet></Period></MPD>',
+  ].join('');
+  const t = L.parseMpdSegments(mpd, 'https://cdn.example/v/stream.mpd').tracks[0];
+  eq(t.initUrl, 'https://cdn.example/v/init.mp4', 'SegmentList initialization resolved');
+  eq(t.segments, ['https://cdn.example/v/seg-1.m4s', 'https://cdn.example/v/seg-2.m4s', 'https://cdn.other/x.m4s'],
+    'SegmentList media entries resolved (relative and absolute)');
+}
+
+// A SegmentList declared on the AdaptationSet applies to its representations.
+{
+  const mpd = [
+    '<MPD mediaPresentationDuration="PT4S"><Period><AdaptationSet contentType="audio" mimeType="audio/mp4">',
+    '<SegmentList><Initialization sourceURL="a-init.mp4"/><SegmentURL media="a-1.m4s"/><SegmentURL media="a-2.m4s"/></SegmentList>',
+    '<Representation id="a" bandwidth="128000"/></AdaptationSet></Period></MPD>',
+  ].join('');
+  const t = L.parseMpdSegments(mpd, 'https://cdn.example/a/manifest.mpd').tracks[0];
+  eq(t.initUrl, 'https://cdn.example/a/a-init.mp4', 'AdaptationSet-level SegmentList initialization');
+  eq(t.segments.length, 2, 'AdaptationSet-level SegmentList inherited');
+}
+
+// Byte ranges into one file: fetch that file once instead of treating a range
+// as a URL.
+{
+  const mpd = [
+    '<MPD mediaPresentationDuration="PT4S"><Period><AdaptationSet contentType="video" mimeType="video/mp4">',
+    '<Representation id="v" bandwidth="1"><BaseURL>movie.mp4</BaseURL>',
+    '<SegmentList><Initialization range="0-999"/><SegmentURL media="movie.mp4" mediaRange="1000-1999"/>',
+    '<SegmentURL media="movie.mp4" mediaRange="2000-2999"/></SegmentList></Representation>',
+    '</AdaptationSet></Period></MPD>',
+  ].join('');
+  const t = L.parseMpdSegments(mpd, 'https://cdn.example/v/manifest.mpd').tracks[0];
+  eq(t.segments, ['https://cdn.example/v/movie.mp4'], 'mediaRange segments collapse to the one file');
+}
+
+// SegmentBase without sourceURL: the composed BaseURL is the file when it names
+// one, and never the manifest or a directory.
+{
+  const single = [
+    '<MPD mediaPresentationDuration="PT4S"><Period><AdaptationSet contentType="video" mimeType="video/mp4">',
+    '<Representation id="v" bandwidth="1"><BaseURL>movie.mp4</BaseURL><SegmentBase indexRange="0-999"/></Representation>',
+    '</AdaptationSet></Period></MPD>',
+  ].join('');
+  const t = L.parseMpdSegments(single, 'https://cdn.example/v/manifest.mpd').tracks[0];
+  eq(t.segments, ['https://cdn.example/v/movie.mp4'], 'single-file SegmentBase uses the BaseURL file');
+
+  const directory = [
+    '<MPD mediaPresentationDuration="PT4S"><Period><AdaptationSet contentType="video" mimeType="video/mp4">',
+    '<BaseURL>dir/</BaseURL><Representation id="v" bandwidth="1"/></AdaptationSet></Period></MPD>',
+  ].join('');
+  eq(L.parseMpdSegments(directory, 'https://cdn.example/v/manifest.mpd').tracks[0].segments, [],
+    'a directory BaseURL never becomes a segment');
+}
+
 report('dash-inheritance');
