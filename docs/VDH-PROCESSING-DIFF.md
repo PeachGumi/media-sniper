@@ -205,6 +205,22 @@ media sniper では `ffmpeg job failed: ffmpeg failed (rc=-1)` になった。�
     facebook.com 1件。vimeo は bot壁、x.com / instagram / bilibili / ok.ru はセッション無しでは
     プレイヤーが起動しないため、0件は拡張の能力の証拠にならない。
 
+## 検出カバレッジの機械照合 (2026-09-16)
+
+「VDH が検出/ダウンロードできて media sniper でできない」を推測で終わらせないため、
+`scripts/e2e_detection_coverage.py` が **ページ自身の resource timing を正解データ**として
+突き合わせる: ページが実際に取得したメディア URL (マニフェスト or 丸ごとのファイル) が
+すべて拡張の検出に現れることを検査する。VDH の内部を読むより強く、アダプタの有無に依存しない。
+
+- 判定は拡張自身の設定 (`minSizeKb`) を読んで行う。設定未満のファイルは仕様どおり落ちるので
+  「設定による除外」として区別し、ギャップとは呼ばない。
+- フィクスチャで固定している形: 素のHLS / MSE再生 / ページ設定内のマニフェスト /
+  音声のみHLS / 設定未満のmp4 / 設定超のmp4。
+- 実サイトはセッション無しヘッドレスで測れる範囲のみ。測定不能 (bot壁・プレイヤー起動せず) は
+  「unmeasurable」として記録し、失敗とも成功とも数えない。
+- 実行: `python3 scripts/e2e_detection_coverage.py`
+  (パッケージ成果物に対しては `MEDIA_SNIPER_E2E_COVERAGE=1` で `scripts/run_e2e.py` 経由)。
+
 ## 残差
 
 - **字幕 (12)**: 未対応。しかも現行 libav 成果物には **エンコーダが 1 つも入っていない** (`--enable-encoder=...` が configure に無い) ため、`-c:s mov_text` が使えない。実装するには (a) libav を `--enable-encoder=mov_text` (および入力側の webvtt parser/decoder) 付きで再ビルドして PROVENANCE / THIRD_PARTY_NOTICES を更新し、(b) variant の `SUBTITLES` グループ解析 → 字幕レンディションを OPFS の `.vtt` に組み立て → device 入力として `-map 2:s:0 -c:s mov_text -metadata:s:s:0 language=...` を付与する、の 2 段階が必要。VP9/AV1 など他コーデックの再エンコードが必要な用途にも同じ前提が効く。

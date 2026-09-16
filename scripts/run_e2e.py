@@ -312,6 +312,13 @@ def browser_run(browser, root, functional=False, fixture_root=None):
             if host_access.returncode!=0:
                 log.flush(); print_log_tail(log_path)
                 return False
+        # Opt-in: does the extension detect every media URL the page itself
+        # fetched (the differential that keeps "VDH finds it, we do not" closed)?
+        if os.environ.get("MEDIA_SNIPER_E2E_COVERAGE") == "1":
+            cov=subprocess.run([sys.executable,os.path.join(REPO_ROOT,"scripts","e2e_detection_coverage.py")],env=os.environ.copy(),timeout=900)
+            if cov.returncode!=0:
+                log.flush(); print_log_tail(log_path)
+                return False
         # Opt-in: per-entry thumbnails taken from the page.
         if os.environ.get("MEDIA_SNIPER_E2E_THUMB") == "1":
             thumb=subprocess.run([sys.executable,os.path.join(REPO_ROOT,"scripts","e2e_thumbnail_test.py")],env=os.environ.copy())

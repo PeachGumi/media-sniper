@@ -1,5 +1,26 @@
 # Changelog
 
+## v0.13.4 (2026-09-16)
+
+### Added
+
+- A machine check that no media the page itself fetched goes undetected
+  (`scripts/e2e_detection_coverage.py`). It takes the page's own resource timing
+  as ground truth - every manifest or whole media file the page requested - and
+  asserts each one appears in the extension's detected items. That is the
+  differential that keeps "the other downloader finds it, this one does not"
+  closed, without reading another extension's internals. The comparison uses the
+  extension's own `minSizeKb` setting, so a file below it is recorded as
+  "excluded by settings" instead of being counted as a gap.
+
+  Pinned shapes: plain HLS, MSE-fed playback, a manifest that only exists in
+  page data, audio-only HLS, a whole file below the size setting and one above
+  it. Real sites are measured as far as a session-less headless browser allows;
+  pages that never start a player are reported as unmeasurable rather than
+  counted either way. Current result: 7 measured and passing, 3 unmeasurable
+  (kick.com hit a bot wall on that run; x.com and vimeo.com do not start a
+  player without a session).
+
 ## v0.13.3 (2026-09-16)
 
 ### Added
