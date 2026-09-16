@@ -31,6 +31,7 @@ const includes = [
   'src/navigation-refresh.js',
   'src/direct-media-guard.js',
   'src/site-access.js',
+  'src/host-access.js',
   'src/install.js',
   'src/security-bootstrap.js',
   'src/security-guard.js',
@@ -69,6 +70,14 @@ for (const f of includes) {
     console.error('missing: ' + f);
     process.exit(1);
   }
+}
+
+// Requiring this file from a test must not build a zip: the include list is the
+// contract that test/pack-manifest.test.js checks against what the extension
+// actually loads at runtime.
+if (require.main !== module) {
+  module.exports = { includes: includes };
+  return;
 }
 
 const stage = fs.mkdtempSync(path.join(os.tmpdir(), 'media-sniper-pack-'));

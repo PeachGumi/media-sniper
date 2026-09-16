@@ -3,6 +3,11 @@
 Media Sniper is designed to fail predictably instead of allowing an extension
 process to exhaust all available browser memory.
 
+## パッケージ検証 (2026-09-16)
+
+- ローカルの E2E は既定で **リポジトリのツリー**を読み込む (`BASE_EXTENSION_ROOT` = リポジトリルート)。CI は `npm run zip` の成果物を展開し `MEDIA_SNIPER_EXTENSION_ROOT` をそこに向けて実行する。**新規ファイルを追加したら、ローカルでも必ず `npm run zip` → 展開 → `MEDIA_SNIPER_EXTENSION_ROOT=<展開先> scripts/run_e2e.py` で確認する**。これをやらずに push して、`src/host-access.js` が `scripts/pack.js` の対象漏れでパッケージに含まれず、SW の `importScripts` が失敗して CI の e2e だけが落ちた。
+- `test/pack-manifest.test.js` が「実行時に読み込まれるスクリプトが pack.js の includes に入っているか」を検査する (pack.js を require して一覧を取得)。
+
 ## 配信元ホストのアクセス許可 (2026-09-16)
 
 - リリース版は `host_permissions` を持たず、`optional_host_permissions` + 実行時の許可で動く。VDH は `<all_urls>` なので、**CDN や別ホストのメディアは VDH では落ちて media sniper では落ちない**という差が出る。許可外ホストへの fetch は `TypeError: Failed to fetch` になり、原因が分からない。
