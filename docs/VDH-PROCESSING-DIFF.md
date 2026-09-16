@@ -169,8 +169,13 @@ Sniper の実装を**処理単位ごと**に対比した棚卸しです。目的
 
 ## 検証
 
-- 単体: `npm test` (26 ファイル、`offscreen-streaming` / `offscreen-regressions` / `background` に今回の回帰テストを追加)
+- 単体: `npm test` (29 ファイル。`background` 212 / `popup-save-feedback` 119 / `offscreen-streaming` 66 / `offscreen-regressions` 55 / `host-access` 40 / `thumbnail-content` 18 / `pack-manifest` 5 に今回の回帰テストを追加)
 - 実機 E2E: `scripts/run_e2e.py` (direct / HLS / AES-128 / 認証付き HLS / OPFS / worker 再起動復元)、
   `scripts/e2e_large_output_test.py` (1.19 GB の成果物)、
   `scripts/e2e_live_recording_test.py` (ライブ録画 → 停止 → 部分ファイルの再生確認)、
-  `scripts/e2e_dash_mux_test.py` (794 MB の DASH トラック mux)
+  `scripts/e2e_dash_mux_test.py` (794 MB の DASH トラック mux)、
+  `scripts/e2e_host_access_test.py` (未許可ホスト: ホスト名つき失敗 + 許可ボタン → 許可済みなら同一ジョブが完了)、
+  `scripts/e2e_thumbnail_test.py` (フレーム/poster/og:image の各経路 + プレースホルダ)
+- パッケージ検証: `npm run zip` の展開物に対して `MEDIA_SNIPER_EXTENSION_ROOT=<展開先>` で E2E を実行する
+  (CI と同じ手順。リポジトリのツリーに対する実行では、パッケージ対象漏れのような欠陥は見つからない)。
+  `test/pack-manifest.test.js` が「実行時に読み込むスクリプトが `scripts/pack.js` の includes に入っているか」を固定する。
