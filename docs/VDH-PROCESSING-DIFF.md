@@ -161,6 +161,34 @@ Sniper の実装を**処理単位ごと**に対比した棚卸しです。目的
 4. **ライブ録画が即死** → `-bsf:a aac_adtstoasc` を TS ライブに限定して付与 (この muxer は ADTS→ASC を自動変換しない)。無人で小さい成果物は失敗として報告。実測: 22 秒の部分録画が再生可能。
 5. **mux 入力のメモリ上限 (384 MiB)** → `mkblockreaderdev` + `onblockread` による disk-backed 入力 (ffmpeg は OPFS ファイルを直接読む)。実装上の必須条件: libav はデバイスのバッファ表を **MEMFS ノード名**で引くため、デバイス登録名・ffmpeg に渡すパス・`ff_block_reader_dev_send` の名前をすべて同じ「素の名前」(`v.mp4`) に揃える必要がある。パス (`/v.mp4`) で登録すると読み出しが EAGAIN のまま無限に待つ (実測で踏んだ)。実測: 794,370,663 バイト (映像+音声の合計が旧上限超) の DASH mux が成功、ffprobe で映像+音声、duration 200.02 秒。
 
+## 2026-09-16 に埋めた差 (第3弾: HLS の URI 解決と2ソース mux)
+
+実例: `https://x.com/CuteIdolSunna/status/2099586589567451609` の動画は VDH では落ちせて、
+media sniper では `ffmpeg job failed: ffmpeg failed (rc=-1)` になった。原因は2つで、どちらも
+「ffmpeg に任せていた部分」にあった。
+
+9. **playlist 内 URI の解決** → VDH の worker には `m3u8-parser` が同梱されていて、HLS は
+   「jsfetch に丸投げする経路」と「自分で playlist を解析して segment を取得する経路」の2本を持つ。
+   media sniper は前者しか持たず、ffmpeg の HLS demuxer が `jsfetch:https://host/...` を入力に
+   ルート相対 URI (`URI="/amplify_video/..."`) を解決すると **ホストが落ちて**
+   `jsfetch:/amplify_video/...` になり、全 nested fetch が失敗して
+   `Output file does not contain any stream` → rc=-1 で終わっていた (相対 URI は偶然通るため
+   これまで隠れていた)。修正: `L.rewriteHlsUrisAbs` で segment / `EXT-X-MAP` / AES-128
+   `EXT-X-KEY` の URI をすべて絶対 `jsfetch:` URL に解決し、ローカルの playlist を ffmpeg に渡す。
+   実測: 同一 X マニフェストで 1080x1920 h264 が rc=0。
+10. **2ソース (映像+別レンディション音声) の mux** → VDH は `-i jsfetch:<video> -i jsfetch:<audio>`
+    を渡す。この libav ビルドでは **ネットワーク入力2本を同時に開けない** (2本目の最初の segment が
+    開けない = `Error when loading first segment`)。media sniper は音声トラック (小さい) を自前で
+    取得してローカルファイル化し、`-i <video playlist(jsfetch)> -i <audio file>` で mux する。
+    実測: 映像 1080x1920 + 音声 AAC stereo、8.04 秒の MP4 が1本生成。
+11. **失敗理由の可視化** → ffmpeg の stderr を捨てていたため、失敗は常に `ffmpeg failed (rc=-1)` と
+    しか出なかった。末尾ログを保持し、URL のクエリを伏せて失敗メッセージに添える (DevTools にも失敗時のみ出力)。
+12. **mux 入力のローカル化** → HLS の 2 ソース mux 用に組み立てたトラックは disk-backed OPFS File の
+    まま ffmpeg の device 入力として渡せるようにした (`msg.disk`)。
+
+残る制約: **ライブ playlist** は ffmpeg が再読取する必要があるためストリーム URL のまま渡す。
+ルート相対 URI を使うライブ配信は今回の修正の対象外 (ビルド依存の制約で、いまは検出時にしか直せない)。
+
 ## 残差
 
 - **字幕 (12)**: 未対応。しかも現行 libav 成果物には **エンコーダが 1 つも入っていない** (`--enable-encoder=...` が configure に無い) ため、`-c:s mov_text` が使えない。実装するには (a) libav を `--enable-encoder=mov_text` (および入力側の webvtt parser/decoder) 付きで再ビルドして PROVENANCE / THIRD_PARTY_NOTICES を更新し、(b) variant の `SUBTITLES` グループ解析 → 字幕レンディションを OPFS の `.vtt` に組み立て → device 入力として `-map 2:s:0 -c:s mov_text -metadata:s:s:0 language=...` を付与する、の 2 段階が必要。VP9/AV1 など他コーデックの再エンコードが必要な用途にも同じ前提が効く。

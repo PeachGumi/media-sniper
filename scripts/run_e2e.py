@@ -107,13 +107,54 @@ def make_fixture_harness():
         os.path.join(hls,"media.m3u8"),
     ],check=True,timeout=60)
 
+    # Root-relative segment URIs (what X's manifests use) and a master with a
+    # separate audio rendition: two shapes that used to fail as a bare
+    # `ffmpeg failed (rc=-1)`. See scripts/verify_hls_nested.py.
+    with open(os.path.join(hls,"media.m3u8"),encoding="utf-8") as f:
+        media_text=f.read()
+    rootrel=[]
+    for line in media_text.splitlines():
+        if line and not line.startswith("#"):
+            rootrel.append("/hls/"+line)
+        else:
+            rootrel.append(line)
+    with open(os.path.join(hls,"rootrel.m3u8"),"w",encoding="utf-8") as f:
+        f.write("\n".join(rootrel)+"\n")
+
+    vdir=os.path.join(hls,"v"); adir=os.path.join(hls,"a")
+    os.makedirs(vdir,exist_ok=True); os.makedirs(adir,exist_ok=True)
+    subprocess.run([
+        ffmpeg,"-hide_banner","-loglevel","error","-y",
+        "-f","lavfi","-i","testsrc2=size=320x180:rate=24","-t","6",
+        "-c:v","libx264","-preset","ultrafast","-pix_fmt","yuv420p","-g","48","-an",
+        "-f","hls","-hls_time","2","-hls_list_size","0",
+        "-hls_segment_filename",os.path.join(vdir,"seg%d.ts"),
+        os.path.join(vdir,"media.m3u8"),
+    ],check=True,timeout=120)
+    subprocess.run([
+        ffmpeg,"-hide_banner","-loglevel","error","-y",
+        "-f","lavfi","-i","sine=frequency=660:sample_rate=48000","-t","6",
+        "-c:a","aac","-b:a","96k","-vn",
+        "-f","hls","-hls_time","2","-hls_list_size","0",
+        "-hls_segment_filename",os.path.join(adir,"seg%d.ts"),
+        os.path.join(adir,"audio.m3u8"),
+    ],check=True,timeout=120)
+    with open(os.path.join(hls,"twosource.m3u8"),"w",encoding="utf-8") as f:
+        f.write(
+            "#EXTM3U\n#EXT-X-VERSION:6\n"
+            '#EXT-X-MEDIA:NAME="Audio",TYPE=AUDIO,GROUP-ID="aud",AUTOSELECT=YES,DEFAULT=YES,URI="a/audio.m3u8"\n'
+            '#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=320x180,CODECS="avc1.4d401f,mp4a.40.2",AUDIO="aud"\n'
+            "v/media.m3u8\n"
+        )
+
     # A second copy of the same valid stream is served behind a synthetic
     # Authorization requirement. The fixture page requests its playlist with
     # that header so webRequest captures the context; the bundled LibAV then
     # has to replay it for the protected segment during the save job.
     shutil.copy2(os.path.join(hls,"seg0.ts"),os.path.join(hls,"authseg0.ts"))
+    shutil.copy2(os.path.join(hls,"seg0.ts"),os.path.join(hls,"slowseg0.ts"))
     with open(os.path.join(hls,"slowmanifest.m3u8"),"w",encoding="utf-8") as f:
-        f.write("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.0,\nseg0.ts\n#EXT-X-ENDLIST\n")
+        f.write("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.0,\nslowseg0.ts\n#EXT-X-ENDLIST\n")
     shutil.copy2(os.path.join(hls,"audio.mp3"),os.path.join(hls,"slowaudio.aac"))
     with open(os.path.join(hls,"slowaudio.m3u8"),"w",encoding="utf-8") as f:
         f.write("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.0,\nslowaudio.aac\n#EXT-X-ENDLIST\n")
@@ -236,6 +277,12 @@ def browser_run(browser, root, functional=False, fixture_root=None):
             return False
         libav=subprocess.run([sys.executable,os.path.join(REPO_ROOT,"scripts","verify_aes.py"),str(fixture_port)],env=e,timeout=240)
         if libav.returncode!=0:
+            log.flush(); print_log_tail(log_path)
+            return False
+        # Root-relative URIs and a separate audio rendition (the two shapes that
+        # used to end as a bare rc=-1).
+        nested=subprocess.run([sys.executable,os.path.join(REPO_ROOT,"scripts","verify_hls_nested.py"),str(fixture_port)],env=e,timeout=300)
+        if nested.returncode!=0:
             log.flush(); print_log_tail(log_path)
             return False
         # Opt-in: a ~900 MiB artifact through the real ffmpeg path. Slow (the

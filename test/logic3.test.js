@@ -89,4 +89,43 @@ eq(variantsAfterRefresh.length, 1, 'signed HLS rendition refresh does not duplic
 eq(variantsAfterRefresh[0].url, hlsVariantNew.url, 'signed HLS rendition uses newest URL');
 eq(L.hlsVariantKey(hlsVariantOld), L.hlsVariantKey(hlsVariantNew), 'HLS selection key survives signature rotation');
 
+// --- HLS URI resolution (root-relative URIs killed whole downloads) --------
+// ffmpeg resolves a playlist's URIs against its input URL, and with a
+// `jsfetch:https://host/...` input a root-relative URI loses the host
+// ("jsfetch:/media/seg1.ts"). X's manifests are root-relative throughout, so
+// the worker now resolves every URI itself before ffmpeg sees the playlist.
+const rwBase = 'https://video.example.com/amplify/123/pl/abc.m3u8?tag=29';
+const rwSrc = [
+  '#EXTM3U',
+  '#EXT-X-VERSION:6',
+  '#EXT-X-MAP:URI="/amplify/123/aud/init.mp4"',
+  '#EXT-X-KEY:METHOD=AES-128,URI="key.bin"',
+  '#EXT-X-BYTERANGE:1000@0',
+  '#EXTINF:3.000,',
+  '/amplify/123/aud/0/seg0.m4s',
+  '#EXTINF:3.000,',
+  'relative/seg1.m4s',
+  '#EXTINF:3.000,',
+  'https://cdn.example.com/abs/seg2.m4s',
+  '#EXT-X-ENDLIST',
+].join('\n');
+const rw = L.rewriteHlsUrisAbs(rwSrc, rwBase);
+eq(rw.rewritten, 5, 'every URI in the playlist is rewritten');
+ok(rw.text.indexOf('jsfetch:https://video.example.com/amplify/123/aud/init.mp4') >= 0,
+  'root-relative EXT-X-MAP keeps the host');
+ok(rw.text.indexOf('jsfetch:https://video.example.com/amplify/123/pl/key.bin') >= 0,
+  'a relative AES key resolves against the playlist');
+ok(rw.text.indexOf('jsfetch:https://video.example.com/amplify/123/aud/0/seg0.m4s') >= 0,
+  'root-relative segment keeps the host');
+ok(rw.text.indexOf('jsfetch:https://video.example.com/amplify/123/pl/relative/seg1.m4s') >= 0,
+  'relative segment resolves against the playlist directory');
+ok(rw.text.indexOf('jsfetch:https://cdn.example.com/abs/seg2.m4s') >= 0,
+  'absolute segment gets the jsfetch prefix (no http protocol in this build)');
+ok(rw.text.indexOf('URI="/') === -1, 'no root-relative URI is left behind');
+ok(rw.text.indexOf('#EXT-X-BYTERANGE:1000@0') >= 0, 'byte ranges are untouched');
+ok(rw.text.indexOf('?tag=29') === -1, 'segment URIs are not given the playlist token');
+const rwNoop = L.rewriteHlsUrisAbs('#EXTM3U\n#EXT-X-ENDLIST\n', null);
+eq(rwNoop.rewritten, 0, 'without a base URL nothing is rewritten');
+eq(rwNoop.text.indexOf('EXTM3U') >= 0, true, 'the playlist text survives an empty base');
+
 report('logic3');

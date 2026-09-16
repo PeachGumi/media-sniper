@@ -1111,7 +1111,18 @@ async function run() {
   ok(twoResp && twoResp.started, 'two-source download started');
   await settle();
   eq(chrome.__ffmpegRuns.length, 1, 'one ffmpeg run');
-  eq(chrome.__ffmpegRuns[0].audioUrl.indexOf('ja.m3u8') >= 0, true, 'ffmpeg job got the separate audio playlist');
+  // The two-source mux no longer hands ffmpeg two network inputs: this libav
+  // build cannot open two jsfetch inputs at once (the second input's first
+  // segment never opens). The audio rendition is assembled locally and muxed as
+  // a file, so the job carries audioFileUrl instead of the audio playlist.
+  const twoRun = chrome.__ffmpegRuns[0];
+  eq(twoRun.audioUrl, null, 'no second network input for the two-source mux');
+  ok(!!twoRun.audioFileUrl || !!twoRun.audioUrl, 'the two-source job carries the built audio track');
+  // the video playlist is resolved by us: every URI absolute and jsfetch-prefixed
+  ok(typeof twoRun.playlistText === 'string' && twoRun.playlistText.indexOf('jsfetch:http') >= 0,
+    'video playlist arrives with resolved absolute URIs');
+  ok(twoRun.playlistText.indexOf('URI="/') === -1 && !/\n\//.test(twoRun.playlistText),
+    'no root-relative URI is left for ffmpeg to resolve');
   // headers replayed for BOTH playlists (captured Authorization must reach jsfetch)
   const twoHdrs = chrome.__ffmpegRuns[0].headers;
   ok(twoHdrs && typeof twoHdrs === 'object', 'two-source job has headers object');
@@ -1492,6 +1503,16 @@ async function run() {
     const behindJobs = await send(restartedChrome, { type: 'ms-get-jobs' });
     const behind = behindJobs.jobs.find(function (job) { return job.title === 'Behind live'; });
     eq(behind && behind.status, 'queued', 'save behind a recovered recording stays queued instead of failing busy');
+  }
+
+  {
+    // Live playlists keep the stream URL (ffmpeg has to re-read them as the
+    // window moves), VOD playlists are resolved by us.
+    const liveRun = chrome.__ffmpegRuns.find(function (run) { return run.live; });
+    if (liveRun) {
+      eq(liveRun.playlistText, null, 'a live job keeps the stream URL instead of a snapshot');
+      ok(String(liveRun.url).indexOf('.m3u8') >= 0, 'live job still targets the playlist URL');
+    }
   }
 
   // --- host access: media on an origin the user has not granted -------------

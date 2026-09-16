@@ -250,8 +250,10 @@
       }
       await writable.close();
       writable = null;
-      // final user-facing artifact: typed in-memory Blob (downloadable)
-      return fileUrl(temp, msg.mime || 'application/octet-stream', true);
+      // A mux input (msg.disk) stays a disk-backed OPFS File so ffmpeg can read
+      // it as a device input; the usual result is a typed in-memory Blob so the
+      // saved file keeps its extension.
+      return fileUrl(temp, msg.mime || 'application/octet-stream', !msg.disk);
     } catch (e) {
       try { if (writable) await writable.abort(); } catch (_) {}
       await removeTemp(temp.name);

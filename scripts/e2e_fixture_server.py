@@ -90,9 +90,13 @@ class Handler(SimpleHTTPRequestHandler):
                     self.wfile.flush()
                     time.sleep(.3)
             return
-        if path in ("/hls/slowmanifest.m3u8", "/hls/slowaudio.aac"):
+        if path in ("/hls/slowmanifest.m3u8", "/hls/slowaudio.aac", "/hls/slowseg0.ts"):
             # Keep the offscreen job alive beyond MV3's ordinary idle window.
-            # The popup is closed immediately after starting this fixture.
+            # The popup is closed immediately after starting this fixture. The
+            # segment is delayed as well: the playlist fetch now happens in the
+            # worker (the URIs are resolved before ffmpeg sees the playlist), so
+            # a delay on the playlist alone no longer keeps the *conversion*
+            # phase alive for the worker-restart step.
             time.sleep(35)
         if path in ("/hls/auth.m3u8", "/hls/authseg0.ts"):
             if self.headers.get("Authorization") != TOKEN:

@@ -272,6 +272,47 @@ function hostAccessError(message) {
 
 function discardLibavLog() {}
 
+// ffmpeg's own words are the only useful diagnostic for a failed conversion: a
+// bare "ffmpeg failed (rc=-1)" tells the user (and us) nothing. Routine output
+// stays suppressed; the tail is attached to the failure and printed to DevTools
+// only when the job actually fails.
+let ffmpegLogTail = [];
+const FFMPEG_LOG_TAIL_MAX = 40;
+
+function noteFfmpegLog(line, isError) {
+  const text = String(line == null ? '' : line);
+  if (!text) return;
+  ffmpegLogTail.push((isError ? 'err: ' : '') + text);
+  if (ffmpegLogTail.length > FFMPEG_LOG_TAIL_MAX) ffmpegLogTail.shift();
+}
+
+function resetFfmpegLog() { ffmpegLogTail = []; }
+
+function redactUrlTokens(line) {
+  return String(line).replace(/https?:\/\/[^\s"'<>]+/g, function (url) {
+    return url.replace(/\?.*$/, '?[redacted]');
+  });
+}
+
+// The reason a conversion failed, as one short line: the last diagnostics ffmpeg
+// produced, with signed queries removed.
+function ffmpegFailureDetail() {
+  const interesting = ffmpegLogTail.filter(function (line) {
+    return /error|invalid|not contain|no such|failed|unsupported|refus|denied|malformed/i.test(line);
+  });
+  const picked = (interesting.length ? interesting : ffmpegLogTail).slice(-3);
+  if (!picked.length) return '';
+  return ' — ' + picked.map(function (line) { return redactUrlTokens(line); }).join(' | ').slice(0, 500);
+}
+
+function failureResponse(message) {
+  const detail = ffmpegFailureDetail();
+  if (detail) {
+    try { console.warn('[media-sniper] ' + message + detail); } catch (_) {}
+  }
+  return Object.assign({ error: String(message) + detail }, hostAccessFields());
+}
+
 function beginMediaJobKeepalive() {
   let port = null;
   let timer = null;
@@ -338,11 +379,12 @@ async function runFfmpegJob(msg, sendResponse) {
   try {
     // wasmurl is mandatory: the module otherwise resolves the wasm against
     // self.location.href (the offscreen page = src/), not the script's dir
+    resetFfmpegLog();
     libav = await LibAVFactory({
       noworker: true,
       wasmurl: chrome.runtime.getURL('src/libav/libav-6.5.7.1-h264-aac-mp3.wasm.wasm'),
-      print: discardLibavLog,
-      printErr: discardLibavLog,
+      print: function (line) { noteFfmpegLog(line, false); },
+      printErr: function (line) { noteFfmpegLog(line, true); },
     });
     current.libav = libav;
     current.chunks = chunks;
@@ -390,15 +432,33 @@ async function runFfmpegJob(msg, sendResponse) {
     // crypto protocol before decryption begins. Keep the allowlist explicit
     // and limited to protocols the extension actually needs.
     const hlsProtocols = 'file,data,jsfetch,crypto,http,https';
-    args.push('-protocol_whitelist', hlsProtocols, '-analyzeduration', '10M', '-f', 'hls', '-i', 'jsfetch:' + msg.url);
-    if (msg.audioUrl) {
-      // VDH "m3u8_audio_video_two_sources": separate audio rendition
-      // playlist. -map 0:v:0 + 1:a:0? = video from the first input, audio
-      // from the second (the "?" tolerates a missing audio stream).
-      args.push('-protocol_whitelist', hlsProtocols, '-i', 'jsfetch:' + msg.audioUrl);
+    args.push('-protocol_whitelist', hlsProtocols, '-analyzeduration', '10M', '-f', 'hls');
+    // VOD playlists arrive with every URI already resolved and jsfetch-prefixed
+    // (L.rewriteHlsUrisAbs). Handing ffmpeg the remote playlist instead let its
+    // own resolver rebuild a root-relative URI against a `jsfetch:` base, which
+    // drops the host ("jsfetch:/media/seg1.ts"): every nested fetch failed, the
+    // demuxer found no streams and the job ended as a bare rc=-1. Live keeps the
+    // stream URL, because ffmpeg has to re-read the playlist as the window moves.
+    const videoInput = await writePlaylistInput(libav, 'hls-v.m3u8', msg.playlistText);
+    args.push('-i', videoInput || ('jsfetch:' + msg.url));
+    let secondInput = null;
+    if (msg.audioFileUrl) {
+      // Two network inputs cannot be open at once in this build: with
+      // `-i jsfetch:<video> -i jsfetch:<audio>` the second input's very first
+      // segment fails to open ("Error when loading first segment"), so a
+      // two-source download never muxed. The audio track is small, so it is
+      // built by our own fetcher and fed to ffmpeg as a local file.
+      secondInput = await localTrackInput(libav, 'hls-a.m4a', msg.audioFileUrl);
+    } else if (msg.audioUrl) {
+      secondInput = 'jsfetch:' + msg.audioUrl;
+    }
+    if (secondInput) {
+      args.push('-protocol_whitelist', hlsProtocols, '-i', secondInput);
     }
     args.push('-c', 'copy');
-    if (msg.audioUrl) {
+    if (secondInput) {
+      // -map 0:v:0 + 1:a:0? = video from the first input, audio from the second
+      // (the "?" tolerates a missing audio stream).
       args.push('-map', '0:v:0', '-map', '1:a:0?');
     }
     args.push('-avoid_negative_ts', 'make_zero');
@@ -443,7 +503,7 @@ async function runFfmpegJob(msg, sendResponse) {
 
     if (rc !== 0 && !msg.live) {
       if (sink) await sink.abort();
-      sendResponse(hostAccessError('ffmpeg failed (rc=' + rc + ')'));
+      sendResponse(failureResponse('ffmpeg failed (rc=' + rc + ')'));
       return;
     }
 
@@ -451,7 +511,7 @@ async function runFfmpegJob(msg, sendResponse) {
       const written = sink.bytes();
       if (!written) {
         await sink.abort();
-        sendResponse(hostAccessError('ffmpeg produced no output' + (rc ? ' (rc=' + rc + ')' : '')));
+        sendResponse(failureResponse('ffmpeg produced no output' + (rc ? ' (rc=' + rc + ')' : '')));
         return;
       }
       // A recording that ended without anyone pressing Stop and produced a
@@ -460,7 +520,7 @@ async function runFfmpegJob(msg, sendResponse) {
       // (interrupted) or a mid-recording input failure keeps its partial file.
       if (msg.live && !interrupted && rc !== 0 && written < MIN_RECORDING_BYTES) {
         await sink.abort();
-        sendResponse(hostAccessError('ffmpeg failed (rc=' + rc + ')'));
+        sendResponse(failureResponse('ffmpeg failed (rc=' + rc + ')'));
         return;
       }
       // Wait for the queued file-system writes, close the file and hand the
@@ -782,6 +842,35 @@ function installFileInputs(libav, reader, entries) {
 // memfs -> ffmpeg -c copy. Same architecture as the DASH mux (which is
 // proven: jsfetch never enters the picture, so no deadlock).
 // ---------------------------------------------------------------------------
+// Write a resolved playlist into MEMFS so ffmpeg never resolves a URI itself.
+async function writePlaylistInput(libav, name, text) {
+  if (!text) return null;
+  try {
+    await libav.writeFile(name, new TextEncoder().encode(String(text)));
+    return name;
+  } catch (e) {
+    return null;
+  }
+}
+
+// A locally built track becomes a device input when the disk-backed file is
+// reachable, otherwise it is copied into MEMFS (small audio only).
+async function localTrackInput(libav, name, url) {
+  const policy = globalThis.MediaSniperStreamingPolicy;
+  if (policy && typeof policy.fileForUrl === 'function' && typeof policy.readFileRange === 'function') {
+    let file = null;
+    try { file = await policy.fileForUrl(url); } catch (_) { file = null; }
+    if (file) {
+      installFileInputs(libav, policy.readFileRange, [{ name: name, file: file }]);
+      return name;
+    }
+  }
+  const res = await fetch(url);
+  if (!res.ok) throw new Error('local track fetch failed: http ' + res.status);
+  await libav.writeFile(name, new Uint8Array(await res.arrayBuffer()));
+  return name;
+}
+
 async function handleMuxLocal(msg, sendResponse) {
   if (current) { sendResponse(hostAccessError('別のffmpegジョブが実行中です')); return; }
   if (!msg.videoUrl || !msg.audioUrl) { sendResponse(hostAccessError('映像と音声のURLが必要です')); return; }

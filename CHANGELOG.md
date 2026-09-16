@@ -1,5 +1,37 @@
 # Changelog
 
+## v0.13.2 (2026-09-16)
+
+### Fixed
+
+- HLS downloads whose playlist uses **root-relative segment URIs** no longer fail
+  as `ffmpeg job failed: ffmpeg failed (rc=-1)`. Reported with a real X post,
+  which is exactly this shape: `ffmpeg` resolves a playlist's URIs against its
+  input URL, and with a `jsfetch:https://host/...` input a root-relative
+  URI is rebuilt as `jsfetch:/media/seg1.ts` — the host is gone, so every nested
+  fetch fails, the demuxer finds no streams and the job dies with an rc and no
+  reason. The worker now resolves every URI itself (segments, `EXT-X-MAP`,
+  AES-128 `EXT-X-KEY`) to an absolute `jsfetch:` URL and hands ffmpeg a local
+  playlist, so nothing is left for it to resolve. Relative URIs happened to
+  survive, which is why this stayed hidden.
+- A master with a **separate audio rendition** (the shape X and many CDNs use:
+  video-only variants plus `EXT-X-MEDIA TYPE=AUDIO`) no longer produces a
+  silent or empty result. This libav build cannot open two network inputs at
+  once — with `-i jsfetch:<video> -i jsfetch:<audio>` the second input's very
+  first segment never opens — so the audio track is now assembled locally by our
+  own fetcher and muxed as a file. Verified against a real X post: video
+  1080x1920 h264 plus AAC stereo, 8.04 s, in one MP4.
+- A failed conversion now says why. ffmpeg's own diagnostics were discarded, so
+  every failure read `ffmpeg failed (rc=-1)`; the tail is kept, URLs are stripped
+  of their query strings, and the reason is attached to the error (and printed
+  to DevTools on failure only).
+
+### Notes
+
+- Live playlists still keep the stream URL (ffmpeg has to re-read them as the
+  window moves), so a live stream whose playlist uses root-relative URIs is not
+  covered by the fix yet.
+
 ## v0.13.1 (2026-09-16)
 
 Follow-up to v0.13.0 from an independent review of that change (commit

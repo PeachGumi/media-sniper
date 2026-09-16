@@ -422,6 +422,61 @@ var MediaSniperLogic = globalThis.MediaSniperLogic || (function () {
     return url;
   }
 
+  // Rewrite every URI inside a media playlist to an absolute `jsfetch:` URL.
+  //
+  // ffmpeg's HLS demuxer resolves the URIs it finds against the *input* URL. When
+  // that input is `jsfetch:https://host/path/list.m3u8`, ffmpeg's URL splitter
+  // sees the protocol as `jsfetch` and the rest as a plain path, so a
+  // root-relative URI ("/media/seg1.ts", which X's manifests use) is rebuilt as
+  // `jsfetch:/media/seg1.ts`: the host is gone, every nested fetch fails, the
+  // demuxer reports "Output file does not contain any stream" and the job ends
+  // as a bare `ffmpeg failed (rc=-1)`. Relative URIs happen to survive because
+  // the tail of the base is kept, which is why this stayed hidden.
+  //
+  // Resolving the URIs ourselves removes the ambiguity: ffmpeg then opens
+  // exactly the URLs we resolved, with the browser session attached by the
+  // jsfetch protocol, and the AES-128 key URI keeps working (the HLS demuxer
+  // prefixes `crypto+` unless the URI already carries `crypto+` or `data:`).
+  const URI_ATTR_TAGS = /^#EXT-X-(KEY|MAP|MEDIA|I-FRAME-STREAM-INF|PART|PRELOAD-HINT|RENDITION-REPORT)/;
+  const HAS_SCHEME = /^[a-zA-Z][a-zA-Z0-9+.-]*:/;
+
+  function absoluteJsFetchUri(rawUri, baseUrl, scheme) {
+    const uri = String(rawUri || '').trim();
+    if (!uri) return rawUri;
+    const jsfetch = scheme || 'jsfetch';
+    // Absolute http(s) URIs still need the jsfetch prefix: this build has no
+    // http protocol of its own, so an unprefixed URL cannot be opened at all.
+    if (/^https?:\/\//i.test(uri)) return jsfetch + ':' + uri;
+    if (HAS_SCHEME.test(uri)) return uri; // data:/blob:/crypto+/jsfetch: are explicit
+    let resolved = uri;
+    try { resolved = new URL(uri, baseUrl).href; } catch (e) { return uri; }
+    return jsfetch + ':' + resolved;
+  }
+
+  function rewriteHlsUrisAbs(text, baseUrl, scheme) {
+    if (!text || !baseUrl) return { text: String(text || ''), rewritten: 0 };
+    const lines = String(text).split(/\r?\n/);
+    const out = [];
+    let rewritten = 0;
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) { out.push(line); continue; }
+      if (trimmed.charAt(0) !== '#') {
+        // segment / variant URI line
+        out.push(absoluteJsFetchUri(trimmed, baseUrl, scheme));
+        rewritten++;
+        continue;
+      }
+      if (!URI_ATTR_TAGS.test(trimmed)) { out.push(line); continue; }
+      const replaced = line.replace(/URI="([^"]*)"/g, function (whole, uri) {
+        rewritten++;
+        return 'URI="' + absoluteJsFetchUri(uri, baseUrl, scheme) + '"';
+      });
+      out.push(replaced);
+    }
+    return { text: out.join('\n'), rewritten: rewritten };
+  }
+
   function hlsVariantKey(variant) {
     return variant && variant.url ? itemKey(String(variant.url)) : '';
   }
@@ -915,6 +970,7 @@ var MediaSniperLogic = globalThis.MediaSniperLogic || (function () {
     smartName: smartName,
     playlistDuration: playlistDuration,
     isDedicatedSite: isDedicatedSite,
+    rewriteHlsUrisAbs: rewriteHlsUrisAbs,
     parseMpdTracks: parseMpdTracks,
     parseMpdSegments: parseMpdSegments,
     MIN_DIRECT_MEDIA_SIZE: MIN_DIRECT_MEDIA_SIZE,

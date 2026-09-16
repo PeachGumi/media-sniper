@@ -761,6 +761,10 @@ async function offscreenHlsBuild(req, job) {
     initUrl: req.initUrl,
     headers: req.headers,
     mime: req.mime,
+    // A mux input stays a disk-backed File (ffmpeg reads it as a device input);
+    // a user-facing artifact keeps the typed in-memory Blob.
+    ext: req.ext || null,
+    disk: !!req.disk,
   });
   if (job) job.done = job.total; // message may race; final state is authoritative
   if (!resp || !resp.url) throw offscreenFailure('offscreen hls build failed', resp);
@@ -801,7 +805,9 @@ async function offscreenFfmpegRun(req) {
     type: 'ms-offscreen-ffmpeg-run',
     jobId: req.jobId,
     url: req.url,
+    playlistText: req.playlistText || null,
     audioUrl: req.audioUrl || null,
+    audioFileUrl: req.audioFileUrl || null,
     ext: req.ext || 'mp4',
     live: !!req.live,
     adtsFix: !!req.adtsFix,
@@ -995,11 +1001,54 @@ async function runHlsJob(jobKey, playlistUrl) {
   // muxing is not worth the complexity here.
   const twoSource = !audioOnly && !media.live && job.audioUrl;
   const audioHeaders = twoSource ? Object.assign({}, headersFor(mediaUrl, hdrs, playlistUrl), headersFor(job.audioUrl, hdrs, playlistUrl)) : null;
+
+  // Resolve every playlist URI ourselves and hand ffmpeg a local playlist.
+  // ffmpeg's own resolver cannot keep the host when a root-relative URI (X's
+  // manifests use those exclusively: URI="/amplify_video/...") is resolved
+  // against a `jsfetch:` base — it builds `jsfetch:/amplify_video/...`, every
+  // nested fetch fails, and the job ends as a bare `ffmpeg failed (rc=-1)`.
+  // The single-source case then works (verified: 1080x1920 h264, rc=0).
+  // Live keeps the stream URL, because ffmpeg must re-read the playlist.
+  let playlistText = null;
+  let audioFileUrl = null;
+  if (!media.live) {
+    playlistText = L.rewriteHlsUrisAbs(mediaText, mediaUrl).text;
+    if (twoSource) {
+      // The video track needs no second network input: this libav build cannot
+      // open two jsfetch inputs at once (the second input's first segment never
+      // opens), so the small audio track is assembled locally instead and muxed
+      // as a file. Verified end to end on an X video (video 1080x1920 + AAC).
+      // Best effort: when the rendition cannot be assembled (no OPFS, an
+      // unreadable playlist, a failed segment) the job still runs with the audio
+      // playlist as a second input, which is what it did before.
+      try {
+        const audioHeadersForRendition = headersFor(job.audioUrl, hdrs, playlistUrl);
+        const audioText = await swFetchText(job.audioUrl, audioHeadersForRendition);
+        const audioParsed = L.parseM3u8(audioText, job.audioUrl);
+        if (audioParsed.segments && audioParsed.segments.length) {
+          const made = await offscreenHlsBuild({
+            playlistUrl: job.audioUrl,
+            segments: audioParsed.segments.map(function (s) { return s.url; }),
+            initUrl: audioParsed.initUrl || null,
+            headers: audioHeadersForRendition,
+            mime: 'audio/mp4',
+            ext: 'm4a',
+            disk: true,
+          }, job);
+          audioFileUrl = made.url;
+        }
+      } catch (err) {
+        audioFileUrl = null;
+      }
+    }
+  }
   const req = {
     jobId: jobKey,
     kind: 'hls',
     url: mediaUrl,
-    audioUrl: twoSource ? job.audioUrl : null,
+    playlistText: playlistText,
+    audioUrl: (twoSource && !audioFileUrl) ? job.audioUrl : null,
+    audioFileUrl: audioFileUrl,
     ext: job.ext,
     live: !!media.live,
     pageUrl: job.pageUrl || null,

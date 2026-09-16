@@ -181,7 +181,12 @@ async function runBackgroundContract() {
   await settle();
   eq(chrome.__ffmpegRuns.length, 1, 'Save All starts one HLS job');
   eq(chrome.__ffmpegRuns[0].url, lower.url, 'Save All uses the selected variant playlist');
-  eq(chrome.__ffmpegRuns[0].audioUrl, lower.audioUrl, 'Save All uses the selected variant audio URL');
+  // The selected variant's audio rendition reaches the mux as a locally built
+  // track (audioFileUrl); two network inputs cannot be open at once in this
+  // libav build, so audioUrl stays null for a two-source VOD job.
+  const run = chrome.__ffmpegRuns[0];
+  ok(run.audioFileUrl || run.audioUrl, 'Save All carries the selected variant audio track');
+  if (!run.audioFileUrl) eq(run.audioUrl, lower.audioUrl, 'Save All uses the selected variant audio URL');
 
   // A fresh worker restores the same logical item and selected quality.
   const chrome2 = makeBackgroundChrome(session);
