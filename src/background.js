@@ -695,6 +695,7 @@ async function offscreenFfmpegRun(req) {
     audioUrl: req.audioUrl || null,
     ext: req.ext || 'mp4',
     live: !!req.live,
+    adtsFix: !!req.adtsFix,
     headers: req.headers || {},
     pageUrl: req.pageUrl || null,
   });
@@ -841,6 +842,13 @@ async function runHlsJob(jobKey, playlistUrl) {
     live: !!media.live,
     pageUrl: job.pageUrl || null,
     headers: twoSource ? audioHeaders : headersFor(mediaUrl, hdrs, playlistUrl),
+    // A live recording is written as fragmented MP4 (`-movflags
+    // frag_keyframe+empty_moov+...`), and that muxer never applies the automatic
+    // AAC-ADTS to ASC conversion: with MPEG-TS segments ffmpeg then fails on the
+    // first audio packet ("Malformed AAC bitstream detected"), which used to
+    // kill every live recording of a TS stream within a second. fMP4 segments
+    // (EXT-X-MAP) already carry ASC, so the filter is added only for TS.
+    adtsFix: !!media.live && !media.initUrl,
   };
 
   if (media.live) {

@@ -20,15 +20,43 @@ let ffmpegCalls = 0;
 let sinkJob = false;
 const sinkWrites = [];
 let sinkAborted = false;
+let muxJob = false;
+let liveRun = false;
+let liveFfmpegResolve = null;
+const jsfetchCancels = [];
+const ffmpegArgs = [];
+const blockDevices = [];
+const blockReads = [];
+const writeFiles = [];
 let offscreenGlobal = null;
 const libav = {
   onwrite: null,
+  onblockread: null,
   abortController: { signal: { aborted: false } },
   async mkwriterdev() {
     if (delayWriter) return new Promise(function (resolve) { resolveWriter = resolve; });
   },
+  mkblockreaderdev(name, size) { blockDevices.push({ name: name, size: size }); },
+  ff_block_reader_dev_send(name, position, data, opts) {
+    blockReads.push({ name: name, position: position, bytes: data ? data.byteLength : 0, error: (opts && opts.error) || null });
+  },
+  async writeFile(name) { writeFiles.push(name); },
   async ffmpeg() {
     ffmpegCalls++;
+    ffmpegArgs.push(Array.prototype.slice.call(arguments[0] || []));
+    if (liveRun) {
+      // a live recording writes and then keeps running until it is stopped
+      this.onwrite('out.mp4', 0, new Uint8Array([1, 1, 1, 1]));
+      return new Promise(function (resolve) { liveFfmpegResolve = resolve; });
+    }
+    if (muxJob) {
+      // ffmpeg reads its inputs through the block reader device, and libav
+      // reports the MEMFS node name (basename), not the path.
+      this.onblockread('v.mp4', 1024, 64);
+      await new Promise(function (resolve) { setImmediate(resolve); });
+      this.onwrite('out.mp4', 0, new Uint8Array([7, 7, 7]));
+      return 0;
+    }
     if (sinkJob) {
       this.onwrite('out.mp4', 0, new Uint8Array([1, 2, 3, 4]));
       this.onwrite('out.mp4', 1000, new Uint8Array([5, 6]));
@@ -90,6 +118,7 @@ const context = vm.createContext({
   clearInterval() {},
   setTimeout,
   clearTimeout,
+  setImmediate,
   globalThis: null,
 });
 context.globalThis = context;
@@ -215,6 +244,18 @@ ok(typeof listener === 'function', 'offscreen message listener installed');
         abort: async function () { sinkAborted = true; return true; },
       };
     },
+    MAX_MUX_INPUT_BYTES: 384 * 1024 * 1024,
+    fileForUrl: async function (url) {
+      if (url === 'blob:opfs/video') return { size: 5000, name: url };
+      if (url === 'blob:opfs/audio') return { size: 4000, name: url };
+      return null;
+    },
+    readFileRange: async function (file, position, length) {
+      const size = Number(file.size) || 0;
+      const start = Math.max(0, Number(position) || 0);
+      const end = Math.min(size, start + Math.max(1, Number(length) || 1));
+      return new Uint8Array(Math.max(0, end - start));
+    },
   };
   sinkJob = true;
   const urlsBeforeSinkJob = objectUrlsCreated;
@@ -266,6 +307,84 @@ ok(typeof listener === 'function', 'offscreen message listener installed');
   await new Promise(function (resolve) { setImmediate(resolve); });
   ok(stoppedSinkRun && stoppedSinkRun.error, 'stopped disk-backed job reports an error instead of a URL');
   ok(sinkAborted, 'stopped disk-backed job discards its partial artifact');
+
+  // Mux inputs are read from disk through libav's block reader device instead
+  // of being copied into MEMFS, so the combined input size is no longer a
+  // memory budget.
+  muxJob = true;
+  const muxResult = await new Promise(function (resolve) {
+    listener({
+      type: 'ms-offscreen-mux-local',
+      jobId: 'disk-inputs',
+      videoUrl: 'blob:opfs/video',
+      audioUrl: 'blob:opfs/audio',
+      ext: 'mp4',
+    }, {}, resolve);
+  });
+  muxJob = false;
+  eq(writeFiles.length, 0, 'mux inputs are not copied into MEMFS');
+  eq(blockDevices.length, 2, 'both tracks register as block reader devices');
+  eq(blockDevices.map(function (d) { return d.name + ':' + d.size; }).join(','), 'v.mp4:5000,a.m4a:4000',
+    'devices are registered under bare node names with the real track sizes');
+  const muxArgs = ffmpegArgs[ffmpegArgs.length - 1] || [];
+  eq(muxArgs.join(' ').indexOf('-i v.mp4 -i a.m4a') >= 0, true,
+    'ffmpeg receives the same bare names the devices were registered under');
+  ok(blockReads.some(function (r) { return r.name === 'v.mp4' && r.position === 1024 && r.bytes > 0; }),
+    'block reader serves the requested range from disk (node name, not path)');
+  ok(muxResult && muxResult.url, 'disk-backed mux produces an artifact');
+
+  // Stopping a live recording must actually interrupt the running ffmpeg. This
+  // libav build has no ffmpeg_interrupt and no module-level abortController, so
+  // the interrupt cancels the jsfetch responses the demuxer is reading from and
+  // refuses further requests.
+  libav.libavjsJSFetch = {
+    fetches: {
+      1: {
+        reader: { cancel() { jsfetchCancels.push('reader'); } },
+        abortController: { abort() { jsfetchCancels.push('signal'); } },
+      },
+    },
+  };
+  liveRun = true;
+  let liveRunResponse = null;
+  listener({
+    type: 'ms-offscreen-ffmpeg-run',
+    jobId: 'live-interrupt',
+    url: 'https://cdn.example/live.m3u8',
+    ext: 'mp4',
+    live: true,
+    adtsFix: true,
+    headers: {},
+  }, {}, function (response) { liveRunResponse = response; });
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+  ok(typeof liveFfmpegResolve === 'function', 'live ffmpeg instance is running');
+  const liveArgs = ffmpegArgs[ffmpegArgs.length - 1] || [];
+  eq(liveArgs.indexOf('-bsf:a') >= 0 && liveArgs[liveArgs.indexOf('-bsf:a') + 1] === 'aac_adtstoasc',
+    true, 'TS live recording converts ADTS AAC before muxing into fragmented MP4');
+  let interruptAck = null;
+  listener({ type: 'ms-offscreen-ffmpeg-abort', jobId: 'live-interrupt' }, {}, function (response) {
+    interruptAck = response;
+  });
+  ok(interruptAck && interruptAck.ok, 'Stop is acknowledged while ffmpeg runs');
+  eq(interruptAck && interruptAck.cancelled, 1, 'Stop cancels the open jsfetch response');
+  eq(jsfetchCancels.join(','), 'reader,signal', 'both the reader and the fetch signal are cancelled');
+  const fetchesBeforeStop = fetchCalls.length;
+  const refused = await offscreenGlobal.FetchWithRetry('https://cdn.example/segment.ts', {}, 6, 1000, 10, false, null);
+  ok(refused && refused.aborted === true, 'a stopped job refuses further fetches');
+  eq(fetchCalls.length, fetchesBeforeStop, 'a stopped job does not retry the cancelled requests');
+  // The bundled libav jsfetch protocol calls the global fetch, not
+  // FetchWithRetry: the refusal has to live there too, otherwise the demuxer
+  // keeps reading segments after Stop.
+  let stopRefusal = null;
+  try { await offscreenGlobal.fetch('https://cdn.example/segment.ts'); } catch (e) { stopRefusal = e; }
+  ok(stopRefusal && stopRefusal.name === 'AbortError', 'a stopped job refuses new jsfetch reads');
+  eq(fetchCalls.length, fetchesBeforeStop, 'refused reads never reach the network');
+  liveRun = false;
+  liveFfmpegResolve(-1);
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+  ok(liveRunResponse && liveRunResponse.url, 'stopped recording still hands back the partial artifact');
+  const fetchAfterStop = await offscreenGlobal.fetch('https://cdn.example/next-job.ts');
+  ok(!!fetchAfterStop && fetchCalls.length > fetchesBeforeStop, 'a later job fetches normally again');
   report('offscreen-regressions');
 })().catch(function (error) {
   console.error(error);

@@ -51,8 +51,19 @@ on that path is the queued-write budget (`MAX_PENDING_WRITE_BYTES`, 512 MiB):
 if the file system stops draining, the job fails explicitly instead of queueing
 the artifact in the renderer.
 
-For DASH, OPFS assembly occurs first and **combined video+audio input must not
-exceed 384 MiB** before entering the local mux stage.
+For DASH, OPFS assembly occurs first and the mux reads both tracks through
+libav's block reader device (`mkblockreaderdev` + `onblockread`), so combined
+input size is not a memory budget. The 384 MiB combined limit
+(`MAX_MUX_INPUT_BYTES`) applies only to the fallback that has no OPFS file to
+read from.
+
+Live recording writes fragmented MP4 and therefore passes
+`-bsf:a aac_adtstoasc` for MPEG-TS input: that muxer does not perform the
+ADTS-to-ASC conversion on its own, and without the filter the recording fails on
+its first audio packet. Stopping a recording interrupts the running converter by
+cancelling open jsfetch responses and refusing further reads for the stopped job
+(this build has no `ffmpeg_interrupt`), and a recording that ends on its own
+with less than `MIN_RECORDING_BYTES` is reported as a failure rather than saved.
 
 Segment assembly that produces a user-facing artifact (audio-only ADTS concat,
 remote fallback, single-track DASH) writes to OPFS but keeps an in-memory typed

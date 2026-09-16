@@ -30,10 +30,17 @@ let activeFetchContext = null;
 // segment request through FetchWithRetry, so these counters tell the popup
 // that a job is fetching even while it has not written output yet.
 const fetchStats = { count: 0, bytes: 0 };
+// A live recording that stops on its own with less than this is a failed
+// conversion, not a recording the user chose to end.
+const MIN_RECORDING_BYTES = 64 * 1024;
+// Set while a job is being stopped: jsfetch requests stop retrying and every
+// open response is cancelled (see interruptFfmpeg).
+let fetchAborted = false;
 
 function resetFetchStats() {
   fetchStats.count = 0;
   fetchStats.bytes = 0;
+  fetchAborted = false;
 }
 
 function sendOffscreenProgress(state) {
@@ -107,6 +114,17 @@ function installFetchContext(msg) {
 
 if (nativeFetch) {
   globalThis.fetch = function (input, init) {
+    // A stopped job must not keep reading. The bundled libav build's jsfetch
+    // protocol calls this global fetch directly (it does not route through
+    // FetchWithRetry), so refusing here is what makes ffmpeg's next read fail
+    // and lets the interrupted recording finish promptly. The refusal is bound
+    // to the stopped job: once it ends (current = null in the job's finally),
+    // later jobs fetch normally again.
+    if (current && current.abortRequested) {
+      const stopped = new Error('media job stopped');
+      stopped.name = 'AbortError';
+      return Promise.reject(stopped);
+    }
     const context = activeFetchContext;
     if (!context) return nativeFetch(input, init);
     const options = Object.assign({}, init || {});
@@ -166,6 +184,9 @@ globalThis.DoAbortableSleep = function (ms, signal) {
 };
 
 globalThis.FetchWithRetry = async function (url, headers, attempts, fetchTimeout, retryDelay, bypassCache, signal) {
+  // A stopped job must not keep fetching: without this the retry loop would
+  // reopen the very requests the interrupt just cancelled.
+  if (fetchAborted) return { aborted: true };
   const merged = {};
   for (const k of Object.keys(activeHeaders || {})) merged[k] = activeHeaders[k];
   for (const k of Object.keys(headers || {})) merged[k] = headers[k];
@@ -355,6 +376,13 @@ async function runFfmpegJob(msg, sendResponse) {
       args.push('-map', '0:v:0', '-map', '1:a:0?');
     }
     args.push('-avoid_negative_ts', 'make_zero');
+    if (msg.adtsFix) {
+      // MPEG-TS carries AAC in ADTS framing; MP4 needs the ASC form. ffmpeg
+      // inserts the conversion on its own for a plain MP4 mux, but NOT when the
+      // output is fragmented (live recording), where it fails on the first audio
+      // packet instead.
+      args.push('-bsf:a', 'aac_adtstoasc');
+    }
     if (msg.live) {
       // fragmented MP4: the file stays playable when recording is interrupted
       args.push('-movflags', 'frag_keyframe+empty_moov+default_base_moof');
@@ -383,7 +411,9 @@ async function runFfmpegJob(msg, sendResponse) {
     }
 
     clearInterval(current.timer);
-    const aborted = !!(libav.abortController && libav.abortController.signal.aborted);
+    // A stopped job is recognised from our own interrupt flag: this build has no
+    // libav.abortController to read (see abortFfmpegJob).
+    const interrupted = fetchAborted || !!(current && current.abortRequested);
 
     if (rc !== 0 && !msg.live) {
       if (sink) await sink.abort();
@@ -398,11 +428,20 @@ async function runFfmpegJob(msg, sendResponse) {
         sendResponse({ error: 'ffmpeg produced no output' + (rc ? ' (rc=' + rc + ')' : '') });
         return;
       }
+      // A recording that ended without anyone pressing Stop and produced a
+      // trivially small artifact did not work: reporting it as a successful
+      // recording would hide the ffmpeg error behind a broken file. A stop
+      // (interrupted) or a mid-recording input failure keeps its partial file.
+      if (msg.live && !interrupted && rc !== 0 && written < MIN_RECORDING_BYTES) {
+        await sink.abort();
+        sendResponse({ error: 'ffmpeg failed (rc=' + rc + ')' });
+        return;
+      }
       // Wait for the queued file-system writes, close the file and hand the
       // disk-backed File to the caller: nothing is read back into the heap.
       const made = await sink.finish();
       sink = null;
-      lastDone = { jobId: jobId, url: made.url, size: made.size, ext: msg.ext || 'mp4', partial: !!(rc !== 0 && (aborted || msg.live)) };
+      lastDone = { jobId: jobId, url: made.url, size: made.size, ext: msg.ext || 'mp4', partial: !!(rc !== 0 && (interrupted || msg.live)) };
       sendResponse({ url: made.url, size: made.size, partial: lastDone.partial });
       return;
     }
@@ -420,7 +459,7 @@ async function runFfmpegJob(msg, sendResponse) {
     }
     const mime = (msg.ext === 'aac') ? 'audio/aac' : 'video/mp4';
     const blobUrl = URL.createObjectURL(new Blob([buf], { type: mime }));
-    lastDone = { jobId: jobId, url: blobUrl, size: total, ext: msg.ext || 'mp4', partial: !!(rc !== 0 && (aborted || msg.live)) };
+    lastDone = { jobId: jobId, url: blobUrl, size: total, ext: msg.ext || 'mp4', partial: !!(rc !== 0 && (interrupted || msg.live)) };
     sendResponse({ url: blobUrl, size: total, partial: lastDone.partial });
   } catch (e) {
     if (sink) { try { await sink.abort(); } catch (err) { /* best effort */ } }
@@ -439,12 +478,29 @@ function abortFfmpegJob(msg, sendResponse) {
   if (!current) { sendResponse({ ok: false }); return; }
   if (msg.jobId && current.jobId !== msg.jobId) { sendResponse({ ok: false }); return; }
   current.abortRequested = true;
+  fetchAborted = true;
   if (!current.libav) { sendResponse({ ok: true }); return; }
+  // This libav build exposes neither ffmpeg_interrupt nor a module-level
+  // abortController (the bundle's only AbortControllers belong to jsfetch's own
+  // responses), so a running ffmpeg is interrupted where it is observable:
+  // every open jsfetch response is cancelled and further requests are refused.
+  // The demuxer's next read then fails, ffmpeg exits, and a live recording keeps
+  // the fragmented MP4 written so far.
+  let cancelled = 0;
+  const table = current.libav.libavjsJSFetch && current.libav.libavjsJSFetch.fetches;
+  if (table) {
+    for (const key of Object.keys(table)) {
+      const entry = table[key];
+      try { if (entry.reader) entry.reader.cancel(); } catch (e) { /* ignore */ }
+      try { if (entry.abortController) entry.abortController.abort(); } catch (e) { /* ignore */ }
+      try { delete table[key]; } catch (e) { /* ignore */ }
+      cancelled++;
+    }
+  }
   try {
-    if (current.libav.abortController) current.libav.abortController.abort();
-  } catch (e) { /* ignore */ }
-  try { current.libav.ffmpeg_interrupt(); } catch (e) { /* ignore */ }
-  sendResponse({ ok: true });
+    if (typeof current.libav.ffmpeg_interrupt === 'function') current.libav.ffmpeg_interrupt();
+  } catch (e) { /* not present in this build */ }
+  sendResponse({ ok: true, cancelled: cancelled });
 }
 
 // ---------------------------------------------------------------------------
@@ -637,6 +693,38 @@ function joinParts(parts) {
   return out;
 }
 
+// Disk-backed mux inputs. ffmpeg reads each track through libav's block reader
+// device instead of a MEMFS copy, so combined input size stops being a memory
+// budget. libav asks for a range through onblockread and expects the bytes back
+// through ff_block_reader_dev_send; each answer covers more than the single
+// request so ffmpeg re-reads from the device buffer instead of asking again.
+const MUX_READAHEAD_BYTES = 1024 * 1024;
+const MUX_READAHEAD_MAX_BYTES = 8 * 1024 * 1024;
+
+function installFileInputs(libav, reader, entries) {
+  const files = new Map();
+  for (const entry of entries) {
+    // libav keys its device buffer table by MEMFS node name, and reads report
+    // that same name. Registering a path ("/v.mp4") left the buffer table entry
+    // unreachable ("v.mp4"), so every read threw EAGAIN and ffmpeg waited
+    // forever for a block that could never be sent. Devices are therefore
+    // created, read and fed under one bare name.
+    files.set(entry.name, entry.file);
+  }
+  libav.onblockread = function (name, position, length) {
+    const file = files.get(String(name).replace(/^\/+/, ''));
+    if (!file) return;
+    const start = Math.max(0, Number(position) || 0);
+    const want = Math.min(Math.max(Number(length) || 0, MUX_READAHEAD_BYTES), MUX_READAHEAD_MAX_BYTES);
+    reader(file, start, want).then(function (bytes) {
+      try { libav.ff_block_reader_dev_send(name, start, bytes); } catch (e) { /* instance gone */ }
+    }).catch(function (err) {
+      try { libav.ff_block_reader_dev_send(name, start, null, { error: err }); } catch (e) { /* ignore */ }
+    });
+  };
+  for (const entry of entries) libav.mkblockreaderdev(entry.name, entry.file.size);
+}
+
 // ---------------------------------------------------------------------------
 // Local-file mux: two blob URLs (already fetched with the page session) ->
 // memfs -> ffmpeg -c copy. Same architecture as the DASH mux (which is
@@ -648,12 +736,41 @@ async function handleMuxLocal(msg, sendResponse) {
   // Reserve before awaits (same busy-guard discipline as the other runners)
   const jobId = msg.jobId || 'mux-local';
   current = { libav: null, jobId: jobId, chunks: null };
+  resetFetchStats();
   let libav = null;
   let sink = null;
   const chunks = []; // legacy in-memory assembly, used only without OPFS
   try {
-    const vBuf = new Uint8Array(await (await fetch(msg.videoUrl)).arrayBuffer());
-    const aBuf = new Uint8Array(await (await fetch(msg.audioUrl)).arrayBuffer());
+    // Prefer the disk-backed inputs: the tracks are OPFS files already, and
+    // ffmpeg can read them through the block reader device, so a mux is not
+    // bounded by the combined input size. Reading them into MEMFS stays as the
+    // fallback for when a track has no file behind it.
+    const policy = globalThis.MediaSniperStreamingPolicy;
+    const canUseFiles = policy && typeof policy.fileForUrl === 'function' && typeof policy.readFileRange === 'function';
+    let deviceInputs = null;
+    if (canUseFiles) {
+      const files = await Promise.all([policy.fileForUrl(msg.videoUrl), policy.fileForUrl(msg.audioUrl)]);
+      if (files[0] && files[1]) {
+        deviceInputs = [
+          { name: 'v.mp4', file: files[0] },
+          { name: 'a.m4a', file: files[1] },
+        ];
+      }
+    }
+    let vBuf = null;
+    let aBuf = null;
+    if (!deviceInputs) {
+      vBuf = new Uint8Array(await (await fetch(msg.videoUrl)).arrayBuffer());
+      aBuf = new Uint8Array(await (await fetch(msg.audioUrl)).arrayBuffer());
+      const budget = Number(policy && policy.MAX_MUX_INPUT_BYTES) || 384 * 1024 * 1024;
+      if (vBuf.byteLength + aBuf.byteLength > budget) {
+        sendResponse({
+          error: 'mux入力が大きすぎます (メモリ経路では合計 ' +
+            Math.round(budget / (1024 * 1024)) + ' MiB まで)',
+        });
+        return;
+      }
+    }
 
     libav = await LibAVFactory({
       noworker: true,
@@ -679,9 +796,13 @@ async function handleMuxLocal(msg, sendResponse) {
       };
     }
 
-    await libav.writeFile('/v.mp4', vBuf);
-    await libav.writeFile('/a.m4a', aBuf);
-    const rc = await libav.ffmpeg(['-y', '-nostdin', '-i', '/v.mp4', '-i', '/a.m4a', '-c', 'copy', '-map', '0:v:0', '-map', '1:a:0?', '-avoid_negative_ts', 'make_zero', '-f', 'mp4', 'out.mp4']);
+    if (deviceInputs) {
+      installFileInputs(libav, policy.readFileRange, deviceInputs);
+    } else {
+      await libav.writeFile('v.mp4', vBuf);
+      await libav.writeFile('a.m4a', aBuf);
+    }
+    const rc = await libav.ffmpeg(['-y', '-nostdin', '-i', 'v.mp4', '-i', 'a.m4a', '-c', 'copy', '-map', '0:v:0', '-map', '1:a:0?', '-avoid_negative_ts', 'make_zero', '-f', 'mp4', 'out.mp4']);
 
     if (rc !== 0) {
       if (sink) await sink.abort();

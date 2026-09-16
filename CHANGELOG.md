@@ -4,6 +4,19 @@
 
 ### Fixed
 
+- Live recording works for MPEG-TS streams again. A recording is written as
+  fragmented MP4, and that muxer never converts the TS's ADTS AAC to ASC on its
+  own: ffmpeg failed on the first audio packet and every TS recording died
+  within a second (it was then reported as a successful save). TS recordings now
+  pass `-bsf:a aac_adtstoasc`, and a recording that ends on its own with a
+  trivially small artifact is reported as failed instead of saved.
+- Stop now actually interrupts the running converter. The bundled libav build
+  exposes neither `ffmpeg_interrupt` nor a module-level `abortController`, and
+  its jsfetch protocol calls the global `fetch` (not the configured retry
+  helper), so the interrupt cancels the open jsfetch responses *and* refuses
+  further reads until the job ends. A stopped recording finishes immediately and
+  keeps its partial file (verified: stop acknowledged and Downloads complete in
+  the same second).
 - Large items no longer die at the end of a conversion with "media output
   exceeds in-memory safety limit (768 MiB)". FFmpeg's output is written
   straight into an OPFS file as the muxer produces it, and the finished
@@ -30,6 +43,9 @@
 ### Changed
 
 - DASH video+audio muxing writes its result through the same disk-backed sink.
+- Mux inputs are read from disk through libav's block reader device instead of
+  being copied into MEMFS, so a mux is no longer bounded by the combined input
+  size (the 384 MiB budget now applies only to the no-OPFS fallback).
 - Segment assembly keeps an in-memory (typed) artifact only up to 256 MiB;
   larger assemblies stay disk-backed instead of being read back into the heap.
 - The disk-backed writer fails explicitly when the file system stops draining
@@ -43,8 +59,12 @@
 
 - Assembly paths that still need one in-memory artifact keep their documented
   limits: audio-only ADTS concat / remote fallback / single-track DASH up to
-  768 MiB, DASH video+audio mux input up to 384 MiB combined. These are now
-  described accurately in README and docs/MEMORY.md.
+  768 MiB. The DASH/YouTube mux input budget only applies when the disk-backed
+  inputs are unavailable. These are described in README and docs/MEMORY.md.
+- Subtitle tracks are still parsed out on detection and are not muxed into the
+  saved file: the bundled libav build enables no encoders at all, so the
+  `mov_text` conversion the reference implementation uses is unavailable without
+  rebuilding that artifact. See docs/VDH-PROCESSING-DIFF.md.
 
 ## v0.12.4 (2026-09-15)
 

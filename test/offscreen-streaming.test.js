@@ -12,6 +12,13 @@ class FakeFile {
   async arrayBuffer() {
     return this._bytes.buffer.slice(this._bytes.byteOffset, this._bytes.byteOffset + this._bytes.byteLength);
   }
+  slice(start, end) {
+    const from = Math.max(0, Number(start) || 0);
+    const to = end == null ? this.size : Math.min(this.size, Number(end));
+    const file = new FakeFile(this._bytes.slice(from, Math.max(from, to)));
+    file.size = Math.max(0, to - from);
+    return file;
+  }
 }
 
 class FakeHandle {
@@ -55,6 +62,7 @@ const files = new Map();
 const removed = [];
 const root = {
   async getFileHandle(name) {
+    if (files.has(name)) return files.get(name);
     const h = new FakeHandle(name);
     files.set(name, h);
     return h;
@@ -148,7 +156,7 @@ vm.runInContext(source, context, { filename: 'offscreen-streaming.js' });
 const policy = context.MediaSniperStreamingPolicy;
 ok(!!policy, 'streaming policy installed');
 eq(policy.MAX_DISK_ASSEMBLY_BYTES, 768 * 1024 * 1024, 'disk assembly cap fixed');
-eq(policy.MAX_MUX_INPUT_BYTES, 384 * 1024 * 1024, 'mux memory budget fixed');
+eq(policy.MAX_MUX_INPUT_BYTES, 384 * 1024 * 1024, 'in-memory mux fallback budget fixed');
 eq(policy.hasOpfs(), true, 'OPFS detected');
 
 let originalCalls = [];
@@ -340,6 +348,23 @@ function dispatch(msg) {
   eq(batchHandle.writes[1].position, 1000, 'flushed tail keeps its offset');
   eq(batchFinished.size, 1001, 'batched artifact reports its final size');
   context.URL.revokeObjectURL(batchFinished.url);
+
+  // Disk-backed mux inputs: a temporary artifact is handed to ffmpeg as a file
+  // to read (block reader device) instead of being read back into memory.
+  const inputSink = await policy.createOutputSink('mp4');
+  inputSink.write('out.mp4', 0, new Uint8Array([10, 11, 12, 13, 14, 15, 16, 17]));
+  const inputArtifact = await inputSink.finish();
+  const inputFile = await policy.fileForUrl(inputArtifact.url);
+  ok(!!inputFile, 'temporary artifact resolves to a file for device input');
+  eq(inputFile && inputFile.size, 8, 'resolved input file reports the artifact size');
+  const range = await policy.readFileRange(inputFile, 2, 3);
+  eq(Array.from(range).join(','), '12,13,14', 'input range read returns the requested bytes');
+  const tail = await policy.readFileRange(inputFile, 6, 999);
+  eq(Array.from(tail).join(','), '16,17', 'input range read stops at end of file');
+  const pastEnd = await policy.readFileRange(inputFile, 99, 10);
+  eq(pastEnd.byteLength, 0, 'input range read past end returns nothing');
+  eq(await policy.fileForUrl('blob:opfs/unknown'), null, 'unknown URL has no device input');
+  context.URL.revokeObjectURL(inputArtifact.url);
 
   report('offscreen-streaming');
 })().catch(function (e) {

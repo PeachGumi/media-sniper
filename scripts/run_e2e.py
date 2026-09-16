@@ -246,6 +246,18 @@ def browser_run(browser, root, functional=False, fixture_root=None):
             if large.returncode!=0:
                 log.flush(); print_log_tail(log_path)
                 return False
+        # Opt-in: live recording (start, stop, keep the partial file).
+        if os.environ.get("MEDIA_SNIPER_E2E_LIVE") == "1":
+            live=subprocess.run([sys.executable,os.path.join(REPO_ROOT,"scripts","e2e_live_recording_test.py")],env=os.environ.copy())
+            if live.returncode!=0:
+                log.flush(); print_log_tail(log_path)
+                return False
+        # Opt-in: DASH video+audio mux with tracks past the old memory budget.
+        if os.environ.get("MEDIA_SNIPER_E2E_DASH") == "1":
+            dash=subprocess.run([sys.executable,os.path.join(REPO_ROOT,"scripts","e2e_dash_mux_test.py")],env=os.environ.copy())
+            if dash.returncode!=0:
+                log.flush(); print_log_tail(log_path)
+                return False
         return True
     finally:
         teardown()

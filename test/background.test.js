@@ -914,6 +914,10 @@ async function run() {
   const liveRun = chrome.__ffmpegRuns.find(function (r) { return r.url.indexOf('live.m3u8') >= 0; });
   ok(!!liveRun, 'live playlist handed to ffmpeg');
   ok(liveRun && liveRun.live === true, 'ffmpeg job flagged live');
+  // A live TS recording is written as fragmented MP4, where ffmpeg does not
+  // convert ADTS AAC by itself; without this flag the recording died on its
+  // first audio packet.
+  eq(liveRun && liveRun.adtsFix, true, 'TS live recording asks for the AAC-ADTS bitstream filter');
   const queuedBehindLive = await send(chrome, {
     type: 'ms-hls-download', url: 'https://cdn.example.com/live/master.m3u8?after-live=1', title: 'After Live'
   }, { tab: { id: 8 } });

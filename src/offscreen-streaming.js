@@ -91,6 +91,29 @@
     } catch (_) { /* already deleted / storage unavailable */ }
   }
 
+  // A temporary artifact can be handed to ffmpeg as a *device input* instead of
+  // being read back into a MEMFS buffer: ffmpeg then reads the disk file through
+  // libav's block reader, so track size stops being a memory budget.
+  async function fileForUrl(url) {
+    const name = filesByUrl.get(url);
+    if (!name) return null;
+    try {
+      const root = await rootDir();
+      const handle = await root.getFileHandle(name);
+      return await handle.getFile();
+    } catch (_) {
+      return null;
+    }
+  }
+
+  async function readFileRange(file, position, length) {
+    const start = Math.max(0, Number(position) || 0);
+    const size = Number(file.size) || 0;
+    if (start >= size) return new Uint8Array(0);
+    const end = Math.min(size, start + Math.max(1, Number(length) || 1));
+    return new Uint8Array(await file.slice(start, end).arrayBuffer());
+  }
+
   async function createTemp(ext) {
     const root = await rootDir();
     const name = tempName(ext);
@@ -277,14 +300,10 @@
       if (msg.audio) audio = await buildTrack(msg.audio, msg.headers, msg.playlistUrl, progress, singleTrack);
 
       if (video && audio) {
-        if (video.size + audio.size > MAX_MUX_INPUT_BYTES) {
-          throw new RangeError(
-            'DASH mux input exceeds supported in-memory mux limit (' +
-            Math.round(MAX_MUX_INPUT_BYTES / MiB) + ' MiB combined)'
-          );
-        }
         // Reuse the existing ffmpeg stream-copy mux implementation. Inputs are
-        // now disk-backed File URLs rather than arrays of segment buffers.
+        // disk-backed File URLs rather than arrays of segment buffers, and the
+        // mux reads them through libav's block reader device, so combined input
+        // size is a storage question instead of a memory budget.
         return originalListener({
           type: 'ms-offscreen-mux-local',
           jobId: msg.playlistUrl || 'dash',
@@ -490,6 +509,8 @@
     ownedTempCount: function () { return filesByUrl.size; },
     streamResponseInto,
     createOutputSink,
+    fileForUrl,
+    readFileRange,
   };
 
   if (typeof globalThis.addEventListener === 'function') {
