@@ -758,6 +758,34 @@ async function run() {
 
   async function settle() { for (let i = 0; i < 8; i++) await flush(); }
 
+  // TVer-style AES-128 separate audio: ciphertext must never be raw-concatenated.
+  const separateAudioFetches = [];
+  ctxRef.fetch = function (url, opts) {
+    if (url.indexOf('/separate-aes/') >= 0) {
+      separateAudioFetches.push(url);
+      let text = null;
+      if (url.endsWith('/master.m3u8')) text = '#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud",DEFAULT=YES,NAME="Audio",URI="audio.m3u8"\n#EXT-X-STREAM-INF:BANDWIDTH=800000,AUDIO="aud"\nvideo.m3u8\n';
+      if (url.endsWith('/video.m3u8')) text = '#EXTM3U\n#EXTINF:2,\nv0.ts\n#EXT-X-ENDLIST\n';
+      if (url.endsWith('/audio.m3u8')) text = '#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:11\n#EXT-X-KEY:METHOD=AES-128,URI="key.bin",IV=0x000102030405060708090a0b0c0d0e0f\n#EXTINF:2,\na0.ts\n#EXT-X-ENDLIST\n';
+      if (text) return Promise.resolve({ ok: true, text: function () { return Promise.resolve(text); } });
+      return Promise.resolve({ ok: true, arrayBuffer: function () { return Promise.resolve(new ArrayBuffer(188)); } });
+    }
+    return origFetch(url, opts);
+  };
+  const separateUrl = 'https://cdn.example.com/separate-aes/master.m3u8';
+  const separateResp = await send(chrome, { type: 'ms-hls-download', url: separateUrl, title: 'Encrypted Separate Audio' }, { tab: { id: 7 } });
+  ok(separateResp && separateResp.started, 'encrypted separate-audio HLS is accepted');
+  await settle();
+  const separateRun = chrome.__ffmpegRuns.find(function (r) { return r.jobId === separateResp.jobKey; });
+  ok(separateRun && separateRun.audioPlaylistText && separateRun.audioPlaylistText.includes('#EXT-X-KEY:METHOD=AES-128'),
+    'encrypted audio playlist, not ciphertext concat, reaches the HLS demuxer');
+  ok(separateRun && separateRun.audioPlaylistText && separateRun.audioPlaylistText.includes('URI="jsfetch:https://cdn.example.com/separate-aes/key.bin"'),
+    'audio key URI is resolved while preserving the IV and sequence');
+  eq(separateRun && separateRun.audioFileUrl, null, 'encrypted audio is not passed as a raw-concatenated file');
+  eq(separateAudioFetches.filter(function (u) { return u.endsWith('/a0.ts'); }).length, 0,
+    'ciphertext audio segments are not sent to the plain concat builder');
+  ctxRef.fetch = origFetch;
+
   // --- 10. multi-variant master: one item preserves every quality ------------
   ctxRef.fetch = function (url, opts) {
     chrome.__swFetchLog.push(url);

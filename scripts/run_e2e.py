@@ -199,6 +199,30 @@ def make_fixture_harness():
     try: os.remove(key_info)
     except OSError: pass
 
+    # TVer-style separate AES-128 audio: raw segment concat is ciphertext.
+    # Audio has its own key and an implicit sequence-derived IV, unlike video.
+    audio_key = os.path.join(adir, "audio.key")
+    with open(audio_key, "wb") as f: f.write(bytes(reversed(range(16))))
+    for source, output, directory, key_uri, key_file, iv in [
+        (os.path.join(vdir, "media.m3u8"), "encvideo.m3u8", vdir, "../aes.key", key_path, "000102030405060708090a0b0c0d0e0f"),
+        (os.path.join(adir, "audio.m3u8"), "encaudio.m3u8", adir, "audio.key", audio_key, None),
+    ]:
+        info = os.path.join(directory, "key-info.txt")
+        with open(info, "w", encoding="utf-8") as f:
+            f.write(key_uri + "\n" + key_file + "\n" + (iv + "\n" if iv else ""))
+        subprocess.run([
+            ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", source, "-c", "copy",
+            "-hls_time", "2", "-hls_list_size", "0", "-hls_key_info_file", info,
+            "-hls_segment_filename", os.path.join(directory, "encseg%d.ts"),
+            os.path.join(directory, output),
+        ], check=True, timeout=60)
+        os.remove(info)
+    with open(os.path.join(hls, "twosource-aes.m3u8"), "w", encoding="utf-8") as f:
+        f.write(
+            '#EXTM3U\n#EXT-X-MEDIA:NAME="Audio",TYPE=AUDIO,GROUP-ID="aud",DEFAULT=YES,URI="a/encaudio.m3u8"\n'
+            '#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=320x180,AUDIO="aud"\nv/encvideo.m3u8\n'
+        )
+
     plain=os.path.join(hls,"seg0.ts"); enc=os.path.join(hls,"encseg0.ts")
     if os.path.getsize(plain)<100_000 or os.path.getsize(enc)<100_000:
         raise RuntimeError("generated HLS fixture is unexpectedly small")
@@ -309,6 +333,12 @@ def browser_run(browser, root, functional=False, fixture_root=None):
         if os.environ.get("MEDIA_SNIPER_E2E_LARGE") == "1":
             large=subprocess.run([sys.executable,os.path.join(REPO_ROOT,"scripts","e2e_large_output_test.py")],env=os.environ.copy())
             if large.returncode!=0:
+                log.flush(); print_log_tail(log_path)
+                return False
+        # Opt-in: a referer-gated CDN whose segments are served as .jpg.
+        if os.environ.get("MEDIA_SNIPER_E2E_REFERER") == "1":
+            ref=subprocess.run([sys.executable,os.path.join(REPO_ROOT,"scripts","e2e_referer_gated_test.py")],env=os.environ.copy(),timeout=420)
+            if ref.returncode!=0:
                 log.flush(); print_log_tail(log_path)
                 return False
         # Opt-in: live recording (start, stop, keep the partial file).

@@ -828,6 +828,7 @@ async function offscreenFfmpegRun(req) {
     url: req.url,
     playlistText: req.playlistText || null,
     audioUrl: req.audioUrl || null,
+    audioPlaylistText: req.audioPlaylistText || null,
     audioFileUrl: req.audioFileUrl || null,
     ext: req.ext || 'mp4',
     live: !!req.live,
@@ -1031,6 +1032,7 @@ async function runHlsJob(jobKey, playlistUrl) {
   // The single-source case then works (verified: 1080x1920 h264, rc=0).
   // Live keeps the stream URL, because ffmpeg must re-read the playlist.
   let playlistText = null;
+  let audioPlaylistText = null;
   let audioFileUrl = null;
   if (!media.live) {
     playlistText = L.rewriteHlsUrisAbs(mediaText, mediaUrl).text;
@@ -1047,16 +1049,23 @@ async function runHlsJob(jobKey, playlistUrl) {
         const audioText = await swFetchText(job.audioUrl, audioHeadersForRendition);
         const audioParsed = L.parseM3u8(audioText, job.audioUrl);
         if (audioParsed.segments && audioParsed.segments.length) {
-          const made = await offscreenHlsBuild({
-            playlistUrl: job.audioUrl,
-            segments: audioParsed.segments.map(function (s) { return s.url; }),
-            initUrl: audioParsed.initUrl || null,
-            headers: audioHeadersForRendition,
-            mime: 'audio/mp4',
-            ext: 'm4a',
-            disk: true,
-          }, job);
-          audioFileUrl = made.url;
+          if (audioParsed.encrypted && /^#EXT-X-KEY:(?:[^\r\n]*,)?METHOD=AES-128(?:,|$)/m.test(audioText)) {
+            // Raw concat would produce ciphertext, not a readable audio input.
+            // Keep the key/IV/sequence metadata and let the HLS demuxer prepare
+            // this audio track before it opens the network video input.
+            audioPlaylistText = L.rewriteHlsUrisAbs(audioText, job.audioUrl).text;
+          } else {
+            const made = await offscreenHlsBuild({
+              playlistUrl: job.audioUrl,
+              segments: audioParsed.segments.map(function (s) { return s.url; }),
+              initUrl: audioParsed.initUrl || null,
+              headers: audioHeadersForRendition,
+              mime: 'audio/mp4',
+              ext: 'm4a',
+              disk: true,
+            }, job);
+            audioFileUrl = made.url;
+          }
         }
       } catch (err) {
         audioFileUrl = null;
@@ -1069,6 +1078,7 @@ async function runHlsJob(jobKey, playlistUrl) {
     url: mediaUrl,
     playlistText: playlistText,
     audioUrl: (twoSource && !audioFileUrl) ? job.audioUrl : null,
+    audioPlaylistText: audioPlaylistText,
     audioFileUrl: audioFileUrl,
     ext: job.ext,
     live: !!media.live,

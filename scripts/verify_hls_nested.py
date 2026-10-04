@@ -41,6 +41,7 @@ PREGRANTED = os.environ.get("MEDIA_SNIPER_E2E_PREGRANTED") == "1"
 CASES = [
     ("RootRel HLS", FIX + "/hls/rootrel.m3u8", ["video"], "hls"),
     ("Two Source HLS", FIX + "/hls/twosource.m3u8", ["video", "audio"], "hls"),
+    ("Encrypted Two Source HLS", FIX + "/hls/twosource-aes.m3u8", ["video", "audio"], "hls"),
     # SegmentList DASH: this shape used to resolve to "one segment = the .mpd
     # itself", so the job could not produce anything at all.
     ("DASH SegmentList", FIX + "/hls/dash/stream.mpd", ["video", "audio"], "dash"),

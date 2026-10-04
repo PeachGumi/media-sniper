@@ -373,6 +373,8 @@ async function runFfmpegJob(msg, sendResponse) {
   resetFetchStats();
   const chunks = []; // legacy in-memory assembly, used only without OPFS
   let sink = null;
+  let audioSink = null;
+  let audioTempUrl = null;
   let libav = null;
   const startedAt = Date.now();
   const releaseKeepalive = beginMediaJobKeepalive();
@@ -442,7 +444,47 @@ async function runFfmpegJob(msg, sendResponse) {
     const videoInput = await writePlaylistInput(libav, 'hls-v.m3u8', msg.playlistText);
     args.push('-i', videoInput || ('jsfetch:' + msg.url));
     let secondInput = null;
-    if (msg.audioFileUrl) {
+    if (msg.audioPlaylistText) {
+      // AES-128 separate audio cannot be raw-concatenated. Demux it FIRST,
+      // within this same reserved job, so the main pass still opens just one
+      // network input. Recovery must never mistake audio-only output for the
+      // finished video artifact.
+      const audioInput = await writePlaylistInput(libav, 'hls-a.m3u8', msg.audioPlaylistText);
+      if (!audioInput) throw new Error('audio playlist could not be prepared');
+      const audioName = 'hls-a.m4a';
+      const outputWriter = libav.onwrite;
+      if (sinkApi && typeof sinkApi.createOutputSink === 'function') {
+        try { audioSink = await sinkApi.createOutputSink('m4a'); } catch (_) { audioSink = null; }
+      }
+      if (audioSink) {
+        await libav.mkwriterdev(audioName);
+        libav.onwrite = function (name, position, data) { audioSink.write(name, position, data); };
+      }
+      if (current.abortRequested) throw new Error('media job stopped during audio preparation');
+      activeFetchContext = installFetchContext(msg);
+      const audioRc = await libav.ffmpeg([
+        '-y', '-nostdin', '-protocol_whitelist', hlsProtocols, '-analyzeduration', '10M',
+        '-f', 'hls', '-i', audioInput, '-map', '0:a:0', '-c', 'copy',
+        '-avoid_negative_ts', 'make_zero', '-f', 'mp4', audioName,
+      ]);
+      if (audioRc !== 0) throw new Error('audio ffmpeg failed (rc=' + audioRc + ')' + ffmpegFailureDetail());
+      if (current.abortRequested) throw new Error('media job stopped during audio preparation');
+      if (audioSink) {
+        if (!audioSink.bytes()) throw new Error('audio ffmpeg produced no output');
+        const audioMade = await audioSink.finish();
+        audioSink = null;
+        audioTempUrl = audioMade.url;
+        // Replace the completed writer device before registering the file reader
+        // under the same name; libav otherwise rejects it with EEXIST.
+        await libav.unlink(audioName);
+        secondInput = await localTrackInput(libav, audioName, audioTempUrl);
+      } else {
+        secondInput = audioName; // OPFS unavailable: ordinary MEMFS output
+      }
+      libav.onwrite = outputWriter;
+      if (current.abortRequested) throw new Error('media job stopped during audio preparation');
+      resetFfmpegLog();
+    } else if (msg.audioFileUrl) {
       // Two network inputs cannot be open at once in this build: with
       // `-i jsfetch:<video> -i jsfetch:<audio>` the second input's very first
       // segment fails to open ("Error when loading first segment"), so a
@@ -548,10 +590,16 @@ async function runFfmpegJob(msg, sendResponse) {
     lastDone = { jobId: jobId, url: blobUrl, size: total, ext: msg.ext || 'mp4', partial: !!(rc !== 0 && (interrupted || msg.live)) };
     sendResponse({ url: blobUrl, size: total, partial: lastDone.partial });
   } catch (e) {
+    if (audioSink) {
+      try { await audioSink.abort(); } catch (_) { /* best effort */ }
+      audioSink = null;
+    }
     if (sink) { try { await sink.abort(); } catch (err) { /* best effort */ } }
     sendResponse(hostAccessError(String(e && e.message || e)));
   } finally {
     if (current && current.timer) clearInterval(current.timer);
+    if (audioSink) { try { await audioSink.abort(); } catch (_) { /* best effort */ } }
+    if (audioTempUrl) { try { URL.revokeObjectURL(audioTempUrl); } catch (_) { /* best effort */ } }
     current = null;
     activeHeaders = {};
     activeFetchContext = null;
